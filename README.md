@@ -2,6 +2,23 @@
 
 A 3D skateboarding game in C++ set in a stylized San Francisco. Skate down Twin Peaks, across the Golden Gate and Bay Bridges, down Lombard Street, and through the Financial District. There's traffic, cable cars, pedestrians, and views across the bay.
 
+![Skating the Golden Gate Bridge at golden hour](docs/screenshots/golden_gate.jpg)
+
+## Screenshots
+
+| | |
+|---|---|
+| ![Downtown at golden hour: shops, billboards and traffic](docs/screenshots/downtown_golden.jpg) | ![The same street at night, windows and neon lit](docs/screenshots/downtown_night.jpg) |
+| **Downtown at golden hour:** shops with lettered signs, rooftop billboards, traffic | **The same street at night:** lit windows, glowing signs and billboards |
+| ![Flying a seaplane past the Golden Gate](docs/screenshots/seaplane.jpg) | ![Riding a jet ski on the bay, Bay Bridge ahead](docs/screenshots/jetski.jpg) |
+| **Seaplane:** take off from the water and fly over the bay | **Jet ski:** find one moored on the shore and ride the bay |
+| ![A cop grabs the skater: struggle to break free](docs/screenshots/police.jpg) | ![Gondola over Mt Sutro, with Sutro Tower](docs/screenshots/gondola.jpg) |
+| **Cop chase:** officers on foot and a struggle to break free | **Gondolas** over the hills, by Sutro Tower |
+| ![A pedal bus with riders around the bar](docs/screenshots/pedal_bus.jpg) | ![A dog walker on the sidewalk](docs/screenshots/dog.jpg) |
+| **Pedal buses** crawling through North Beach | **Dog walkers** (and cats on the stoops) |
+
+![The start screen: pick a landmark, the time of day and free roam or cop chase](docs/screenshots/title.jpg)
+
 ## Build & run (macOS)
 
 ```sh

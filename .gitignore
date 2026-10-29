@@ -1,0 +1,10 @@
+# build output
+build/
+sfskate
+
+# autotest screenshots
+shot_*.png
+fly_*.png
+ski_*.png
+
+.DS_Store

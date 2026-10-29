@@ -1,0 +1,851 @@
+#include "traffic.h"
+#include "models.h"
+
+static RNG gR(20240);
+static const World* gTrainWorld = nullptr;
+
+static void colorPed(Ped& p, RNG& r) {
+    static const Color SKIN[] = {{240, 205, 175, 255}, {214, 170, 134, 255}, {170, 120, 85, 255}, {120, 80, 55, 255}, {90, 60, 40, 255}};
+    static const Color HAIR[] = {{30, 25, 20, 255}, {80, 50, 30, 255}, {200, 170, 100, 255}, {120, 120, 120, 255}, {20, 20, 20, 255}};
+    static const Color SHIRT[] = {{200, 50, 50, 255}, {40, 90, 170, 255}, {240, 240, 235, 255}, {30, 30, 35, 255}, {240, 200, 60, 255},
+                                  {60, 140, 90, 255}, {150, 80, 160, 255}, {230, 120, 40, 255}, {120, 130, 140, 255}, {190, 60, 110, 255}};
+    static const Color PANTS[] = {{40, 50, 80, 255}, {30, 30, 32, 255}, {120, 100, 80, 255}, {90, 90, 95, 255}, {60, 70, 110, 255}};
+    p.skin = SKIN[r.irange(0, 4)];
+    p.hair = HAIR[r.irange(0, 4)];
+    p.shirt = SHIRT[r.irange(0, 9)];
+    p.pants = PANTS[r.irange(0, 4)];
+    p.scale = r.range(0.9f, 1.08f);
+    p.speed = r.range(1.0f, 1.6f);
+    p.phase = r.range(0, 6);
+}
+
+static int pickCarType(RNG& r, bool sf) {
+    float x = r.f();
+    if (x < 0.5f) return CT_SEDAN;
+    if (x < 0.72f) return CT_SUV;
+    if (x < 0.8f) return CT_VAN;
+    if (x < 0.9f) return CT_TAXI;
+    return sf ? CT_BUS : CT_SEDAN;
+}
+
+// A rounded corner on a lane `off` metres right of a route that turns at `v` from direction din to dout.
+// u runs 0..1 from R before the corner to R after it. Returns the position and writes the travel direction.
+static Vector2 cornerPos(Vector2 v, Vector2 din, Vector2 dout, float off, float u, float R, Vector2* tan) {
+    Vector2 rin = {-din.y, din.x}, rout = {-dout.y, dout.x};
+    Vector2 p0 = Vector2Add(v, Vector2Add(Vector2Scale(rin, off), Vector2Scale(din, -R)));
+    Vector2 p3 = Vector2Add(v, Vector2Add(Vector2Scale(rout, off), Vector2Scale(dout, R)));
+    float dp = Vector2DotProduct(din, dout), cr = din.x * dout.y - din.y * dout.x;
+    float a, b;
+    if (dp < -0.95f) a = b = (R + fabsf(off)) / 0.75f;     // U-turn: a loop reaching `off` past the corner
+    else if (fabsf(cr) < 1e-4f) a = b = R * 0.55f;          // straight on
+    else {                                                  // ease toward where the two lane lines meet
+        Vector2 w = Vector2Subtract(p3, p0);
+        a = std::max(0.3f, (w.x * dout.y - w.y * dout.x) / cr) * 0.55f;
+        b = std::max(0.3f, (din.x * w.y - din.y * w.x) / cr) * 0.55f;
+    }
+    Vector2 p1 = Vector2Add(p0, Vector2Scale(din, a)), p2 = Vector2Subtract(p3, Vector2Scale(dout, b));
+    u = clampf(u, 0, 1);
+    float m = 1 - u;
+    Vector2 pos = Vector2Add(Vector2Add(Vector2Scale(p0, m * m * m), Vector2Scale(p1, 3 * m * m * u)),
+                             Vector2Add(Vector2Scale(p2, 3 * m * u * u), Vector2Scale(p3, u * u * u)));
+    Vector2 d = Vector2Add(Vector2Add(Vector2Scale(Vector2Subtract(p1, p0), 3 * m * m), Vector2Scale(Vector2Subtract(p2, p1), 6 * m * u)),
+                           Vector2Scale(Vector2Subtract(p3, p2), 3 * u * u));
+    if (tan) *tan = Vector2Length(d) > 1e-5f ? Vector2Normalize(d) : (u < 0.5f ? din : dout);
+    return pos;
+}
+
+// A point on a lane `off` metres right of a path (facing +s), with its bends rounded off.
+static Vector2 pathLane(const Path& P, float s, float off, Vector2* tan) {
+    s = clampf(s, 0, P.len);
+    for (size_t k = 1; k + 1 < P.p.size(); k++) {
+        if (fabsf(s - P.cum[k]) > 40) continue;
+        Vector2 din = Vector2Normalize(Vector2Subtract(P.p[k], P.p[k - 1]));
+        Vector2 dout = Vector2Normalize(Vector2Subtract(P.p[k + 1], P.p[k]));
+        float c = clampf(Vector2DotProduct(din, dout), -1, 1);
+        if (c > 0.9995f) continue;
+        float th = std::min(tanf(acosf(c) * 0.5f), 4.f);
+        float R = std::min({0.45f * (P.cum[k] - P.cum[k - 1]), 0.45f * (P.cum[k + 1] - P.cum[k]), std::max(8.f, fabsf(off) * th + 4)});
+        if (R > 0.5f && fabsf(s - P.cum[k]) < R) return cornerPos(P.p[k], din, dout, off, (s - P.cum[k] + R) / (2 * R), R, tan);
+    }
+    Vector2 d;
+    Vector2 p = P.at(s, &d);
+    if (tan) *tan = d;
+    return Vector2Add(p, Vector2Scale({-d.y, d.x}, off));
+}
+
+// Pick which way a car leaves grid node (i, j), having arrived heading d. Prefers going straight; U-turns only at dead ends.
+static int pickGridDir(const Grid& g, int i, int j, int d, RNG& r) {
+    int rev = d ^ 1;
+    int opts[4], wts[4], n = 0, tot = 0;
+    for (int k = 0; k < 4; k++) {
+        if (k == rev || !g.edge(i, j, k)) continue;
+        opts[n] = k; wts[n] = k == d ? 4 : 1; tot += wts[n]; n++;
+    }
+    if (n == 0) return rev;
+    int x = r.irange(0, tot - 1);
+    for (int k = 0; k < n; k++) { if (x < wts[k]) return opts[k]; x -= wts[k]; }
+    return opts[0];
+}
+
+static Color carBody(int type, RNG& r) {
+    if (type == CT_TAXI) return col(242, 196, 30);
+    return randomCarColor(r);
+}
+
+void Traffic::init(World& w) {
+    gTrainWorld = &w;
+    RNG& r = gR;
+    auto spawnGrid = [&](const Grid* g, int n, bool sf) {
+        for (int k = 0; k < n * 20 && n > 0; k++) {
+            int i = r.irange(0, g->ni - 1), j = r.irange(0, g->nj - 1), d = r.irange(0, 3);
+            if (!g->edge(i, j, d)) continue;
+            Car c;
+            c.mode = 0; c.g = g; c.i = i; c.j = j; c.d = d; c.t = r.f();
+            c.type = pickCarType(r, sf);
+            c.body = carBody(c.type, r);
+            c.maxSpeed = c.type == CT_BUS ? r.range(7, 9) : r.range(9, 13);
+            c.speed = c.maxSpeed;
+            c.lane = 2.4f;
+            cars.push_back(c);
+            n--;
+        }
+    };
+    spawnGrid(&w.sf, 1300, true);
+    spawnGrid(&w.oak, 170, false);
+    spawnGrid(&w.mp, 190, false);
+    for (int pi = 0; pi < (int)w.carPaths.size(); pi++) {
+        const Path& P = w.carPaths[pi];
+        int lanes = w.carPathLanes[pi];
+        bool market = w.carPathKind[pi] == 1;
+        int n = (int)(P.len / (market ? 24.f : 18.f));
+        for (int k = 0; k < n; k++) {
+            Car c;
+            c.mode = 1; c.path = pi; c.s = r.range(std::min(60.f, P.len * 0.2f), std::max(P.len - 60, P.len * 0.8f)); c.pdir = r.chance(0.5f) ? 1 : -1;
+            int ln = r.irange(0, lanes - 1);
+            if (market) {
+                c.lane = ln == 0 ? 3.0f : 7.0f;
+                c.type = ln == 0 && r.chance(0.3f) ? CT_STREETCAR : pickCarType(r, true);
+            } else {
+                c.lane = (P.p[0].x < -1000 ? 2.0f : 2.5f) + ln * 3.5f;
+                if (w.carPathKind[pi] == 2) c.lane = 2.2f + ln * 3.6f;
+                c.type = pickCarType(r, false);
+                if (c.type == CT_BUS && r.chance(0.6f)) c.type = CT_SUV;
+            }
+            if (c.type == CT_STREETCAR) {
+                static const Color FL[] = {col(230, 120, 40), col(40, 110, 80), col(200, 40, 50), col(240, 200, 60), col(80, 120, 170)};
+                c.body = FL[r.irange(0, 4)];
+                c.lane = 3.0f;
+            } else c.body = carBody(c.type, r);
+            c.maxSpeed = market ? r.range(8, 11) : r.range(17, 23);
+            if (c.type == CT_STREETCAR) c.maxSpeed = 7;
+            c.speed = c.maxSpeed;
+            cars.push_back(c);
+        }
+    }
+    for (int pi = 0; pi < (int)w.cablePaths.size(); pi++)
+        for (int k = 0; k < 3; k++) {
+            Car c;
+            c.mode = 2; c.path = pi; c.s = w.cablePaths[pi].len * (k + 0.5f) / 3; c.pdir = k % 2 ? 1 : -1;
+            c.type = CT_CABLECAR; c.body = col(120, 30, 35); c.lane = 0; c.maxSpeed = 4.5f; c.speed = 4.5f;
+            cars.push_back(c);
+        }
+    for (int pi = 0; pi < (int)w.tramPaths.size(); pi++) {
+        int n = std::max(2, (int)(w.tramPaths[pi].len / 450.f));
+        for (int k = 0; k < n; k++) {
+            Car c;
+            c.mode = 3; c.path = pi; c.s = w.tramPaths[pi].len * (k + 0.5f) / n; c.pdir = k % 2 ? 1 : -1;
+            c.type = CT_LRV; c.body = col(205, 207, 212); c.lane = 2.4f; c.maxSpeed = r.range(9, 11); c.speed = c.maxSpeed;
+            c.honkCD = 0;
+            cars.push_back(c);
+        }
+    }
+
+    // pedal buses: slow party bikes on the flatter streets of the north side (the Wharf, North Beach, the Marina)
+    {
+        static const Color PARTY[] = {col(220, 50, 60), col(30, 160, 160), col(130, 60, 190), col(240, 140, 30), col(120, 190, 50), col(230, 80, 160)};
+        int n = 34;
+        for (int k = 0; k < 4000 && n > 0; k++) {
+            const Grid* g = &w.sf;
+            int i = r.irange(0, g->ni - 1), j = r.irange(0, g->nj - 1), d = r.irange(0, 3);
+            if (!g->edge(i, j, d)) continue;
+            Vector2 a = g->node(i, j), b = g->node(i + DI[d], j + DJ[d]);
+            if (a.y > gz(9) || fabsf(w.terrain(a.x, a.y) - w.terrain(b.x, b.y)) > 5.f) continue;
+            Car c;
+            c.mode = 0; c.g = g; c.i = i; c.j = j; c.d = d; c.t = r.f();
+            c.type = CT_PEDALBUS;
+            c.body = PARTY[r.irange(0, 5)];
+            c.maxSpeed = r.range(3.0f, 4.2f);
+            c.speed = c.maxSpeed;
+            c.lane = 2.4f;
+            c.pedal = r.range(0, TAU_F);
+            cars.push_back(c);
+            n--;
+        }
+    }
+
+    // pedestrians
+    auto spawnPeds = [&](const Grid* g, int n) {
+        for (int k = 0; k < n * 20 && n > 0; k++) {
+            int i = r.irange(0, g->ni - 1), j = r.irange(0, g->nj - 1);
+            if (!g->nodeOk(i, j)) continue;
+            bool any = false;
+            for (int d = 0; d < 4; d++) any |= g->edge(i, j, d);
+            if (!any) continue;
+            Ped p;
+            p.mode = 0; p.g = g; p.i = i; p.j = j;
+            p.qx = r.chance(0.5f) ? 1 : -1; p.qz = r.chance(0.5f) ? 1 : -1;
+            colorPed(p, r);
+            placeGridPed(p, r);
+            peds.push_back(p);
+            n--;
+        }
+    };
+    spawnPeds(&w.sf, 4000);
+    spawnPeds(&w.oak, 420);
+    spawnPeds(&w.mp, 520);
+    // Caltrain: three trains working the line
+    if (!w.stations.empty()) {
+        trains.push_back({w.stations[0].s, 1, 0, 8});
+        trains.push_back({w.stations.back().s, -1, 0, 20});
+        trains.push_back({w.stations[2].s, 1, 0, 2});
+    }
+    for (int pi = 0; pi < (int)w.pedPaths.size(); pi++) {
+        const Path& P = w.pedPaths[pi];
+        int n = (int)(P.len / 11.f);
+        for (int k = 0; k < n; k++) {
+            Ped p;
+            p.mode = 1; p.path = pi; p.s = r.range(0, P.len); p.pdir = r.chance(0.5f) ? 1 : -1; p.lane = r.range(-1.0f, 1.0f);
+            colorPed(p, r);
+            peds.push_back(p);
+        }
+    }
+    for (auto& t : w.tourists) {
+        Ped p;
+        p.mode = 2; p.pos = t; p.from = {t.x, t.z}; p.yaw = r.range(-PI, PI);
+        colorPed(p, r);
+        peds.push_back(p);
+    }
+
+    // dogs: about one walker in ten has one on a leash (seeded per person, so nothing else in the city moves)
+    static const Color COAT[] = {{214, 170, 90, 255}, {120, 80, 50, 255}, {30, 30, 32, 255}, {236, 232, 222, 255}, {150, 150, 155, 255},
+                                 {190, 120, 60, 255}, {90, 60, 40, 255}, {230, 200, 150, 255}};
+    for (size_t i = 0; i < peds.size(); i++) {
+        Ped& p = peds[i];
+        uint32_t h = hashu((int)i, 13, 3);
+        float chance = p.mode == 0 ? 0.11f : p.mode == 1 ? 0.07f : 0.05f;
+        if ((h % 1000) / 1000.f >= chance) continue;
+        p.pet = 1;
+        p.petC = COAT[(h >> 10) % 8];
+        p.petC2 = (h >> 14) & 1 ? scaleC(p.petC, 0.6f) : Color{40, 34, 30, 255};
+        p.petS = 0.6f + 0.6f * (((h >> 16) % 100) / 100.f);
+        p.speed = std::min(p.speed, 1.3f);   // strolling with the dog
+    }
+    // cats: on the front steps of a few houses
+    static const Color FUR[] = {{30, 30, 32, 255}, {214, 130, 50, 255}, {130, 130, 135, 255}, {235, 232, 225, 255}, {120, 90, 60, 255}, {235, 232, 225, 255}};
+    for (size_t i = 0; i < w.houses.size(); i++) {
+        uint32_t h = hashu((int)i, 77, 9);
+        if (h % 100 >= 3) continue;
+        const House& hs = w.houses[i];
+        float x = hs.doorOut.x + ((int)((h >> 8) % 100) - 50) * 0.01f, z = hs.doorOut.y + ((int)((h >> 15) % 100) - 50) * 0.01f;
+        Cat c;
+        c.pos = {x, w.ground(x, z, w.terrain(x, z) + 3.f), z};
+        c.yaw = ((h >> 20) % 628) * 0.01f;
+        c.pose = (h >> 4) & 1;
+        int k = (h >> 24) % 6;
+        c.c = FUR[k];
+        c.patch = k == 5 ? Color{214, 130, 50, 255} : (k == 4 ? Color{70, 50, 34, 255} : c.c);   // calico and tabby markings
+        c.t = (h % 97) * 0.1f;
+        cats.push_back(c);
+    }
+}
+
+void Traffic::placeGridPed(Ped& p, RNG& r) {
+    Vector2 n = p.g->node(p.i, p.j);
+    p.from = p.to = {n.x + p.qx * p.g->walkOff, n.y + p.qz * p.g->walkOff};
+    p.t = 1;
+    nextPedMove(p, r);
+}
+
+void Traffic::nextPedMove(Ped& p, RNG& r) {
+    const Grid& g = *p.g;
+    struct Opt { int ni, nj, qx, qz; float w; };
+    Opt opts[4];
+    int n = 0;
+    int dx = p.qx > 0 ? 0 : 1, dz = p.qz > 0 ? 2 : 3;
+    if (g.edge(p.i, p.j, dx)) opts[n++] = {p.i + p.qx, p.j, -p.qx, p.qz, 3};
+    if (g.edge(p.i, p.j, dz)) opts[n++] = {p.i, p.j + p.qz, p.qx, -p.qz, 3};
+    if (g.edge(p.i, p.j, 2) || g.edge(p.i, p.j, 3)) opts[n++] = {p.i, p.j, -p.qx, p.qz, 0.8f};
+    if (g.edge(p.i, p.j, 0) || g.edge(p.i, p.j, 1)) opts[n++] = {p.i, p.j, p.qx, -p.qz, 0.8f};
+    if (n == 0) { p.mode = 2; return; }
+    float tot = 0;
+    for (int k = 0; k < n; k++) tot += opts[k].w;
+    float x = r.f() * tot;
+    int pick = 0;
+    for (int k = 0; k < n; k++) { if (x < opts[k].w) { pick = k; break; } x -= opts[k].w; }
+    Opt o = opts[pick];
+    p.from = p.to;
+    p.i = o.ni; p.j = o.nj; p.qx = o.qx; p.qz = o.qz;
+    Vector2 nd = g.node(p.i, p.j);
+    p.to = {nd.x + p.qx * g.walkOff, nd.y + p.qz * g.walkOff};
+    p.len = std::max(0.5f, Vector2Distance(p.from, p.to));
+    p.t = 0;
+}
+
+void Traffic::update(float dt, World& w, const Player& pl) {
+    RNG& r = gR;
+    evHonk = false;
+    for (auto& c : cats) {
+        float dx = c.pos.x - pl.pos.x, dz = c.pos.z - pl.pos.z, d2 = dx * dx + dz * dz;
+        if (d2 > 80 * 80) continue;
+        c.t += dt;
+        if (c.flee > 0) {   // bolting away, around anything in the way
+            c.flee -= dt;
+            float nx = c.pos.x + cosf(c.yaw) * 6.5f * dt, nz = c.pos.z + sinf(c.yaw) * 6.5f * dt;
+            float ny = w.ground(nx, nz, c.pos.y + 0.6f);
+            if (w.solidAt({nx, ny + 0.25f, nz}) || fabsf(ny - c.pos.y) > 0.6f || w.isWater(nx, nz, ny)) c.yaw += 1.6f;
+            else c.pos = {nx, ny, nz};
+            if (c.flee <= 0) { c.pose = 0; c.yaw += PI; }   // safe: sit down and look back
+        } else if (d2 < 25 && pl.hspeed() > 3.f && fabsf(c.pos.y - pl.pos.y) < 2) {
+            c.flee = 1.4f; c.pose = 2;
+            c.yaw = atan2f(dz, dx) + ((int)(c.t * 10) % 2 ? 0.5f : -0.5f);
+        }
+    }
+    Vector3 pp = pl.pos;
+    for (auto& c : cars) {
+        float distP = sqrtf(sq(c.pos.x - pp.x) + sq(c.pos.z - pp.z));
+        // target speed: stop for the skater and for cars ahead
+        float target = c.maxSpeed;
+        if (c.stopT > 0) { c.stopT -= dt; target = 0; }
+        Vector2 f = {cosf(c.yaw), sinf(c.yaw)};
+        if (c.placed && distP < 40) {
+            float rx = pp.x - c.pos.x, rz = pp.z - c.pos.z;
+            float along = rx * f.x + rz * f.y, lat = fabsf(-rx * f.y + rz * f.x);
+            float look = 6 + c.speed * 0.9f + carModel(c.type).halfLen;
+            if (along > 0 && along < look && lat < 2.3f && fabsf(pp.y - c.pos.y) < 3) {
+                target = 0;
+                if (c.honkCD <= 0 && c.speed > 3 && along < 14) { evHonk = true; c.honkCD = 4; }
+            }
+        }
+        c.honkCD -= dt;
+        if (c.placed && distP < 350) {
+            for (auto& o : cars) {
+                if (&o == &c) continue;
+                float rx = o.pos.x - c.pos.x, rz = o.pos.z - c.pos.z;
+                if (fabsf(rx) > 20 || fabsf(rz) > 20) continue;
+                float along = rx * f.x + rz * f.y, lat = fabsf(-rx * f.y + rz * f.x);
+                float gap = carModel(c.type).halfLen + carModel(o.type).halfLen + 2.5f;
+                if (along > 0 && along < gap + c.speed * 0.6f && lat < 1.6f && fabsf(o.pos.y - c.pos.y) < 3) {
+                    float of = cosf(o.yaw) * f.x + sinf(o.yaw) * f.y;
+                    if (of > 0.3f) target = std::min(target, along < gap ? 0.f : o.speed);
+                }
+            }
+        }
+        // slow down for corners and U-turns, braking gently on the way in
+        {
+            float cap = 1e9f, dist = 0;
+            if (c.mode == 0 && c.nd >= 0) {
+                float u = c.t * c.g->sp;
+                if (c.pd >= 0 && c.pd != c.d && u < 10) cap = c.pd == (c.d ^ 1) ? 3.5f : 6.f;      // still finishing a turn
+                if (c.nd != c.d) { float k = c.nd == (c.d ^ 1) ? 3.5f : 6.f; dist = std::max(0.f, c.g->sp - 10 - u); cap = std::min(cap, sqrtf(k * k + 8 * dist)); }
+            } else if (c.mode == 1 && c.type != CT_STREETCAR) {
+                if (c.uturn >= 0) cap = 4;
+                else { const Path& P = w.carPaths[c.path]; dist = c.pdir > 0 ? P.len - c.s : c.s; cap = sqrtf(16 + 8 * dist); }
+            }
+            target = std::min(target, cap);
+        }
+        float dv = target - c.speed;
+        c.speed += clampf(dv, -14 * dt, 3.5f * dt);
+        c.speed = std::max(c.speed, 0.f);
+        if (c.type == CT_PEDALBUS) c.pedal += c.speed * dt * 1.7f;
+        c.braking = dv < -0.5f;
+
+        Vector2 tp, tan = {cosf(c.yaw), sinf(c.yaw)};
+        bool deck = false;
+        auto dirOf = [](int d) { return Vector2{(float)DI[d], (float)DJ[d]}; };
+        if (c.mode == 0) {
+            const Grid& g = *c.g;
+            if (c.pd < 0) c.pd = c.d;
+            if (c.nd < 0) c.nd = pickGridDir(g, c.i + DI[c.d], c.j + DJ[c.d], c.d, r);
+            c.t += c.speed * dt / g.sp;
+            int guard = 0;
+            while (c.t >= 1 && guard++ < 4) {
+                c.t -= 1;
+                c.i += DI[c.d]; c.j += DJ[c.d];
+                c.pd = c.d; c.d = c.nd;
+                c.nd = pickGridDir(g, c.i + DI[c.d], c.j + DJ[c.d], c.d, r);
+            }
+            // the turn is decided a block ahead, so each intersection is driven as one smooth curve
+            Vector2 a = g.node(c.i, c.j), b = g.node(c.i + DI[c.d], c.j + DJ[c.d]);
+            float u = c.t * g.sp, R = std::min(10.f, g.sp * 0.3f);
+            if (u > g.sp - R) tp = cornerPos(b, dirOf(c.d), dirOf(c.nd), c.lane, (u - g.sp + R) / (2 * R), R, &tan);
+            else if (u < R) tp = cornerPos(a, dirOf(c.pd), dirOf(c.d), c.lane, (u + R) / (2 * R), R, &tan);
+            else {
+                Vector2 right = {(float)-DJ[c.d], (float)DI[c.d]};
+                tp = Vector2Add(Vector2Lerp(a, b, c.t), Vector2Scale(right, c.lane));
+                tan = dirOf(c.d);
+            }
+        } else {
+            const Path& P = c.mode == 1 ? w.carPaths[c.path] : (c.mode == 3 ? w.tramPaths[c.path] : w.cablePaths[c.path]);
+            deck = P.onDeck;
+            // trams and cable cars have a cab at each end, so they just change ends; road vehicles U-turn
+            bool rail = c.mode >= 2 || c.type == CT_STREETCAR;
+            float step = c.speed * dt, Lu = PI * std::max(c.lane, 1.f);
+            if (c.uturn >= 0) {
+                c.uturn += step;
+                if (c.uturn >= Lu) { c.uturn = -1; c.pdir = -c.pdir; }
+            } else {
+                float before = c.s;
+                c.s += c.pdir * step;
+                c.xover += step;
+                if (c.s > P.len || c.s < 0) {
+                    c.s = clampf(c.s, 0, P.len);
+                    if (rail) { c.pdir = -c.pdir; c.yaw = wrapPi(c.yaw + PI); c.xover = 0; }
+                    else c.uturn = 0;
+                }
+                // streetcars and cable cars pause at stops along the line
+                if (c.mode >= 2 && floorf(before / 220.f) != floorf(c.s / 220.f) && c.stopT <= 0) c.stopT = 6;
+                if (c.mode >= 2 && (c.s == 0 || c.s == P.len) && c.stopT <= 0 && c.speed > 2) c.stopT = 8;
+            }
+            if (c.uturn >= 0) {
+                bool atEnd = c.s > P.len * 0.5f;
+                size_t n = P.p.size();
+                Vector2 e = atEnd ? P.p[n - 1] : P.p[0];
+                Vector2 din = atEnd ? Vector2Normalize(Vector2Subtract(P.p[n - 1], P.p[n - 2])) : Vector2Normalize(Vector2Subtract(P.p[0], P.p[1]));
+                tp = cornerPos(e, din, Vector2Negate(din), c.lane, c.uturn / Lu, 0, &tan);
+            } else {
+                // after reversing, a tram eases across to the other track over its first 45 m
+                auto lanePt = [&](float s, float xo) {
+                    float f = rail ? -1 + 2 * smooth01(0, 45, xo) : 1.f;
+                    return pathLane(P, s, c.pdir * c.lane * f, nullptr);
+                };
+                tp = lanePt(c.s, c.xover);
+                float s2 = c.s + c.pdir * 0.5f;
+                Vector2 dd = s2 >= 0 && s2 <= P.len ? Vector2Subtract(lanePt(s2, c.xover + 0.5f), tp)
+                                                    : Vector2Subtract(tp, lanePt(c.s - c.pdir * 0.5f, c.xover - 0.5f));
+                if (Vector2Length(dd) > 1e-4f) tan = Vector2Normalize(dd);
+            }
+        }
+        Vector2 cur = {c.pos.x, c.pos.z};
+        if (!c.placed) cur = tp;
+        Vector2 np = Vector2Lerp(cur, tp, c.placed ? 1 - expf(-dt * 7) : 1.f);
+        // face along the route itself, never toward wherever the target point happened to jump
+        c.yaw = wrapPi(lerpAngle(c.yaw, atan2f(tan.y, tan.x), c.placed ? 1 - expf(-dt * 10) : 1.f));
+        auto H = [&](float x, float z) { return deck ? w.ground(x, z, 1e5f) : w.terrain(x, z) + 0.08f; };
+        float y = H(np.x, np.y);
+        float hl = carModel(c.type).halfLen * 0.8f;
+        float yf = H(np.x + cosf(c.yaw) * hl, np.y + sinf(c.yaw) * hl), yb = H(np.x - cosf(c.yaw) * hl, np.y - sinf(c.yaw) * hl);
+        c.pitch = atan2f(yf - yb, 2 * hl);
+        c.pos = {np.x, (yf + yb) * 0.5f * 0.5f + y * 0.5f, np.y};
+        c.placed = true;
+    }
+
+    for (auto& p : peds) {
+        float dP2 = sq(p.pos.x - pp.x) + sq(p.pos.z - pp.z);
+        if (p.knock > 0) { p.knock -= dt; continue; }
+        // step aside when a skater comes flying at you
+        if (dP2 < 64 && pl.hspeed() > 3) {
+            Vector2 pv = pl.state == Player::AIR ? Vector2{pl.vel.x, pl.vel.z} : Vector2{cosf(pl.yaw) * pl.speed, sinf(pl.yaw) * pl.speed};
+            Vector2 rel = {p.pos.x - pp.x, p.pos.z - pp.z};
+            float sp = Vector2Length(pv);
+            if (sp > 0.1f && Vector2DotProduct(pv, rel) / sp > 0.5f * sqrtf(dP2)) {
+                Vector2 perp = {-pv.y / sp, pv.x / sp};
+                float side = Vector2DotProduct(perp, rel) > 0 ? 1.f : -1.f;
+                p.dodge = Vector2Lerp(p.dodge, Vector2Scale(perp, side * 1.8f), 1 - expf(-dt * 6));
+            }
+        } else p.dodge = Vector2Scale(p.dodge, expf(-dt * 0.6f));
+
+        Vector2 base;
+        float walk = 1;
+        if (p.mode == 0) {
+            p.t += p.speed * dt / p.len;
+            if (p.t >= 1) { p.t = 1; nextPedMove(p, r); }
+            base = Vector2Lerp(p.from, p.to, clampf(p.t, 0, 1));
+            Vector2 d = Vector2Subtract(p.to, p.from);
+            if (Vector2Length(d) > 0.1f) p.yaw = lerpAngle(p.yaw, atan2f(d.y, d.x), 1 - expf(-dt * 6));
+        } else if (p.mode == 1) {
+            const Path& P = w.pedPaths[p.path];
+            p.s += p.pdir * p.speed * dt;
+            if (p.s > P.len) { p.s = P.len; p.pdir = -1; }
+            if (p.s < 0) { p.s = 0; p.pdir = 1; }
+            Vector2 dir;
+            base = P.at(p.s, &dir);
+            dir = Vector2Scale(dir, (float)p.pdir);
+            base = Vector2Add(base, Vector2Scale({-dir.y, dir.x}, p.lane));
+            p.yaw = lerpAngle(p.yaw, atan2f(dir.y, dir.x), 1 - expf(-dt * 6));
+        } else {
+            base = p.from;
+            walk = 0;
+            p.idleTurn -= dt;
+            if (p.idleTurn < 0) { p.idleTurn = r.range(2, 7); p.yaw += r.range(-1.2f, 1.2f); }
+        }
+        if (walk > 0) p.phase += dt * p.speed * 5.2f;
+        float x = base.x + p.dodge.x, z = base.y + p.dodge.y;
+        float g = w.terrain(x, z);
+        p.pos = {x, w.ground(x, z, g), z};
+    }
+    // Caltrain: accelerate, brake for the next station, dwell, reverse at the ends
+    float lineEnd = w.railLen() - 25, lineStart = w.stations.empty() ? 0 : w.stations[0].s;
+    for (auto& t : trains) {
+        if (t.dwell > 0) { t.dwell -= dt; continue; }
+        float stop = t.dir > 0 ? lineEnd : lineStart;
+        for (auto& st : w.stations)
+            if ((st.s - t.s) * t.dir > 2 && fabsf(st.s - t.s) < fabsf(stop - t.s)) stop = st.s;
+        float dist = (stop - t.s) * t.dir;
+        float vt = std::min(38.f, sqrtf(2 * 1.1f * std::max(dist, 0.f)));
+        t.v += clampf(vt - t.v, -1.6f * dt, 0.9f * dt);
+        t.v = std::max(t.v, dist > 1 ? 1.5f : 0.f);
+        t.s += t.dir * t.v * dt;
+        if (dist < 0.6f) {
+            t.s = stop; t.v = 0; t.dwell = 16;
+            if (stop == lineEnd || stop == lineStart) { t.dir = -t.dir; t.dwell = 30; }
+        }
+    }
+}
+
+void Traffic::interact(Player& pl) {
+    evCrash = false;
+    if (pl.state == Player::BAIL) return;
+    for (auto& t : trains) {
+        for (int k = 0; k < 5; k++) {
+            float sc = t.s - t.dir * (k * 25.8f + 12.9f);
+            Vector2 d;
+            Vector3 c = gTrainWorld->trackPoint(sc, 2.4f * t.dir, &d);
+            float dx = pl.pos.x - c.x, dz = pl.pos.z - c.z;
+            if (dx * dx + dz * dz > 400) continue;
+            float lx = dx * d.x + dz * d.y, lz = -dx * d.y + dz * d.x;
+            if (fabsf(lx) > 13.3f || fabsf(lz) > 1.95f || pl.pos.y > c.y + 5.2f) continue;
+            if (t.v > 1) { pl.bail("Hit by Caltrain!"); evHonk = true; evCrash = true; return; }
+            float push = 1.95f - fabsf(lz), sgn = lz > 0 ? 1.f : -1.f;
+            pl.pos.x += -d.y * push * sgn; pl.pos.z += d.x * push * sgn;
+            pl.speed *= 0.5f;
+        }
+    }
+    for (auto& c : cars) {
+        float dx = pl.pos.x - c.pos.x, dz = pl.pos.z - c.pos.z;
+        if (dx * dx + dz * dz > 100) continue;
+        const CarModel& m = carModel(c.type);
+        float f0 = cosf(c.yaw), f1 = sinf(c.yaw);
+        float lx = dx * f0 + dz * f1, lz = -dx * f1 + dz * f0;
+        float px = m.halfLen + 0.35f - fabsf(lx), pz = m.halfWid + 0.35f - fabsf(lz);
+        if (px <= 0 || pz <= 0) continue;
+        if (pl.pos.y > c.pos.y + m.height - 0.2f || pl.pos.y < c.pos.y - 1.5f) continue;
+        Vector2 pv = pl.state == Player::AIR ? Vector2{pl.vel.x, pl.vel.z} : Vector2{cosf(pl.yaw) * pl.speed, sinf(pl.yaw) * pl.speed};
+        Vector2 cv = {f0 * c.speed, f1 * c.speed};
+        float rel = Vector2Length(Vector2Subtract(pv, cv));
+        if (rel > 4.5f || c.speed > 4) {
+            pl.bail(c.type == CT_CABLECAR ? "Hit by a cable car!" : c.type == CT_BUS ? "Hit by a Muni bus!" : c.type == CT_PEDALBUS ? "Hit by a pedal bus!" : c.type == CT_LRV ? "Hit by a Muni streetcar!" : "Hit by a car!");
+            c.stopT = 3;
+            c.speed = 0;
+            evHonk = true;
+            evCrash = true;
+            return;
+        }
+        // slow bump: push out
+        if (px < pz) { float s = lx > 0 ? 1.f : -1.f; pl.pos.x += f0 * px * s; pl.pos.z += f1 * px * s; }
+        else { float s = lz > 0 ? 1.f : -1.f; pl.pos.x += -f1 * pz * s; pl.pos.z += f0 * pz * s; }
+        pl.speed *= 0.5f;
+    }
+    for (auto& p : peds) {
+        if (p.knock > 0) continue;
+        float dx = pl.pos.x - p.pos.x, dz = pl.pos.z - p.pos.z;
+        if (dx * dx + dz * dz > 0.55f * 0.55f || fabsf(pl.pos.y - p.pos.y) > 1.4f) continue;
+        if (pl.hspeed() < 2.0f) continue;
+        p.knock = 4.0f;
+        if (pl.hspeed() > 7.5f) pl.bail("Ran into a pedestrian");
+        else { pl.speed *= 0.4f; pl.vel = Vector3Scale(pl.vel, 0.4f); pl.say("Sorry!", {255, 160, 120, 255}, "Watch where you're rolling"); }
+        return;
+    }
+}
+
+// The riders of a pedal bus: ten on stools facing the bar, pedalling, and a driver steering up front.
+static void drawPedalRiders(const Car& c, int seed) {
+    static const Color SKIN[] = {{240, 205, 175, 255}, {214, 170, 134, 255}, {170, 120, 85, 255}, {120, 80, 55, 255}};
+    static const Color SHIRT[] = {{200, 50, 50, 255}, {40, 90, 170, 255}, {240, 240, 235, 255}, {240, 200, 60, 255}, {60, 140, 90, 255},
+                                  {150, 80, 160, 255}, {230, 120, 40, 255}, {30, 30, 35, 255}};
+    Color pants = {50, 56, 80, 255}, shoe = {35, 35, 38, 255};
+    rlPushMatrix();
+    rlTranslatef(c.pos.x, c.pos.y, c.pos.z);
+    rlRotatef(-c.yaw * RAD2DEG, 0, 1, 0);
+    rlRotatef(c.pitch * RAD2DEG, 0, 0, 1);
+    auto limb = [](Vector3 a, Vector3 b, float r, Color k) { DrawCylinderEx(a, b, r, r * 0.85f, 5, k); };
+    for (int k = 0; k < 10; k++) {
+        uint32_t h = hashu(seed, k, 5);
+        if ((h & 7) == 0) continue;                       // the odd empty stool
+        float sx = -2.0f + (k / 2) * 0.9f, sd = (k & 1) ? 1.f : -1.f;   // sd: which side of the bar
+        Color skin = SKIN[(h >> 3) % 4], shirt = SHIRT[(h >> 6) % 8];
+        float bob = 0.03f * sinf(c.pedal * 2 + k);
+        Vector3 hip = {sx, 1.1f + bob, sd * 0.98f};
+        Vector3 sh = {sx, 1.62f + bob, sd * 0.88f};      // leaning in toward the bar
+        limb(hip, sh, 0.17f, shirt);
+        DrawSphereEx({sx, 1.84f + bob, sd * 0.84f}, 0.12f, 5, 6, skin);
+        for (int a = -1; a <= 1; a += 2) {                // forearms on the bar
+            Vector3 s = {sx + a * 0.18f, 1.55f + bob, sd * 0.86f}, hand = {sx + a * 0.16f, 1.3f, sd * 0.45f};
+            limb(s, hand, 0.045f, shirt);
+        }
+        // legs on the cranks under the bar, the two pedals half a turn apart
+        float ph = c.pedal + (h % 628) * 0.01f;
+        for (int f = 0; f < 2; f++) {
+            float ang = ph + f * PI;
+            Vector3 foot = {sx + (f ? 0.11f : -0.11f), 0.6f + 0.16f * sinf(ang), sd * (0.62f - 0.16f * cosf(ang))};
+            Vector3 hp = {hip.x + (f ? 0.1f : -0.1f), hip.y, hip.z};
+            Vector3 knee = {(hp.x + foot.x) * 0.5f, (hp.y + foot.y) * 0.5f + 0.22f, (hp.z + foot.z) * 0.5f - sd * 0.12f};
+            limb(hp, knee, 0.075f, pants);
+            limb(knee, foot, 0.06f, pants);
+            DrawCube(foot, 0.12f, 0.07f, 0.2f, shoe);
+        }
+    }
+    // the driver, steering
+    Color ds = {40, 40, 44, 255};
+    limb({2.55f, 1.1f, 0}, {2.62f, 1.7f, 0}, 0.17f, ds);
+    DrawSphereEx({2.66f, 1.92f, 0}, 0.12f, 5, 6, SKIN[seed % 4]);
+    DrawCube({2.66f, 2.03f, 0}, 0.26f, 0.07f, 0.26f, {200, 40, 40, 255});
+    for (int a = -1; a <= 1; a += 2) {
+        limb({2.62f, 1.62f, a * 0.2f}, {2.95f, 1.32f, a * 0.3f}, 0.045f, ds);
+        limb({2.55f, 1.1f, a * 0.12f}, {2.95f, 0.75f, a * 0.15f}, 0.07f, pants);
+    }
+    rlPopMatrix();
+}
+
+// A dog on a leash, trotting a little ahead of its walker (sitting beside them when they stand still).
+static void drawDog(const Ped& p, float now) {
+    float s = p.petS, cy = cosf(p.yaw), sy = sinf(p.yaw);
+    bool sit = p.mode == 2 || p.knock > 0;
+    auto W = [&](float x, float y, float z) { return Vector3{p.pos.x + x * cy - z * sy, p.pos.y + y, p.pos.z + x * sy + z * cy}; };
+    Vector3 at = sit ? W(0.15f, 0, 0.65f) : W(0.95f, 0, 0.5f);
+    rlPushMatrix();
+    rlTranslatef(at.x, at.y, at.z);
+    rlRotatef(-p.yaw * RAD2DEG, 0, 1, 0);
+    float sw = sit ? 0.f : sinf(p.phase * 1.6f) * 0.55f;
+    for (int i = 0; i < 4; i++) {   // legs: diagonal pairs swing together
+        float lx = (i & 1) ? 0.24f * s : -0.24f * s, lz = (i & 2) ? 0.09f * s : -0.09f * s;
+        float a = ((i == 0 || i == 3) ? sw : -sw) * RAD2DEG;
+        rlPushMatrix();
+        rlTranslatef(lx, 0.3f * s, lz);
+        rlRotatef(sit && lx < 0 ? 70.f : a, 0, 0, 1);
+        DrawCube({0, -0.15f * s, 0}, 0.08f * s, 0.3f * s, 0.08f * s, p.petC);
+        rlPopMatrix();
+    }
+    rlPushMatrix();
+    if (sit) { rlTranslatef(-0.2f * s, 0, 0); rlRotatef(28, 0, 0, 1); rlTranslatef(0.2f * s, -0.06f * s, 0); }
+    DrawCube({0, 0.42f * s, 0}, 0.66f * s, 0.26f * s, 0.25f * s, p.petC);                 // body
+    DrawCube({0.4f * s, 0.6f * s, 0}, 0.24f * s, 0.22f * s, 0.2f * s, p.petC);            // head
+    DrawCube({0.56f * s, 0.55f * s, 0}, 0.14f * s, 0.1f * s, 0.12f * s, p.petC2);         // muzzle
+    DrawCube({0.63f * s, 0.58f * s, 0}, 0.03f * s, 0.05f * s, 0.06f * s, {20, 20, 20, 255});
+    for (int e = -1; e <= 1; e += 2) DrawCube({0.36f * s, 0.73f * s, e * 0.08f * s}, 0.06f * s, 0.12f * s, 0.06f * s, p.petC2);
+    float wag = sinf(now * 13.f + p.phase) * 0.12f * s;
+    DrawCylinderEx({-0.32f * s, 0.5f * s, 0}, {-0.48f * s, 0.72f * s, wag}, 0.035f * s, 0.02f * s, 4, p.petC);   // tail
+    rlPopMatrix();
+    rlPopMatrix();
+    // the leash, from the walker's hand to the collar, sagging a little
+    float ps = p.scale;
+    Vector3 hand = W(0.12f * ps, 0.86f * ps, 0.27f * ps);
+    Vector3 collar = sit ? W(0.15f + 0.3f * s, 0.62f * s, 0.65f) : W(0.95f + 0.3f * s, 0.6f * s, 0.5f);
+    Vector3 mid = Vector3Lerp(hand, collar, 0.5f);
+    mid.y -= 0.12f;
+    DrawLine3D(hand, mid, {150, 30, 40, 255});
+    DrawLine3D(mid, collar, {150, 30, 40, 255});
+}
+
+static void drawCat(const Cat& c) {
+    rlPushMatrix();
+    rlTranslatef(c.pos.x, c.pos.y, c.pos.z);
+    rlRotatef(-c.yaw * RAD2DEG, 0, 1, 0);
+    Color pink = {220, 150, 150, 255};
+    float swish = sinf(c.t * 2.3f) * 0.08f;
+    if (c.pose == 2) {   // running flat out, tail up
+        float sw = sinf(c.t * 22.f) * 0.7f;
+        for (int i = 0; i < 4; i++) {
+            float lx = (i & 1) ? 0.14f : -0.14f, lz = (i & 2) ? 0.05f : -0.05f;
+            rlPushMatrix();
+            rlTranslatef(lx, 0.17f, lz);
+            rlRotatef((lx > 0 ? sw : -sw) * RAD2DEG, 0, 0, 1);
+            DrawCube({0, -0.08f, 0}, 0.05f, 0.17f, 0.05f, c.c);
+            rlPopMatrix();
+        }
+        DrawCube({0, 0.2f, 0}, 0.42f, 0.13f, 0.13f, c.c);
+        DrawCube({0.02f, 0.25f, 0}, 0.2f, 0.04f, 0.12f, c.patch);
+        DrawCube({0.27f, 0.25f, 0}, 0.14f, 0.12f, 0.13f, c.c);
+        DrawCylinderEx({-0.2f, 0.24f, 0}, {-0.34f, 0.44f, swish}, 0.022f, 0.016f, 4, c.c);
+        for (int e = -1; e <= 1; e += 2) DrawCube({0.27f, 0.33f, e * 0.04f}, 0.03f, 0.05f, 0.03f, c.c);
+    } else if (c.pose == 1) {   // loafing: a compact lump with the paws tucked in
+        DrawCube({0, 0.08f, 0}, 0.34f, 0.15f, 0.2f, c.c);
+        DrawCube({-0.03f, 0.15f, 0}, 0.2f, 0.04f, 0.18f, c.patch);
+        DrawCube({0.18f, 0.16f, 0}, 0.13f, 0.12f, 0.13f, c.c);
+        for (int e = -1; e <= 1; e += 2) DrawCube({0.18f, 0.24f, e * 0.04f}, 0.03f, 0.05f, 0.03f, c.c);
+        DrawCylinderEx({-0.16f, 0.03f, 0.06f}, {0.05f, 0.03f, 0.14f + swish * 0.3f}, 0.02f, 0.016f, 4, c.c);
+    } else {   // sitting up, now and then dipping its head to groom
+        float groom = fmaxf(0.f, sinf(c.t * 0.7f)) > 0.8f ? sinf(c.t * 9.f) * 0.03f - 0.06f : 0.f;
+        rlPushMatrix();
+        rlRotatef(35, 0, 0, 1);
+        DrawCube({0, 0.14f, 0}, 0.3f, 0.15f, 0.16f, c.c);
+        DrawCube({0, 0.2f, 0}, 0.2f, 0.04f, 0.15f, c.patch);
+        rlPopMatrix();
+        DrawCube({0.08f, 0.04f, 0}, 0.05f, 0.08f, 0.12f, c.c);                         // front paws
+        DrawCube({0.1f, 0.33f + groom, 0}, 0.14f, 0.13f, 0.14f, c.c);                  // head
+        for (int e = -1; e <= 1; e += 2) {
+            DrawCube({0.1f, 0.42f + groom, e * 0.045f}, 0.03f, 0.06f, 0.03f, c.c);     // ears
+            DrawCube({0.11f, 0.42f + groom, e * 0.045f}, 0.01f, 0.03f, 0.015f, pink);
+        }
+        DrawCylinderEx({-0.12f, 0.02f, 0}, {-0.22f, 0.02f, 0.14f + swish}, 0.022f, 0.016f, 4, c.c);   // tail round the feet
+    }
+    rlPopMatrix();
+}
+
+static void drawPerson(const Ped& p) {
+    rlPushMatrix();
+    rlTranslatef(p.pos.x, p.pos.y, p.pos.z);
+    rlRotatef(-p.yaw * RAD2DEG, 0, 1, 0);
+    if (p.knock > 0) {
+        rlTranslatef(0, 0.15f, 0);
+        rlRotatef(-85.f * clampf((4.0f - p.knock) / 0.3f, 0, 1), 0, 0, 1);
+    }
+    float s = p.scale;
+    rlScalef(s, s, s);
+    float sw = (p.mode == 2 || p.knock > 0) ? 0.f : sinf(p.phase) * 0.5f;
+    for (int side = -1; side <= 1; side += 2) {
+        rlPushMatrix();
+        rlTranslatef(0, 0.9f, side * 0.1f);
+        rlRotatef(sw * side * RAD2DEG, 0, 0, 1);
+        DrawCube({0, -0.44f, 0}, 0.15f, 0.88f, 0.15f, p.pants);
+        DrawCube({0.05f, -0.86f, 0}, 0.24f, 0.07f, 0.13f, {40, 40, 40, 255});
+        rlPopMatrix();
+        rlPushMatrix();
+        rlTranslatef(0, 1.43f, side * 0.25f);
+        rlRotatef(-sw * side * 0.8f * RAD2DEG, 0, 0, 1);
+        DrawCube({0, -0.28f, 0}, 0.11f, 0.58f, 0.11f, p.shirt);
+        DrawCube({0, -0.6f, 0}, 0.1f, 0.1f, 0.1f, p.skin);
+        rlPopMatrix();
+    }
+    DrawCube({0, 1.18f, 0}, 0.24f, 0.58f, 0.4f, p.shirt);
+    DrawCube({0, 1.6f, 0}, 0.2f, 0.24f, 0.2f, p.skin);
+    DrawCube({-0.02f, 1.74f, 0}, 0.23f, 0.06f, 0.22f, p.hair);
+    rlPopMatrix();
+}
+
+// Cable car riders, drawn in the person's own frame (x = the way they face, origin at the feet or the seat).
+enum { R_HANG, R_BENCH, R_INSIDE, R_GRIP };
+static void drawRider(const Ped& p, int pose, int side, float t) {
+    float sc = pose == R_INSIDE ? std::min(p.scale, 1.0f) : p.scale;
+    rlScalef(sc, sc, sc);
+    Color shoe = {40, 40, 40, 255};
+    if (pose == R_HANG || pose == R_GRIP) {
+        if (pose == R_HANG) rlRotatef(side * (9 + 3 * sinf(t * 1.7f + p.phase)), 1, 0, 0); // lean out over the street
+        for (int k = -1; k <= 1; k += 2) {
+            DrawCube({0, 0.46f, k * 0.1f}, 0.15f, 0.88f, 0.15f, p.pants);
+            DrawCube({0.05f, 0.04f, k * 0.1f}, 0.24f, 0.07f, 0.13f, shoe);
+        }
+    } else if (pose == R_BENCH) {
+        for (int k = -1; k <= 1; k += 2) {
+            DrawCube({0.22f, 0.02f, k * 0.1f}, 0.45f, 0.15f, 0.15f, p.pants);   // thighs
+            DrawCube({0.44f, -0.23f, k * 0.1f}, 0.15f, 0.46f, 0.15f, p.pants);  // shins
+            DrawCube({0.49f, -0.47f, k * 0.1f}, 0.24f, 0.07f, 0.13f, shoe);
+        }
+        rlTranslatef(0, -0.89f, 0);   // same body as standing, from the hips up
+    } else rlTranslatef(0, -0.89f, 0);
+    DrawCube({0, 1.18f, 0}, 0.24f, 0.58f, 0.4f, p.shirt);
+    DrawCube({0, 1.6f, 0}, 0.2f, 0.24f, 0.2f, p.skin);
+    DrawCube({-0.02f, 1.74f, 0}, 0.23f, 0.06f, 0.22f, p.hair);
+    for (int k = -1; k <= 1; k += 2) {
+        rlPushMatrix();
+        rlTranslatef(0, 1.43f, k * 0.25f);
+        if (pose == R_HANG && k == -side) rlRotatef(side * 150.f, 1, 0, 0);            // inner hand up on the pole
+        else if (pose == R_HANG) rlRotatef(-side * (15 + 10 * sinf(t * 0.9f + p.phase)), 1, 0, 0);
+        else if (pose == R_GRIP) rlRotatef(35.f, 0, 0, 1);                               // both hands on the grip lever
+        else if (pose == R_BENCH) rlRotatef(25.f, 0, 0, 1);                              // hands in the lap
+        DrawCube({0, -0.28f, 0}, 0.11f, 0.58f, 0.11f, p.shirt);
+        DrawCube({0, -0.6f, 0}, 0.1f, 0.1f, 0.1f, p.skin);
+        rlPopMatrix();
+    }
+}
+
+// The usual crowd on a cable car: people hanging off the running boards, sitting out on the end benches,
+// passengers inside and the gripman at the front. Who is aboard is fixed per car.
+static void drawCableRiders(const Car& c, int idx) {
+    RNG r(9137 + idx * 7919);
+    float t = (float)GetTime();
+    rlPushMatrix();
+    rlTranslatef(c.pos.x, c.pos.y, c.pos.z);
+    rlRotatef(-c.yaw * RAD2DEG, 0, 1, 0);
+    rlRotatef(c.pitch * RAD2DEG, 0, 0, 1);
+    auto place = [&](float x, float y, float z, float face, int pose, int side) {
+        Ped p; colorPed(p, r);
+        rlPushMatrix();
+        rlTranslatef(x, y, z);
+        rlRotatef(face, 0, 1, 0);
+        drawRider(p, pose, side, t);
+        rlPopMatrix();
+    };
+    for (int s = -1; s <= 1; s += 2)
+        for (float x : {-3.5f, -2.7f, 2.7f, 3.5f})
+            if (r.chance(0.6f)) place(x, 0.66f, s * 1.5f, x > 0 ? 0.f : 180.f, R_HANG, x > 0 ? s : -s);
+    for (int s = -1; s <= 1; s += 2)
+        for (float x : {-3.85f, -3.15f, 3.15f, 3.85f})
+            if (r.chance(0.65f)) place(x, 1.54f, s * 0.3f, -90.f * s, R_BENCH, s);
+    for (int s = -1; s <= 1; s += 2)
+        for (float x : {-1.5f, -0.75f, 0.f, 0.75f, 1.5f})
+            if (r.chance(0.5f)) place(x, 1.65f, s * 0.75f, 90.f * s, R_INSIDE, s);
+    place(2.45f, 1.04f, 0, 0, R_GRIP, 0);
+    DrawCube({2.85f, 1.45f, 0}, 0.06f, 0.9f, 0.06f, {60, 60, 64, 255});    // grip lever
+    rlPopMatrix();
+}
+
+void Traffic::drawShadows(Vector3 cam) const {
+    for (auto& c : cars) {
+        if (sq(c.pos.x - cam.x) + sq(c.pos.z - cam.z) > 140 * 140) continue;
+        const CarModel& m = carModel(c.type);
+        rlPushMatrix();
+        rlTranslatef(c.pos.x, c.pos.y + 0.05f, c.pos.z);
+        rlRotatef(-c.yaw * RAD2DEG, 0, 1, 0);
+        rlRotatef(c.pitch * RAD2DEG, 0, 0, 1);
+        DrawCube({0, 0, 0}, m.halfLen * 2 + 0.4f, 0.02f, m.halfWid * 2 + 0.4f, {0, 0, 0, 55});
+        rlPopMatrix();
+    }
+    for (auto& p : peds) {
+        if (sq(p.pos.x - cam.x) + sq(p.pos.z - cam.z) > 70 * 70 || p.knock > 0) continue;
+        DrawCylinder({p.pos.x, p.pos.y + 0.12f, p.pos.z}, 0.38f, 0.38f, 0.01f, 10, {0, 0, 0, 40});
+    }
+}
+
+void Traffic::draw(Vector3 cam, Vector3 camFwd) const {
+    for (auto& c : cars) {
+        Vector3 d = Vector3Subtract(c.pos, cam);
+        float dist2 = d.x * d.x + d.z * d.z;
+        if (dist2 > 420 * 420) continue;
+        if (Vector3DotProduct(d, camFwd) < -15) continue;
+        drawCarModel(c.type, c.body, c.pos, c.yaw, c.pitch, c.braking);
+        if (c.type == CT_CABLECAR && dist2 < 170 * 170) drawCableRiders(c, (int)(&c - cars.data()));
+        if (c.type == CT_PEDALBUS && dist2 < 140 * 140) drawPedalRiders(c, (int)(&c - cars.data()));
+    }
+    for (auto& p : peds) {
+        Vector3 d = Vector3Subtract(p.pos, cam);
+        float dist2 = d.x * d.x + d.z * d.z;
+        if (dist2 > 230 * 230) continue;
+        if (Vector3DotProduct(d, camFwd) < -5) continue;
+        drawPerson(p);
+        if (p.pet && dist2 < 150 * 150) drawDog(p, (float)GetTime());
+    }
+    for (auto& c : cats) {
+        Vector3 d = Vector3Subtract(c.pos, cam);
+        if (d.x * d.x + d.z * d.z > 90 * 90 || Vector3DotProduct(d, camFwd) < -3) continue;
+        drawCat(c);
+    }
+}
+
+void Traffic::drawTrain(const World& w, float s, int dir, Vector3 cam) {
+    for (int k = 0; k < 5; k++) {
+        float sc = s - dir * (k * 25.8f + 12.9f);
+        if (sc < 0 || sc > w.railLen()) continue;
+        Vector2 d;
+        Vector3 c = w.trackPoint(sc, 2.4f * dir, &d);
+        if (sq(c.x - cam.x) + sq(c.z - cam.z) > 3000.f * 3000.f) continue;
+        float yaw = atan2f(d.y * dir, d.x * dir);
+        float pitch = atan2f((w.railGrade(sc + 10 * dir) - w.railGrade(sc - 10 * dir)), 20);
+        bool cab = k == 0 || k == 4;
+        if (k == 4) yaw += PI, pitch = -pitch;
+        drawCarModel(cab ? CT_CALTRAIN_CAB : CT_CALTRAIN, WHITE, {c.x, c.y + 0.3f, c.z}, yaw, pitch, false);
+    }
+}
+
+void Traffic::drawTrains(const World& w, Vector3 cam) const {
+    for (auto& t : trains) drawTrain(w, t.s, t.dir, cam);
+}

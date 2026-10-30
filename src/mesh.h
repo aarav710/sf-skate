@@ -2,15 +2,37 @@
 #pragma once
 #include "common.h"
 
+// Normals: each vertex carries 4 signed bytes. (0,0,0,w) asks World::upload() to derive a normal from the
+// triangles around it, smoothing across edges sharper than ~35 degrees (w = 0, boxy things stay crisp) or ~75
+// degrees (w = SMOOTH_ORGANIC: trunks, domes, fronds). w = NRM_EXPLICIT means the normal was given (terrain,
+// foliage that shades as a soft volume) and the shader uses it as is instead of flipping it toward the eye.
+enum : signed char { SMOOTH_CRISP = 0, SMOOTH_ORGANIC = 1, NRM_EXPLICIT = 127 };
+
 struct MeshBuilder {
     std::vector<float> v;
     std::vector<unsigned char> c;
+    std::vector<signed char> n;
+    signed char smooth = SMOOTH_CRISP;   // smoothing for the vertices that follow
+    const Vector3* volN = nullptr;       // leaf(): explicit normal for a leaf in a canopy
+    // leafCloud() puts its leaves in detailB (drawn up close) and a low-poly blob in farB (drawn further out)
+    MeshBuilder* detailB = nullptr;
+    MeshBuilder* farB = nullptr;
 
     size_t count() const { return v.size() / 3; }
     inline void vert(Vector3 p, Color k) {
         v.push_back(p.x); v.push_back(p.y); v.push_back(p.z);
         c.push_back(k.r); c.push_back(k.g); c.push_back(k.b); c.push_back(k.a);
+        n.push_back(0); n.push_back(0); n.push_back(0); n.push_back(smooth);
     }
+    inline void vertN(Vector3 p, Color k, Vector3 nn) {
+        v.push_back(p.x); v.push_back(p.y); v.push_back(p.z);
+        c.push_back(k.r); c.push_back(k.g); c.push_back(k.b); c.push_back(k.a);
+        float l = sqrtf(nn.x * nn.x + nn.y * nn.y + nn.z * nn.z);
+        if (l < 1e-6f) { nn = {0, 1, 0}; l = 1; }
+        n.push_back((signed char)(nn.x / l * 126)); n.push_back((signed char)(nn.y / l * 126)); n.push_back((signed char)(nn.z / l * 126));
+        n.push_back(NRM_EXPLICIT);
+    }
+    void release() { std::vector<float>().swap(v); std::vector<unsigned char>().swap(c); std::vector<signed char>().swap(n); }
     void tri(Vector3 a, Vector3 b, Vector3 d, Color k) { vert(a, k); vert(b, k); vert(d, k); }
     void quad(Vector3 a, Vector3 b, Vector3 d, Vector3 e, Color k) { tri(a, b, d, k); tri(a, d, e, k); }
     void quadC(Vector3 a, Vector3 b, Vector3 d, Vector3 e, Color ka, Color kb, Color kd, Color ke) {

@@ -809,6 +809,8 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
 // The ground floor of an enterable house: wall linings, floor, ceiling, a hall partition, furniture and the
 // collision for all of it. The door is at facade coordinate doorU; "depth" runs from the street wall inward.
 void World::addHouseInterior(const House& h, float base, float top, float doorU, RNG& hr) {
+    struct LayerScope { int& l; int was; ~LayerScope() { l = was; } } layerScope_{layer, layer};
+    layer = LAYER_INTERIOR;   // rooms are only drawn near the camera
     MeshBuilder& m = mb((h.x0 + h.x1) / 2, (h.z0 + h.z1) / 2);
     Facade F{m, h.x0, h.z0, h.x1, h.z1, h.facing};
     const float t = WALL_T, Y = h.floorY;
@@ -1224,6 +1226,194 @@ void World::addLamp(float x, float z, float yaw) {
     addPlat({x - 0.15f, x + 0.15f, z - 0.15f, z + 0.15f, y + 6.5f, y + 6.5f, y - 1, 0, PK_POLE});
 }
 
+// A flat disk standing upright (wheels): n-sided fan around c in the plane of unit vectors a and b.
+static void disk(MeshBuilder& m, Vector3 c, Vector3 a, Vector3 b, float r, int n, Color k) {
+    for (int i = 0; i < n; i++) {
+        float a0 = TAU_F * i / n, a1 = TAU_F * (i + 1) / n;
+        auto P = [&](float t) { return Vector3Add(c, Vector3Add(Vector3Scale(a, cosf(t) * r), Vector3Scale(b, sinf(t) * r))); };
+        m.tri(c, P(a0), P(a1), k);
+    }
+}
+
+void World::addClutter(Vector2 p, Vector2 f, Vector2 o, int kind, uint32_t h) {
+    float y = terrain(p.x, p.y);
+    MeshBuilder& m = mb(p.x, p.y);
+    Vector3 F = {f.x, 0, f.y}, O = {o.x, 0, o.y}, U = {0, 1, 0};
+    auto at = [&](float alongF, float up, float outO) { return V3(p.x + f.x * alongF + o.x * outO, y + up, p.y + f.y * alongF + o.y * outO); };
+    auto pole = [&](float alongF, float outO, float hw, float top) {   // collision for something small and solid
+        Vector3 q = at(alongF, 0, outO);
+        addPlat({q.x - hw, q.x + hw, q.z - hw, q.z + hw, y + top, y + top, y - 1, 0, PK_POLE});
+    };
+    float yaw = atan2f(f.y, f.x);
+    switch (kind) {
+    case 0: {   // fire hydrant: squat white body, colored bonnet, side outlets
+        static const Color CAP[] = {col(40, 90, 170), col(200, 40, 40), col(230, 190, 40), col(240, 240, 235)};
+        Color body = col(232, 230, 222), cap = CAP[(h >> 17) % 4];
+        m.prism(at(0, -0.05f, 0), 8, 0.2f, 0.2f, 0.12f, body, body);
+        m.prism(at(0, 0.07f, 0), 8, 0.14f, 0.13f, 0.5f, body, body);
+        m.prism(at(0, 0.57f, 0), 8, 0.16f, 0.05f, 0.16f, cap, cap);
+        m.beam(at(-0.2f, 0.36f, 0), at(0.2f, 0.36f, 0), 0.1f, 0.1f, cap);
+        m.beam(at(0, 0.36f, 0), at(0, 0.36f, 0.2f), 0.13f, 0.13f, cap);
+        pole(0, 0, 0.18f, 0.75f);
+        break;
+    }
+    case 1: {   // SF's green public trash can, lid and mouth facing the sidewalk
+        Color g = col(42, 74, 54), dk = col(28, 44, 34);
+        m.prism(at(0, -0.05f, 0), 10, 0.3f, 0.29f, 0.98f, g, dk);
+        m.prism(at(0, 0.93f, 0), 10, 0.33f, 0.28f, 0.1f, dk, dk);
+        m.obox(at(0, 0.78f, -0.27f), {0.04f, 0.09f, 0.18f}, yaw + PI / 2, 0, col(16, 18, 18));
+        pole(0, 0, 0.3f, 1.0f);
+        break;
+    }
+    case 2: {   // a row of newspaper boxes in different colors, coin slot and window on the sidewalk side
+        static const Color NB[] = {col(30, 70, 160), col(200, 40, 40), col(230, 190, 40), col(40, 120, 70), col(230, 230, 230), col(120, 60, 140)};
+        int n = 2 + (h >> 18) % 2;
+        for (int k = 0; k < n; k++) {
+            float a = (k - (n - 1) * 0.5f) * 0.56f;
+            Color c = NB[(h >> (20 + k * 3)) % 6];
+            m.obox(at(a, 0.62f, 0), {0.24f, 0.42f, 0.22f}, yaw, 0, c);
+            m.obox(at(a, 0.75f, -0.225f), {0.18f, 0.14f, 0.01f}, yaw, 0, col(200, 205, 200));   // window
+            for (int l = -1; l <= 1; l += 2) m.beam(at(a + l * 0.18f, -0.05f, 0), at(a + l * 0.18f, 0.22f, 0), 0.05f, 0.05f, col(60, 60, 64));
+        }
+        Vector3 q0 = at(-n * 0.28f, 0, -0.25f), q1 = at(n * 0.28f, 0, 0.25f);
+        addPlat({std::min(q0.x, q1.x), std::max(q0.x, q1.x), std::min(q0.z, q1.z), std::max(q0.z, q1.z), y + 1.05f, y + 1.05f, y - 1, 0, PK_POLE});
+        break;
+    }
+    case 3: {   // bike rack (two inverted U's) with a bike or two locked to it, standing across the curb
+        static const Color BK[] = {col(200, 40, 40), col(30, 30, 34), col(40, 100, 170), col(230, 230, 225), col(60, 140, 90), col(230, 140, 40)};
+        Color steel = col(140, 142, 148);
+        for (int k = 0; k < 2; k++) {
+            float a = k ? 0.45f : -0.45f;
+            m.beam(at(a, -0.05f, -0.35f), at(a, 0.82f, -0.35f), 0.05f, 0.05f, steel);
+            m.beam(at(a, -0.05f, 0.35f), at(a, 0.82f, 0.35f), 0.05f, 0.05f, steel);
+            m.beam(at(a, 0.82f, -0.37f), at(a, 0.82f, 0.37f), 0.05f, 0.05f, steel);
+        }
+        int bikes = 1 + (h >> 18) % 2;
+        for (int k = 0; k < bikes; k++) {
+            float a = k ? 0.7f : -0.2f;
+            Color fr = BK[(h >> (20 + k * 3)) % 6], tire = col(22, 22, 24);
+            Vector3 rear = at(a, 0.34f, -0.52f), front = at(a, 0.34f, 0.52f);
+            disk(m, rear, O, U, 0.34f, 8, tire);
+            disk(m, front, O, U, 0.34f, 8, tire);
+            disk(m, rear, O, U, 0.07f, 6, col(170, 170, 175));
+            disk(m, front, O, U, 0.07f, 6, col(170, 170, 175));
+            Vector3 bb = at(a, 0.3f, -0.05f), seat = at(a, 0.88f, -0.2f), head = at(a, 0.85f, 0.38f);
+            m.beam(rear, bb, 0.035f, 0.035f, fr);
+            m.beam(bb, seat, 0.04f, 0.04f, fr);
+            m.beam(seat, head, 0.04f, 0.04f, fr);
+            m.beam(bb, head, 0.045f, 0.045f, fr);
+            m.beam(rear, seat, 0.03f, 0.03f, fr);
+            m.beam(head, front, 0.035f, 0.035f, col(150, 150, 155));
+            m.obox(Vector3Add(seat, V3(0, 0.05f, 0)), {0.12f, 0.03f, 0.06f}, yaw + PI / 2, 0, col(25, 25, 25));
+            Vector3 hb = Vector3Add(head, V3(0, 0.12f, 0));
+            m.beam(Vector3Add(hb, Vector3Scale(F, -0.25f)), Vector3Add(hb, Vector3Scale(F, 0.25f)), 0.03f, 0.03f, col(40, 40, 42));
+        }
+        pole(0.15f, 0, 0.6f, 0.9f);
+        break;
+    }
+    case 4: {   // dockless scooters on their kickstands, leaning a little
+        static const Color SC[] = {col(90, 200, 70), col(30, 30, 32), col(230, 70, 60), col(240, 210, 50)};
+        int n = 1 + (h >> 18) % 3;
+        for (int k = 0; k < n; k++) {
+            float a = (k - (n - 1) * 0.5f) * 0.42f, lean = 0.08f;
+            Color c = SC[(h >> (20 + k * 2)) % 4];
+            Vector3 tilt = Vector3Scale(F, lean);
+            Vector3 b0 = at(a, 0.1f, -0.38f), b1 = at(a, 0.1f, 0.38f);
+            m.beam(b0, b1, 0.14f, 0.06f, c);                                              // deck
+            disk(m, at(a, 0.1f, -0.42f), O, U, 0.1f, 6, col(22, 22, 24));
+            disk(m, at(a, 0.1f, 0.42f), O, U, 0.1f, 6, col(22, 22, 24));
+            Vector3 top = Vector3Add(at(a, 1.0f, 0.36f), tilt);
+            m.beam(at(a, 0.1f, 0.4f), top, 0.045f, 0.045f, col(60, 60, 64));             // stem
+            m.beam(Vector3Add(top, Vector3Scale(F, -0.24f)), Vector3Add(top, Vector3Scale(F, 0.24f)), 0.035f, 0.035f, col(40, 40, 42));
+        }
+        pole(0, 0, 0.35f, 1.0f);
+        break;
+    }
+    case 5: {   // Muni bus shelter: back panel on the curb side, roof, bench, a lit ad panel at one end
+        Color frame = col(70, 74, 80), glass = col(150, 175, 190), roof = col(90, 94, 100);
+        float L = 1.9f;
+        for (int a = -1; a <= 1; a += 2)
+            for (int b = 0; b < 2; b++) m.beam(at(a * L, -0.05f, b ? -0.6f : 0.55f), at(a * L, 2.45f, b ? -0.6f : 0.55f), 0.08f, 0.08f, frame);
+        m.obox(at(0, 2.5f, -0.02f), {L + 0.15f, 0.06f, 0.75f}, yaw, 0, roof);
+        m.obox(at(0, 1.3f, 0.55f), {L - 0.05f, 1.0f, 0.02f}, yaw, 0, glass);
+        m.obox(at(-L, 1.25f, 0), {0.03f, 0.9f, 0.55f}, yaw, 0, glass);
+        m.obox(at(L, 1.25f, 0), {0.06f, 0.95f, 0.55f}, yaw, 0, col(250, 236, 200, M_EMISSIVE));   // backlit ad
+        m.obox(at(0, 0.45f, 0.32f), {1.3f, 0.04f, 0.2f}, yaw, 0, col(150, 120, 90));               // bench
+        m.beam(at(-L - 0.4f, -0.05f, 0.75f), at(-L - 0.4f, 2.9f, 0.75f), 0.06f, 0.06f, frame);      // stop sign pole
+        m.obox(at(-L - 0.4f, 2.75f, 0.75f), {0.25f, 0.18f, 0.02f}, yaw, 0, col(200, 40, 40));
+        Vector3 q0 = at(-L, 0, 0.5f), q1 = at(L, 0, 0.62f);
+        addPlat({std::min(q0.x, q1.x), std::max(q0.x, q1.x), std::min(q0.z, q1.z), std::max(q0.z, q1.z), y + 2.3f, y + 2.3f, y - 1, 0, PK_POLE});
+        for (int a = -1; a <= 1; a += 2) pole(a * L, -0.6f, 0.08f, 2.4f);
+        break;
+    }
+    }
+}
+
+// Intersections: traffic signals downtown (a pole on the near-right corner of each approach with a mast arm over
+// the lanes; the lamps themselves are drawn live by Traffic), four-way stop signs in the neighborhoods, manhole
+// covers in the road, a few letting off steam.
+void World::buildIntersections(const Grid& g) {
+    signals.assign((size_t)g.ni * g.nj, 0);
+    Color pole = col(70, 76, 72), stopRed = col(196, 30, 36), white = col(240, 240, 236), dark = col(36, 38, 36);
+    for (int j = 0; j < g.nj; j++)
+        for (int i = 0; i < g.ni; i++) {
+            if (!g.nodeOk(i, j)) continue;
+            bool ex = g.edge(i, j, 0) || g.edge(i, j, 1), ez = g.edge(i, j, 2) || g.edge(i, j, 3);
+            Vector2 n = g.node(i, j);
+            float md, rs;
+            if (marketDist(n.x, n.y, &md) && md < 30) continue;
+            if (n.y > 800 && railDistance(n.x, n.y, &rs) < 20) continue;
+            if (i == 24 || terrain(n.x, n.y) < 1.f) continue;   // the Embarcadero has its own median
+            int style = buildStyleAt(n.x, n.y);
+            uint32_t hh = hashu(i, j, 404);
+            // manhole covers out in the lanes
+            for (int d = 0; d < 4; d++) {
+                if (!g.edge(i, j, d) || ((hh >> d) & 1)) continue;
+                Vector2 dir = {(float)DI[d], (float)DJ[d]}, right = {-dir.y, dir.x};
+                Vector2 q = {n.x + dir.x * 16.f + right.x * 2.2f, n.y + dir.y * 16.f + right.y * 2.2f};
+                float qy = terrain(q.x, q.y) + 0.085f;
+                mb(q.x, q.y).prism({q.x, qy, q.y}, 10, 0.36f, 0.36f, 0.015f, col(46, 44, 42, M_GROUND), col(40, 38, 36, M_GROUND));
+                bool steamy = style == BS_TOWERS || style == BS_MIDRISE || style == BS_MISSION || style == BS_WHARF;
+                if (steamy && hash01(i * 4 + d, j, 77) < 0.16f) steamVents.push_back({q.x, qy, q.y});
+            }
+            if (!ex || !ez) continue;
+            bool signal = style == BS_TOWERS || style == BS_MIDRISE || style == BS_MISSION || style == BS_WHARF;
+            if (signal) signals[(size_t)j * g.ni + i] = 1;
+            // each approach: arriving from direction d means heading -dir; its curb is on the driver's right
+            for (int d = 0; d < 4; d++) {
+                if (!g.edge(i, j, d)) continue;
+                Vector2 head = {-(float)DI[d], -(float)DJ[d]}, right = {-head.y, head.x};
+                // the near-right corner, 7.7 m out from both streets
+                Vector2 c = {n.x - head.x * 7.7f + right.x * 7.7f, n.y - head.y * 7.7f + right.y * 7.7f};
+                if (doorBlocked(c.x, c.y, 3.6f)) continue;
+                float y = terrain(c.x, c.y);
+                MeshBuilder& m = mb(c.x, c.y);
+                Vector3 face = {-head.x, 0, -head.y};   // toward the oncoming cars
+                if (signal) {
+                    m.prism({c.x, y - 0.2f, c.y}, 8, 0.13f, 0.1f, 6.4f, pole, pole);
+                    Vector2 tip = {c.x - right.x * 5.2f, c.y - right.y * 5.2f};
+                    m.beam({c.x, y + 6.1f, c.y}, {tip.x, y + 6.1f, tip.y}, 0.12f, 0.12f, pole);
+                    float yaw = atan2f(face.z, face.x);
+                    for (int k = 0; k < 2; k++) {   // one head hanging from the arm, one on the pole at eye level
+                        Vector3 hp = k ? V3(c.x + face.x * 0.18f, y + 3.1f, c.y + face.z * 0.18f) : V3(tip.x, y + 5.35f, tip.y);
+                        m.obox(hp, {0.15f, 0.55f, 0.2f}, yaw, 0, dark);
+                        m.obox(Vector3Add(hp, Vector3Scale(face, -0.02f)), {0.17f, 0.6f, 0.24f}, yaw, 0, col(30, 30, 30));
+                        signalHeads.push_back({Vector3Add(hp, Vector3Scale(face, 0.17f)), {face.x, face.z}, (int)(j * g.ni + i), (uint8_t)(d < 2 ? 0 : 1)});
+                    }
+                    addPlat({c.x - 0.15f, c.x + 0.15f, c.y - 0.15f, c.y + 0.15f, y + 6.3f, y + 6.3f, y - 1, 0, PK_POLE});
+                } else {   // a red octagon on a post, white rim behind it
+                    m.beam({c.x, y - 0.2f, c.y}, {c.x, y + 2.6f, c.y}, 0.07f, 0.07f, col(150, 150, 154));
+                    Vector3 sc = {c.x + face.x * 0.05f, y + 2.45f, c.y + face.z * 0.05f};
+                    Vector3 side = {-face.z, 0, face.x};
+                    disk(m, sc, side, {0, 1, 0}, 0.4f, 8, white);
+                    disk(m, Vector3Add(sc, Vector3Scale(face, 0.012f)), side, {0, 1, 0}, 0.36f, 8, stopRed);
+                    m.obox(Vector3Add(sc, Vector3Scale(face, 0.02f)), {0.008f, 0.035f, 0.16f}, atan2f(face.z, face.x), 0, white);   // the lettering
+                    addPlat({c.x - 0.08f, c.x + 0.08f, c.y - 0.08f, c.y + 0.08f, y + 2.6f, y + 2.6f, y - 1, 0, PK_POLE});
+                }
+            }
+        }
+}
+
 void World::buildStreetFurniture(const Grid& g, bool oakland) {
     RNG r(oakland ? 4242 : 2424);
     for (int j = 0; j < g.nj; j++)
@@ -1276,6 +1466,23 @@ void World::buildStreetFurniture(const Grid& g, bool oakland) {
                         if (leafy && r.chance(0.22f)) {
                             Vector2 p = Vector2Add(c, Vector2Scale(lat, 10.1f));
                             if (terrain(p.x, p.y) > 1.2f && !doorBlocked(p.x, p.y, 2.6f)) addTree(p.x, p.y, r.chance(0.15f) ? 2 : 0, r.range(0.8f, 1.1f), r, true);
+                        }
+                        // curbside clutter between the parked cars and the walking line (hashed, so the rest of the
+                        // street keeps its layout). Shelters and news boxes cluster downtown, bikes and bins everywhere.
+                        if (!nearMarket && slot % 2 == 1) {
+                            uint32_t hh = hashu((int)floorf(c.x * 3.f) + side * 7, (int)floorf(c.y * 3.f), 99);
+                            float u = (hh & 0xFFFF) / 65536.f;
+                            bool busy = style == BS_TOWERS || style == BS_MIDRISE || style == BS_MISSION || style == BS_WHARF || style == BS_OAK_DOWNTOWN;
+                            int kind = -1;
+                            if (u < 0.07f) kind = 0;
+                            else if (u < (busy ? 0.15f : 0.11f)) kind = 1;
+                            else if (u < (busy ? 0.2f : 0.12f)) kind = 2;
+                            else if (u < (busy ? 0.25f : 0.15f)) kind = 3;
+                            else if (u < (busy ? 0.3f : 0.17f)) kind = 4;
+                            else if (busy && u < 0.33f && s > 30 && s < L - 30) kind = 5;
+                            Vector2 p = Vector2Add(c, Vector2Scale(lat, kind == 5 ? 8.55f : 7.75f));
+                            if (kind >= 0 && terrain(p.x, p.y) > 1.f && !doorBlocked(p.x, p.y, kind == 5 ? 4.6f : 3.9f))
+                                addClutter(p, dir, Vector2Scale(lat, -1.f), kind, hh);
                         }
                     }
                 }

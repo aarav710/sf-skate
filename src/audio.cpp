@@ -2,7 +2,102 @@
 #include <atomic>
 
 static std::atomic<float> aRoll{0}, aGrind{0}, aWind{0};
+static std::atomic<float> aTraffic{0}, aWaves{0}, aSeal{0}, aWindHi{0}, aMusic{0}, aRain{0};
 constexpr int SR = 44100;
+
+// Background ambience, one sample at a time. Everything is filtered noise or simple oscillators.
+struct Ambience {
+    uint32_t seed = 991;
+    double t = 0;
+    float lvT = 0, lvW = 0, lvS = 0, lvH = 0, lvM = 0, lvR = 0;   // smoothed levels
+    float brown = 0, tlp = 0, wlp = 0, wlp2 = 0, hlp = 0, hlp2 = 0, rlp = 0, drop = 0;
+    // sea lions: bursts of barks
+    float barkT = 2.f, barkOn = 0, barkLen = 0.2f, barkF = 260, barkPh = 0, bp1 = 0, bp2 = 0;
+    int barksLeft = 0;
+    // music: a little four-chord party loop
+    float mPh[4] = {0, 0, 0, 0}, kickPh = 0, mlp = 0;
+    float white() { seed ^= seed << 13; seed ^= seed >> 17; seed ^= seed << 5; return (seed & 0xFFFF) / 32768.f - 1.f; }
+
+    float sample(float tT, float tW, float tS, float tH, float tM, float tR) {
+        const float dt = 1.f / SR;
+        t += dt;
+        lvT += (tT - lvT) * 0.0002f; lvW += (tW - lvW) * 0.0002f; lvS += (tS - lvS) * 0.0002f;
+        lvH += (tH - lvH) * 0.0002f; lvM += (tM - lvM) * 0.0003f; lvR += (tR - lvR) * 0.0002f;
+        float w = white(), out = 0;
+        float tf = (float)fmod(t, 1000.0);
+        if (lvT > 0.002f) {   // traffic: a deep rumble that swells as cars pass, and a faint engine drone
+            brown = brown * 0.995f + w * 0.02f;
+            tlp += (brown - tlp) * 0.05f;
+            float swell = 0.65f + 0.35f * sinf(tf * 0.9f) * sinf(tf * 0.31f + 1.f);
+            out += (tlp * 5.5f + sinf(TAU_F * 58.f * tf) * 0.03f * swell) * swell * lvT;
+        }
+        if (lvW > 0.002f) {   // surf: noise that rises as each wave breaks and hisses as it runs out
+            float a = 0.5f + 0.5f * sinf(tf * TAU_F / 6.3f + 0.8f * sinf(tf * 0.37f));
+            float env = 0.2f + 0.8f * a * a * a;
+            wlp += (w - wlp) * (0.025f + 0.12f * env);
+            wlp2 += (wlp - wlp2) * 0.4f;
+            out += wlp2 * 2.2f * env * lvW;
+        }
+        if (lvS > 0.01f) {    // sea lions: a gruff, buzzing "ork ork ork", then a pause
+            barkT -= dt;
+            if (barkT <= 0) {
+                if (barksLeft <= 0) { barksLeft = 2 + (seed % 4); barkF = 200 + (seed >> 8) % 140; }
+                barkOn = barkLen = 0.17f + ((seed >> 4) % 10) * 0.008f;
+                barksLeft--;
+                barkT = barksLeft > 0 ? barkOn + 0.12f : 1.5f + ((seed >> 12) % 100) * 0.05f;
+            }
+            if (barkOn > 0) {
+                barkOn -= dt;
+                barkPh += (barkF * (1.f + 0.06f * sinf(tf * 70.f))) * dt;
+                float saw = 2.f * (barkPh - floorf(barkPh)) - 1.f;
+                bp1 += 0.25f * (saw + w * 0.3f - bp1 - 0.6f * bp2);   // a crude resonant formant
+                bp2 += 0.25f * bp1;
+                float env = std::min(1.f, barkOn * 30.f) * std::min(1.f, (barkLen - barkOn) * 25.f);
+                out += bp1 * 0.5f * env * lvS;
+            }
+        }
+        if (lvH > 0.002f) {   // wind up high: a hollow, gusting whistle of band-limited noise
+            float gust = 0.45f + 0.55f * fabsf(sinf(tf * 0.33f) * sinf(tf * 0.71f + 2.f));
+            hlp += (w - hlp) * 0.08f;
+            hlp2 += (hlp - hlp2) * 0.02f;
+            out += (hlp - hlp2) * 1.9f * gust * lvH;
+        }
+        if (lvR > 0.002f) {   // rain: steady hiss plus the odd fat drop
+            rlp += (w - rlp) * 0.35f;
+            out += (w - rlp) * 0.22f * lvR;
+            if (((seed >> 3) & 1023) == 0) drop = 1.f;
+            drop *= 0.996f;
+            out += drop * w * 0.25f * lvR;
+        }
+        if (lvM > 0.002f) {   // pedal bus music: I-V-vi-IV at 112 bpm with bass, chord stabs, kick and hi-hat
+            const float beat = 60.f / 112.f;
+            float bt = (float)fmod(t, beat * 16.0);
+            int bar = (int)(bt / (beat * 4)), step = (int)(bt / (beat * 0.5f));
+            float inBeat = fmodf(bt, beat), in8 = fmodf(bt, beat * 0.5f);
+            static const float ROOT[4] = {130.81f, 98.0f, 110.0f, 87.31f};
+            static const int MINOR[4] = {0, 0, 1, 0};
+            float root = ROOT[bar];
+            float third = root * (MINOR[bar] ? 1.1892f : 1.2599f), fifth = root * 1.4983f;
+            float freqs[4] = {root * 0.5f, root * 2, third * 2, fifth * 2};
+            float m = 0;
+            for (int k = 0; k < 4; k++) {
+                mPh[k] += freqs[k] * dt;
+                mPh[k] -= floorf(mPh[k]);
+            }
+            float bass = (mPh[0] < 0.5f ? 1.f : -1.f) * 0.35f * expf(-in8 * 5.f);
+            float stab = 0;
+            if (step % 2 == 1) for (int k = 1; k < 4; k++) stab += (2 * mPh[k] - 1) * 0.12f * expf(-in8 * 9.f);
+            kickPh += (50.f + 90.f * expf(-inBeat * 30.f)) * dt;
+            float kick = sinf(TAU_F * kickPh) * expf(-inBeat * 9.f) * 0.7f;
+            float hat = (step % 2 == 1) ? w * 0.12f * expf(-in8 * 40.f) : 0.f;
+            m = bass + stab + kick + hat;
+            mlp += (m - mlp) * 0.3f;   // a little muffled, as from a speaker on a moving bike
+            out += mlp * 0.75f * lvM;
+        }
+        return out;
+    }
+};
+static Ambience gAmb;
 
 static void loopCallback(void* buffer, unsigned int frames) {
     static uint32_t seed = 12345;
@@ -26,7 +121,9 @@ static void loopCallback(void* buffer, unsigned int frames) {
         // wind
         lpw += (white - lpw) * 0.01f;
         float wind = lpw * 4.0f * windS;
-        float v = clampf((roll + grind + wind) * 0.6f, -1, 1);
+        float amb = gAmb.sample(aTraffic.load(std::memory_order_relaxed), aWaves.load(std::memory_order_relaxed), aSeal.load(std::memory_order_relaxed),
+                                aWindHi.load(std::memory_order_relaxed), aMusic.load(std::memory_order_relaxed), aRain.load(std::memory_order_relaxed));
+        float v = clampf((roll + grind + wind + amb) * 0.6f, -1, 1);
         out[i] = (short)(v * 30000);
     }
     if (ph > 2 * PI) ph -= 2 * PI;
@@ -85,6 +182,19 @@ void Sfx::init() {
         float env = std::min(1.f, t * 20) * std::min(1.f, (1.4f - t) * 20);
         return (sinf(ph) * 0.4f + sinf(ph * 2) * 0.12f) * env;
     });
+    gull = makeSound(0.9f, [](float t, float& ph, uint32_t& s) {   // "kee-ow, kyow": a falling cry, twice
+        float syl = t < 0.42f ? t : t - 0.45f;
+        if (syl < 0) return 0.f;
+        float f = (t < 0.42f ? 1650.f : 1500.f) - 700.f * syl / 0.4f + 40.f * sinf(t * 180.f);
+        ph += TAU_F * f / SR;
+        float env = std::min(1.f, syl * 40.f) * std::max(0.f, 1.f - syl / 0.4f);
+        return (sinf(ph) * 0.3f + sinf(ph * 2) * 0.18f + sinf(ph * 3) * 0.08f + rnd(s) * 0.04f) * env;
+    });
+    flutter = makeSound(0.9f, [](float t, float& st, uint32_t& s) {   // a flock of wings clattering up
+        st += (rnd(s) - st) * 0.5f;
+        float beat = 0.5f + 0.5f * sinf(t * TAU_F * 17.f);
+        return st * beat * beat * 1.3f * expf(-t * 2.8f) * std::min(1.f, t * 60.f);
+    });
     SetAudioStreamBufferSizeDefault(2048);
     loop = LoadAudioStream(SR, 16, 1);
     SetAudioStreamCallback(loop, loopCallback);
@@ -97,6 +207,15 @@ void Sfx::setLevels(float roll, float grind, float wind) {
     aWind = clampf(wind, 0, 1);
 }
 
+void Sfx::setAmbience(float traffic, float waves, float sealions, float windHigh, float music, float rain) {
+    aTraffic = clampf(traffic, 0, 1);
+    aWaves = clampf(waves, 0, 1);
+    aSeal = clampf(sealions, 0, 1);
+    aWindHi = clampf(windHigh, 0, 1);
+    aMusic = clampf(music, 0, 1);
+    aRain = clampf(rain, 0, 1);
+}
+
 void Sfx::play(Sound& s, float vol, float pitch) {
     if (!ok) return;
     SetSoundVolume(s, vol);
@@ -107,6 +226,6 @@ void Sfx::play(Sound& s, float vol, float pitch) {
 void Sfx::shutdown() {
     if (!ok) return;
     UnloadAudioStream(loop);
-    for (Sound* s : {&pop, &land, &bail, &splash, &honk, &token, &clack, &siren}) UnloadSound(*s);
+    for (Sound* s : {&pop, &land, &bail, &splash, &honk, &token, &clack, &siren, &gull, &flutter}) UnloadSound(*s);
     CloseAudioDevice();
 }

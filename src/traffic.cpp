@@ -17,6 +17,16 @@ static void colorPed(Ped& p, RNG& r) {
     p.scale = r.range(0.9f, 1.08f);
     p.speed = r.range(1.0f, 1.6f);
     p.phase = r.range(0, 6);
+    static const Color EXTRA[] = {{40, 40, 44, 255}, {150, 40, 40, 255}, {50, 80, 140, 255}, {200, 170, 120, 255}, {90, 110, 60, 255},
+                                  {230, 230, 225, 255}, {120, 70, 40, 255}, {220, 120, 40, 255}};
+    static const uint8_t HAIRS[] = {HAIR_SHORT, HAIR_SHORT, HAIR_LONG, HAIR_LONG, HAIR_BUN, HAIR_BALD, HAIR_CAP, HAIR_CURLY};
+    uint32_t h = r.next();
+    p.hairStyle = HAIRS[h % 8];
+    int c = (h >> 3) % 20;   // about half carry something; phones are everywhere
+    p.carry = c < 9 ? CARRY_NONE : c < 12 ? CARRY_BACKPACK : c < 14 ? CARRY_SHOULDER : c < 16 ? CARRY_SHOPPING : CARRY_PHONE;
+    p.idle = (h >> 8) % 4;
+    p.build = 0.9f + ((h >> 12) % 100) * 0.0022f;
+    p.extra = EXTRA[(h >> 20) % 8];
 }
 
 static int pickCarType(RNG& r, bool sf) {
@@ -294,6 +304,7 @@ void Traffic::nextPedMove(Ped& p, RNG& r) {
 void Traffic::update(float dt, World& w, const Player& pl) {
     RNG& r = gR;
     evHonk = false;
+    clock += dt;
     for (auto& c : cats) {
         float dx = c.pos.x - pl.pos.x, dz = c.pos.z - pl.pos.z, d2 = dx * dx + dz * dz;
         if (d2 > 80 * 80) continue;
@@ -352,6 +363,16 @@ void Traffic::update(float dt, World& w, const Player& pl) {
                 else { const Path& P = w.carPaths[c.path]; dist = c.pdir > 0 ? P.len - c.s : c.s; cap = sqrtf(16 + 8 * dist); }
             }
             target = std::min(target, cap);
+        }
+        // traffic lights: stop at the line on red, and on yellow unless too close to stop
+        if (c.mode == 0 && c.g == &w.sf && !w.signals.empty()) {
+            int ni = c.i + DI[c.d], nj = c.j + DJ[c.d];
+            if (c.g->in(ni, nj) && w.signals[(size_t)nj * c.g->ni + ni]) {
+                int st = signalState(nj * c.g->ni + ni, c.d < 2 ? 0 : 1, clock);
+                float dist = c.g->sp - 11.5f - c.t * c.g->sp - carModel(c.type).halfLen;
+                if (st != 0 && dist > -0.3f && !(st == 1 && dist < c.speed * 1.1f))
+                    target = std::min(target, dist > 0.4f ? sqrtf(2 * 4.5f * dist) - 0.6f : 0.f);
+            }
         }
         float dv = target - c.speed;
         c.speed += clampf(dv, -14 * dt, 3.5f * dt);
@@ -457,8 +478,9 @@ void Traffic::update(float dt, World& w, const Player& pl) {
         Vector2 base;
         float walk = 1;
         if (p.mode == 0) {
-            p.t += p.speed * dt / p.len;
-            if (p.t >= 1) { p.t = 1; nextPedMove(p, r); }
+            if (p.wait > 0) { p.wait -= dt; walk = 0; }   // waiting at the corner to cross
+            else p.t += p.speed * dt / p.len;
+            if (p.t >= 1) { p.t = 1; nextPedMove(p, r); if (r.chance(0.22f)) p.wait = r.range(1.5f, 5.f); }
             base = Vector2Lerp(p.from, p.to, clampf(p.t, 0, 1));
             Vector2 d = Vector2Subtract(p.to, p.from);
             if (Vector2Length(d) > 0.1f) p.yaw = lerpAngle(p.yaw, atan2f(d.y, d.x), 1 - expf(-dt * 6));
@@ -691,7 +713,10 @@ static void drawCat(const Cat& c) {
     rlPopMatrix();
 }
 
-static void drawPerson(const Ped& p) {
+// A pedestrian in three levels of detail. Up close: jointed arms and legs, a round head with a hair style, shoulders,
+// whatever they carry, and when standing a little idle routine (waiting, chatting, on a call, arms folded).
+// Further out the same figure in plain boxes, and far away just a handful of them.
+static void drawPerson(const Ped& p, float dist2, float now) {
     rlPushMatrix();
     rlTranslatef(p.pos.x, p.pos.y, p.pos.z);
     rlRotatef(-p.yaw * RAD2DEG, 0, 1, 0);
@@ -701,24 +726,155 @@ static void drawPerson(const Ped& p) {
     }
     float s = p.scale;
     rlScalef(s, s, s);
-    float sw = (p.mode == 2 || p.knock > 0) ? 0.f : sinf(p.phase) * 0.5f;
-    for (int side = -1; side <= 1; side += 2) {
-        rlPushMatrix();
-        rlTranslatef(0, 0.9f, side * 0.1f);
-        rlRotatef(sw * side * RAD2DEG, 0, 0, 1);
-        DrawCube({0, -0.44f, 0}, 0.15f, 0.88f, 0.15f, p.pants);
-        DrawCube({0.05f, -0.86f, 0}, 0.24f, 0.07f, 0.13f, {40, 40, 40, 255});
+    Color shoe = {40, 40, 40, 255};
+    bool standing = p.mode == 2 || p.wait > 0 || p.knock > 0;
+    float sh = 0.19f * p.build;   // shoulder half-width
+    if (dist2 > 110 * 110) {      // far away: legs, body, head
+        float sw = standing ? 0.f : sinf(p.phase) * 0.5f;
+        for (int side = -1; side <= 1; side += 2) {
+            rlPushMatrix();
+            rlTranslatef(0, 0.9f, side * 0.1f);
+            rlRotatef(sw * side * RAD2DEG, 0, 0, 1);
+            DrawCube({0, -0.45f, 0}, 0.15f, 0.9f, 0.15f, p.pants);
+            rlPopMatrix();
+        }
+        DrawCube({0, 1.2f, 0}, 0.24f, 0.56f, sh * 2 + 0.06f, p.shirt);
+        DrawCube({0, 1.66f, 0}, 0.2f, 0.26f, 0.19f, p.hairStyle == HAIR_BALD ? p.skin : p.hair);
         rlPopMatrix();
+        return;
+    }
+    bool close = dist2 < 35 * 35;
+    float t = now * 1.0f + p.phase * 3.1f;
+    // pose: arm swing / out / elbow per side (-1 left, +1 right), head yaw and pitch, body sway
+    float swing[2], out[2] = {0.06f, 0.06f}, elbow[2], headYaw = 0, headPitch = 0, sway = 0, bob = 0;
+    bool phoneHand = false, phoneEar = false;
+    if (!standing) {
+        for (int k = 0; k < 2; k++) {
+            float sd = k ? 1.f : -1.f;
+            swing[k] = -sinf(p.phase) * 0.42f * sd;
+            elbow[k] = 0.25f + 0.2f * std::max(0.f, swing[k]);
+        }
+        bob = fabsf(sinf(p.phase)) * 0.035f;
+        if (p.carry == CARRY_PHONE) { swing[1] = 0.45f; elbow[1] = 1.45f; out[1] = 0.12f; headPitch = 0.35f; phoneHand = true; }
+        if (p.carry == CARRY_SHOPPING) { swing[1] *= 0.35f; elbow[1] = 0.1f; }
+    } else {
+        for (int k = 0; k < 2; k++) { swing[k] = 0.04f; elbow[k] = 0.12f; }
+        int idle = p.knock > 0 ? -1 : (p.carry == CARRY_PHONE && p.idle == IDLE_WAIT ? IDLE_ARMS : p.idle);
+        sway = sinf(t * 0.55f) * 0.025f;
+        if (idle == IDLE_WAIT) {            // looking up the street now and then, shifting weight
+            headYaw = sinf(t * 0.35f) * 0.6f * smooth01(0.2f, 0.7f, fabsf(sinf(t * 0.17f)));
+        } else if (idle == IDLE_CHAT) {     // talking with their hands, nodding along
+            swing[1] = 0.35f + 0.25f * sinf(t * 1.9f);
+            elbow[1] = 1.1f + 0.45f * sinf(t * 2.7f);
+            out[1] = 0.2f;
+            swing[0] = 0.2f; elbow[0] = 1.0f; out[0] = 0.5f;   // other hand on the hip
+            headPitch = sinf(t * 2.3f) * 0.08f;
+            headYaw = sinf(t * 0.5f) * 0.25f;
+        } else if (idle == IDLE_CALL) {     // phone to the ear, pacing a little
+            swing[1] = 0.25f; out[1] = 0.35f; elbow[1] = 2.5f;
+            headPitch = -0.05f; headYaw = sinf(t * 0.4f) * 0.3f;
+            phoneEar = true;
+        } else if (idle == IDLE_ARMS) {     // arms folded, or both hands on a phone
+            swing[0] = swing[1] = 0.5f; elbow[0] = elbow[1] = 1.55f; out[0] = out[1] = -0.32f;
+            if (p.carry == CARRY_PHONE) { out[0] = out[1] = -0.2f; headPitch = 0.4f; phoneHand = true; }
+        }
+    }
+    rlTranslatef(0, bob, sway);
+    // legs: thigh and shin, the knee bending as the leg comes through
+    for (int k = 0; k < 2; k++) {
+        float sd = k ? 1.f : -1.f;
+        float lp = p.phase + (k ? 0.f : PI);
+        float th = standing ? (k ? 0.03f : -0.02f) : sinf(lp) * 0.42f;
+        float knee = standing ? 0.04f : 0.12f + std::max(0.f, cosf(lp)) * 0.55f;
         rlPushMatrix();
-        rlTranslatef(0, 1.43f, side * 0.25f);
-        rlRotatef(-sw * side * 0.8f * RAD2DEG, 0, 0, 1);
-        DrawCube({0, -0.28f, 0}, 0.11f, 0.58f, 0.11f, p.shirt);
-        DrawCube({0, -0.6f, 0}, 0.1f, 0.1f, 0.1f, p.skin);
+        rlTranslatef(0, 0.92f, sd * 0.1f);
+        rlRotatef(th * RAD2DEG, 0, 0, 1);
+        DrawCube({0, -0.22f, 0}, 0.16f, 0.46f, 0.16f, p.pants);
+        rlTranslatef(0, -0.45f, 0);
+        rlRotatef(-knee * RAD2DEG, 0, 0, 1);
+        DrawCube({0, -0.21f, 0}, 0.13f, 0.43f, 0.13f, p.pants);
+        DrawCube({0.05f, -0.43f, 0}, 0.26f, 0.08f, 0.12f, shoe);
         rlPopMatrix();
     }
-    DrawCube({0, 1.18f, 0}, 0.24f, 0.58f, 0.4f, p.shirt);
-    DrawCube({0, 1.6f, 0}, 0.2f, 0.24f, 0.2f, p.skin);
-    DrawCube({-0.02f, 1.74f, 0}, 0.23f, 0.06f, 0.22f, p.hair);
+    // hips, waist, chest and rounded shoulders
+    DrawCube({0, 0.96f, 0}, 0.21f, 0.16f, 0.3f, p.pants);
+    DrawCube({0, 1.1f, 0}, 0.2f, 0.2f, 0.32f + 0.02f * p.build, p.shirt);
+    DrawCube({0, 1.32f, 0}, 0.24f, 0.28f, sh * 2, p.shirt);
+    if (close) DrawCylinderEx({0, 1.43f, -sh + 0.02f}, {0, 1.43f, sh - 0.02f}, 0.08f, 0.08f, 6, p.shirt);
+    DrawCube({0, 1.5f, 0}, 0.09f, 0.1f, 0.09f, p.skin);   // neck
+    // carried things on the body
+    if (p.carry == CARRY_BACKPACK) {
+        DrawCube({-0.2f, 1.24f, 0}, 0.15f, 0.4f, 0.3f, p.extra);
+        if (close) DrawCube({-0.28f, 1.18f, 0}, 0.04f, 0.16f, 0.22f, scaleC(p.extra, 0.8f));
+    } else if (p.carry == CARRY_SHOULDER) {
+        DrawCube({0.0f, 0.98f, -(sh + 0.05f)}, 0.27f, 0.22f, 0.08f, p.extra);
+        if (close) DrawCube({0.0f, 1.25f, -(sh - 0.04f)}, 0.035f, 0.34f, 0.03f, scaleC(p.extra, 0.7f));   // strap
+    }
+    // arms: upper arm, forearm, hand (and whatever is in it)
+    for (int k = 0; k < 2; k++) {
+        float sd = k ? 1.f : -1.f;
+        rlPushMatrix();
+        rlTranslatef(0, 1.43f, sd * (sh + 0.03f));
+        rlRotatef(swing[k] * RAD2DEG, 0, 0, 1);
+        rlRotatef(-sd * out[k] * RAD2DEG, 1, 0, 0);
+        DrawCube({0, -0.15f, 0}, 0.1f, 0.3f, 0.1f, p.shirt);
+        rlTranslatef(0, -0.29f, 0);
+        rlRotatef(elbow[k] * RAD2DEG, 0, 0, 1);
+        DrawCube({0, -0.13f, 0}, 0.085f, 0.26f, 0.085f, p.shirt);
+        DrawCube({0, -0.29f, 0}, 0.075f, 0.09f, 0.06f, p.skin);
+        if (k == 1 && (phoneHand || phoneEar)) {
+            DrawCube({0.02f, -0.31f, 0}, 0.025f, 0.14f, 0.07f, {25, 25, 28, 255});
+            if (close) DrawCube({0.035f, -0.31f, 0}, 0.006f, 0.12f, 0.06f, {150, 190, 255, M_EMISSIVE});   // the screen
+        }
+        if (k == 1 && p.carry == CARRY_SHOPPING) {
+            rlRotatef(-(swing[k] + elbow[k]) * RAD2DEG, 0, 0, 1);   // the bag hangs straight down
+            DrawCube({0, -0.5f, 0}, 0.3f, 0.32f, 0.12f, p.extra);
+            if (close) DrawCube({0, -0.32f, 0}, 0.02f, 0.06f, 0.1f, scaleC(p.extra, 0.6f));
+        }
+        rlPopMatrix();
+    }
+    // head and hair
+    rlPushMatrix();
+    rlTranslatef(0, 1.56f, 0);
+    rlRotatef(headYaw * RAD2DEG, 0, 1, 0);
+    rlRotatef(-headPitch * RAD2DEG, 0, 0, 1);
+    Vector3 hc = {0.01f, 0.13f, 0};
+    Color hair = p.hairStyle == HAIR_CAP ? p.extra : p.hair;
+    if (close) {
+        rlPushMatrix();
+        rlTranslatef(hc.x, hc.y, hc.z);
+        rlScalef(1.f, 1.16f, 0.95f);
+        DrawSphereEx({0, 0, 0}, 0.11f, 5, 8, p.skin);
+        rlPopMatrix();
+        Color eye = {30, 26, 24, 255};
+        for (int e = -1; e <= 1; e += 2) DrawCube({hc.x + 0.1f, hc.y + 0.015f, e * 0.038f}, 0.012f, 0.018f, 0.022f, eye);
+        DrawCube({hc.x + 0.112f, hc.y - 0.015f, 0}, 0.02f, 0.035f, 0.025f, scaleC(p.skin, 0.92f));   // nose
+        if (p.hairStyle != HAIR_BALD) {   // a cap of hair over the crown and the back of the head
+            rlPushMatrix();
+            float big = p.hairStyle == HAIR_CURLY ? 1.22f : 1.f;
+            rlTranslatef(hc.x - 0.014f, hc.y + 0.045f, 0);
+            rlScalef(1.03f * big, (p.hairStyle == HAIR_CAP ? 0.55f : 0.66f) * big, 1.03f * big);
+            DrawSphereEx({0, 0, 0}, 0.118f, 4, 8, hair);
+            rlPopMatrix();
+        }
+    } else {
+        DrawCube({hc.x, hc.y, 0}, 0.2f, 0.25f, 0.19f, p.skin);
+        if (p.hairStyle != HAIR_BALD) DrawCube({hc.x - 0.015f, hc.y + 0.11f, 0}, 0.23f, 0.06f, 0.22f, hair);
+    }
+    switch (p.hairStyle) {
+    case HAIR_SHORT: if (!close) DrawCube({hc.x - 0.1f, hc.y + 0.03f, 0}, 0.04f, 0.15f, 0.2f, hair); break;
+    case HAIR_LONG:
+        DrawCube({hc.x - 0.09f, hc.y - 0.09f, 0}, 0.07f, 0.32f, 0.21f, hair);
+        if (close) for (int e = -1; e <= 1; e += 2) DrawCube({hc.x - 0.02f, hc.y - 0.06f, e * 0.1f}, 0.12f, 0.24f, 0.03f, hair);
+        break;
+    case HAIR_BUN:
+        if (close) DrawSphereEx({hc.x - 0.1f, hc.y + 0.08f, 0}, 0.055f, 4, 6, hair);
+        else DrawCube({hc.x - 0.11f, hc.y + 0.07f, 0}, 0.08f, 0.08f, 0.08f, hair);
+        break;
+    case HAIR_CAP: DrawCube({hc.x + 0.12f, hc.y + 0.065f, 0}, 0.12f, 0.018f, 0.17f, scaleC(p.extra, 0.8f)); break;   // the brim
+    case HAIR_CURLY: if (!close) DrawCube({hc.x - 0.02f, hc.y + 0.06f, 0}, 0.26f, 0.16f, 0.26f, hair); break;
+    }
+    rlPopMatrix();
     rlPopMatrix();
 }
 
@@ -806,28 +962,48 @@ void Traffic::drawShadows(Vector3 cam) const {
     }
 }
 
-void Traffic::draw(Vector3 cam, Vector3 camFwd) const {
+void Traffic::draw(Vector3 cam, Vector3 camFwd, bool nearPass) const {
     for (auto& c : cars) {
         Vector3 d = Vector3Subtract(c.pos, cam);
         float dist2 = d.x * d.x + d.z * d.z;
         if (dist2 > 420 * 420) continue;
+        if (!nearPass && dist2 < 235 * 235) continue;   // wholly inside the near pass: drawn there
         if (Vector3DotProduct(d, camFwd) < -15) continue;
         drawCarModel(c.type, c.body, c.pos, c.yaw, c.pitch, c.braking);
         if (c.type == CT_CABLECAR && dist2 < 170 * 170) drawCableRiders(c, (int)(&c - cars.data()));
         if (c.type == CT_PEDALBUS && dist2 < 140 * 140) drawPedalRiders(c, (int)(&c - cars.data()));
     }
+    if (!nearPass) return;   // people and pets never reach the far pass (250 m+)
+    float now = (float)GetTime();
     for (auto& p : peds) {
         Vector3 d = Vector3Subtract(p.pos, cam);
         float dist2 = d.x * d.x + d.z * d.z;
         if (dist2 > 230 * 230) continue;
         if (Vector3DotProduct(d, camFwd) < -5) continue;
-        drawPerson(p);
-        if (p.pet && dist2 < 150 * 150) drawDog(p, (float)GetTime());
+        drawPerson(p, dist2, now);
+        if (p.pet && dist2 < 150 * 150) drawDog(p, now);
     }
     for (auto& c : cats) {
         Vector3 d = Vector3Subtract(c.pos, cam);
         if (d.x * d.x + d.z * d.z > 90 * 90 || Vector3DotProduct(d, camFwd) < -3) continue;
         drawCat(c);
+    }
+}
+
+void Traffic::drawCasters(Vector3 c, float rCars, float rPeds) const {
+    for (auto& k : cars) {
+        float dist2 = sq(k.pos.x - c.x) + sq(k.pos.z - c.z);
+        if (dist2 > rCars * rCars) continue;
+        drawCarModel(k.type, k.body, k.pos, k.yaw, k.pitch, false);
+        if (k.type == CT_PEDALBUS && dist2 < 60 * 60) drawPedalRiders(k, (int)(&k - cars.data()));
+    }
+    if (rPeds <= 0) return;
+    float now = (float)GetTime();
+    for (auto& p : peds) {
+        float dist2 = sq(p.pos.x - c.x) + sq(p.pos.z - c.z);
+        if (dist2 > rPeds * rPeds) continue;
+        drawPerson(p, 1e9f, now);   // the far (cheap) version is plenty for a shadow
+        if (p.pet && dist2 < 40 * 40) drawDog(p, now);
     }
 }
 
@@ -843,6 +1019,21 @@ void Traffic::drawTrain(const World& w, float s, int dir, Vector3 cam) {
         bool cab = k == 0 || k == 4;
         if (k == 4) yaw += PI, pitch = -pitch;
         drawCarModel(cab ? CT_CALTRAIN_CAB : CT_CALTRAIN, WHITE, {c.x, c.y + 0.3f, c.z}, yaw, pitch, false);
+    }
+}
+
+void Traffic::drawSignals(const World& w, Vector3 cam) const {
+    static const Color ON[3] = {{60, 255, 120, M_EMISSIVE}, {255, 190, 30, M_EMISSIVE}, {255, 40, 30, M_EMISSIVE}};
+    static const Color OFF[3] = {{24, 44, 32, 255}, {54, 44, 20, 255}, {54, 22, 20, 255}};
+    for (auto& h : w.signalHeads) {
+        if (sq(h.pos.x - cam.x) + sq(h.pos.z - cam.z) > 240.f * 240.f) continue;
+        int st = signalState(h.node, h.axis, clock);
+        for (int k = 0; k < 3; k++) {   // red on top, then yellow, green at the bottom
+            int lamp = 2 - k;
+            Vector3 p = {h.pos.x, h.pos.y + 0.36f - k * 0.36f, h.pos.z};
+            bool x = fabsf(h.face.x) > 0.5f;
+            DrawCube(p, x ? 0.04f : 0.22f, 0.22f, x ? 0.22f : 0.04f, st == lamp ? ON[lamp] : OFF[lamp]);
+        }
     }
 }
 

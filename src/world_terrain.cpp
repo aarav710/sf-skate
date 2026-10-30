@@ -1,6 +1,7 @@
 // Terrain shape (coastlines + hills), zones, collision queries, ground mesh and minimap.
 #include "world_internal.h"
 #include <thread>
+#include <atomic>
 
 const Color C_ASPHALT = col(58, 58, 63, M_GROUND);
 const Color C_SIDEWALK = col(158, 156, 150, M_GROUND);
@@ -712,6 +713,7 @@ void World::buildTerrainMesh() {
     int nx = (int)((WX1 - WX0) / S), nz = (int)((WZ1 - WZ0) / S);
     std::vector<float> H((size_t)(nx + 1) * (nz + 1));
     std::vector<Color> C((size_t)(nx + 1) * (nz + 1));
+    std::vector<Vector3> N(C.size());   // smooth normals straight from the heightfield, seamless across chunks
     for (int j = 0; j <= nz; j++)
         for (int i = 0; i <= nx; i++) H[(size_t)j * (nx + 1) + i] = terrain(WX0 + i * S, WZ0 + j * S);
     for (int j = 0; j <= nz; j++)
@@ -722,6 +724,7 @@ void World::buildTerrainMesh() {
             float hz = H[(size_t)std::min(j + 1, nz) * (nx + 1) + i] - H[(size_t)std::max(j - 1, 0) * (nx + 1) + i];
             float slope = sqrtf(hx * hx + hz * hz) / (2 * S);
             C[(size_t)j * (nx + 1) + i] = groundColor(*this, x, z, h, slope);
+            N[(size_t)j * (nx + 1) + i] = {-hx / (2 * S), 1, -hz / (2 * S)};
         }
     for (int j = 0; j < nz; j++)
         for (int i = 0; i < nx; i++) {
@@ -731,8 +734,8 @@ void World::buildTerrainMesh() {
             float x0 = WX0 + i * S, z0 = WZ0 + j * S;
             MeshBuilder& m = mb(x0 + S / 2, z0 + S / 2);
             Vector3 pa = {x0, H[a], z0}, pb = {x0 + S, H[b], z0}, pc = {x0, H[c], z0 + S}, pd = {x0 + S, H[d], z0 + S};
-            m.vert(pa, C[a]); m.vert(pb, C[b]); m.vert(pd, C[d]);
-            m.vert(pa, C[a]); m.vert(pd, C[d]); m.vert(pc, C[c]);
+            m.vertN(pa, C[a], N[a]); m.vertN(pb, C[b], N[b]); m.vertN(pd, C[d], N[d]);
+            m.vertN(pa, C[a], N[a]); m.vertN(pd, C[d], N[d]); m.vertN(pc, C[c], N[c]);
         }
     // detailed ground around Menlo Park
     {
@@ -740,6 +743,7 @@ void World::buildTerrainMesh() {
         int mx = (int)((MX1 - MX0 + 780) / S2), mz = (int)((MZ1 - MZ0 + 780) / S2);
         std::vector<float> H2((size_t)(mx + 1) * (mz + 1));
         std::vector<Color> C2(H2.size());
+        std::vector<Vector3> N2(H2.size());
         for (int j = 0; j <= mz; j++)
             for (int i = 0; i <= mx; i++) H2[(size_t)j * (mx + 1) + i] = terrain(X0 + i * S2, Z0 + j * S2);
         for (int j = 0; j <= mz; j++)
@@ -748,6 +752,7 @@ void World::buildTerrainMesh() {
                 float hx = H2[(size_t)j * (mx + 1) + std::min(i + 1, mx)] - H2[(size_t)j * (mx + 1) + std::max(i - 1, 0)];
                 float hz = H2[(size_t)std::min(j + 1, mz) * (mx + 1) + i] - H2[(size_t)std::max(j - 1, 0) * (mx + 1) + i];
                 C2[k] = groundColor(*this, X0 + i * S2, Z0 + j * S2, H2[k], sqrtf(hx * hx + hz * hz) / (2 * S2));
+                N2[k] = {-hx / (2 * S2), 1, -hz / (2 * S2)};
             }
         for (int j = 0; j < mz; j++)
             for (int i = 0; i < mx; i++) {
@@ -755,8 +760,8 @@ void World::buildTerrainMesh() {
                 float x0 = X0 + i * S2, z0 = Z0 + j * S2;
                 MeshBuilder& m = mb(x0 + S2 / 2, z0 + S2 / 2);
                 Vector3 pa = {x0, H2[a], z0}, pb = {x0 + S2, H2[b], z0}, pc = {x0, H2[c], z0 + S2}, pd = {x0 + S2, H2[d], z0 + S2};
-                m.vert(pa, C2[a]); m.vert(pb, C2[b]); m.vert(pd, C2[d]);
-                m.vert(pa, C2[a]); m.vert(pd, C2[d]); m.vert(pc, C2[c]);
+                m.vertN(pa, C2[a], N2[a]); m.vertN(pb, C2[b], N2[b]); m.vertN(pd, C2[d], N2[d]);
+                m.vertN(pa, C2[a], N2[a]); m.vertN(pd, C2[d], N2[d]); m.vertN(pc, C2[c], N2[c]);
             }
     }
     // the sea: one large quad, the shader animates it
@@ -772,6 +777,7 @@ void World::buildBackdrop() {
     int nx = (int)((X1 - X0) / S), nz = (int)((Z1 - Z0) / S);
     std::vector<float> H((size_t)(nx + 1) * (nz + 1));
     std::vector<Color> C(H.size());
+    std::vector<Vector3> N(H.size());
     for (int j = 0; j <= nz; j++)
         for (int i = 0; i <= nx; i++) {
             float x = X0 + i * S, z = Z0 + j * S;
@@ -784,6 +790,7 @@ void World::buildBackdrop() {
             float hx = H[(size_t)j * (nx + 1) + std::min(i + 1, nx)] - H[(size_t)j * (nx + 1) + std::max(i - 1, 0)];
             float hz = H[(size_t)std::min(j + 1, nz) * (nx + 1) + i] - H[(size_t)std::max(j - 1, 0) * (nx + 1) + i];
             C[k] = groundColor(*this, X0 + i * S, Z0 + j * S, H[k], sqrtf(hx * hx + hz * hz) / (2 * S));
+            N[k] = {-hx / (2 * S), 1, -hz / (2 * S)};
         }
     for (int j = 0; j < nz; j++)
         for (int i = 0; i < nx; i++) {
@@ -795,8 +802,8 @@ void World::buildBackdrop() {
             if (std::max(std::max(H[a], H[b]), std::max(H[c], H[d])) < -1.0f) continue;
             MeshBuilder& m = mbKey(800000 + (j / 25) * 1000 + i / 25);
             Vector3 pa = {x0, H[a], z0}, pb = {x0 + S, H[b], z0}, pc = {x0, H[c], z0 + S}, pd = {x0 + S, H[d], z0 + S};
-            m.vert(pa, C[a]); m.vert(pb, C[b]); m.vert(pd, C[d]);
-            m.vert(pa, C[a]); m.vert(pd, C[d]); m.vert(pc, C[c]);
+            m.vertN(pa, C[a], N[a]); m.vertN(pb, C[b], N[b]); m.vertN(pd, C[d], N[d]);
+            m.vertN(pa, C[a], N[a]); m.vertN(pd, C[d], N[d]); m.vertN(pc, C[c], N[c]);
         }
 }
 
@@ -899,46 +906,194 @@ constexpr float CHUNK = 400.f;
 
 MeshBuilder& World::mb(float x, float z) {
     int cx = (int)floorf((x - WX0) / CHUNK), cz = (int)floorf((z - WZ0) / CHUNK);
-    return builders[cz * 1000 + cx];
+    int key = cz * 1000 + cx;
+    MeshBuilder& b = builders[key + layer * LAYER_STRIDE];
+    // foliage built through this cell goes to its detail layer, with a stand-in for the far layer
+    b.detailB = &builders[key + LAYER_DETAIL * LAYER_STRIDE];
+    b.farB = &builders[key + LAYER_FAR * LAYER_STRIDE];
+    return b;
+}
+
+// GPU vertex: position, normal (xyz + "explicit" flag), color (alpha = material), and the bare ground height
+// under the vertex, which the shader uses for contact shadow where walls, trunks and poles meet the ground.
+struct GVert { float x, y, z; signed char n[4]; unsigned char c[4]; float gy; };
+static_assert(sizeof(GVert) == 24, "packed vertex");
+
+// Fill in normals: given ones are kept, the rest are averaged over the triangles meeting at each corner whose
+// faces bend less than the smoothing angle (so a box keeps its edges and a trunk or a hillside reads round).
+static void bakeVerts(const World& w, const MeshBuilder& b, std::vector<GVert>& out) {
+    size_t n = b.count() / 3 * 3;
+    out.resize(n);
+    std::vector<Vector3> fa(n / 3), fu(n / 3);   // area-weighted and unit face normals
+    for (size_t t = 0; t < n / 3; t++) {
+        const float* p = &b.v[t * 9];
+        Vector3 e1 = {p[3] - p[0], p[4] - p[1], p[5] - p[2]}, e2 = {p[6] - p[0], p[7] - p[1], p[8] - p[2]};
+        Vector3 c = Vector3CrossProduct(e1, e2);
+        float l = Vector3Length(c);
+        fa[t] = Vector3Scale(c, 0.5f);
+        fu[t] = l > 1e-9f ? Vector3Scale(c, 1.f / l) : V3(0, 1, 0);
+    }
+    struct Key { int x, y, z; uint32_t i; };
+    std::vector<Key> keys;
+    keys.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+        GVert& g = out[i];
+        g.x = b.v[i * 3]; g.y = b.v[i * 3 + 1]; g.z = b.v[i * 3 + 2];
+        memcpy(g.c, &b.c[i * 4], 4);
+        memcpy(g.n, &b.n[i * 4], 4);
+        if (g.n[3] == NRM_EXPLICIT) { g.gy = g.y - 100.f; continue; }   // terrain, foliage: no contact shadow
+        g.gy = w.terrain(g.x, g.z);
+        keys.push_back({(int)lroundf(g.x * 500.f), (int)lroundf(g.y * 500.f), (int)lroundf(g.z * 500.f), (uint32_t)i});
+    }
+    std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
+        return a.x != b.x ? a.x < b.x : a.y != b.y ? a.y < b.y : a.z < b.z;
+    });
+    for (size_t s0 = 0; s0 < keys.size();) {
+        size_t s1 = s0 + 1;
+        while (s1 < keys.size() && keys[s1].x == keys[s0].x && keys[s1].y == keys[s0].y && keys[s1].z == keys[s0].z) s1++;
+        bool big = s1 - s0 > 48;   // a fan of dozens of faces: not worth smoothing
+        for (size_t a = s0; a < s1; a++) {
+            uint32_t vi = keys[a].i;
+            Vector3 fv = fu[vi / 3], sum = fa[vi / 3];
+            float th = out[vi].n[3] == SMOOTH_ORGANIC ? 0.26f : 0.82f;   // cos 75 / cos 35 degrees
+            if (!big)
+                for (size_t q = s0; q < s1; q++) {
+                    uint32_t ui = keys[q].i;
+                    if (ui / 3 == vi / 3) continue;
+                    float d = Vector3DotProduct(fu[ui / 3], fv);
+                    // faces are wound either way (no culling), so a face pointing back counts the other way round
+                    if (fabsf(d) >= th) sum = Vector3Add(sum, Vector3Scale(fa[ui / 3], d < 0 ? -1.f : 1.f));
+                }
+            float l = Vector3Length(sum);
+            Vector3 nn = l > 1e-9f ? Vector3Scale(sum, 1.f / l) : fv;
+            if (Vector3DotProduct(nn, fv) < 0.2f) nn = fv;
+            out[vi].n[0] = (signed char)(nn.x * 126); out[vi].n[1] = (signed char)(nn.y * 126); out[vi].n[2] = (signed char)(nn.z * 126);
+            out[vi].n[3] = 0;
+        }
+        s0 = s1;
+    }
+}
+
+// Two buffers per chunk: position + color (16 bytes, all the far pass and the shadow maps need) and normal +
+// ground height (8 bytes, near pass only), so the far pass reads no more memory per vertex than it has to.
+static Chunk uploadVerts(const std::vector<GVert>& g) {
+    Chunk ch{};
+    ch.count = (int)g.size();
+    ch.mn = {1e9f, 1e9f, 1e9f};
+    ch.mx = {-1e9f, -1e9f, -1e9f};
+    for (auto& q : g) {
+        ch.mn = Vector3Min(ch.mn, {q.x, q.y, q.z});
+        ch.mx = Vector3Max(ch.mx, {q.x, q.y, q.z});
+    }
+    struct PC { float x, y, z; unsigned char c[4]; };
+    struct NG { signed char n[4]; float gy; };
+    std::vector<PC> pc(g.size());
+    std::vector<NG> ng(g.size());
+    for (size_t i = 0; i < g.size(); i++) {
+        pc[i] = {g[i].x, g[i].y, g[i].z, {g[i].c[0], g[i].c[1], g[i].c[2], g[i].c[3]}};
+        ng[i] = {{g[i].n[0], g[i].n[1], g[i].n[2], g[i].n[3]}, g[i].gy};
+    }
+    ch.vboA = rlLoadVertexBuffer(pc.data(), (int)(pc.size() * sizeof(PC)), false);
+    ch.vboB = rlLoadVertexBuffer(ng.data(), (int)(ng.size() * sizeof(NG)), false);
+    // locations raylib binds by name: 0 vertexPosition, 1 vertexTexCoord (ground height here), 2 vertexNormal, 3 vertexColor
+    for (int k = 0; k < 2; k++) {
+        unsigned& vao = k ? ch.vaoFar : ch.vao;
+        vao = rlLoadVertexArray();
+        rlEnableVertexArray(vao);
+        rlEnableVertexBuffer(ch.vboA);
+        rlSetVertexAttribute(0, 3, RL_FLOAT, false, sizeof(PC), 0);
+        rlEnableVertexAttribute(0);
+        rlSetVertexAttribute(3, 4, RL_UNSIGNED_BYTE, true, sizeof(PC), 12);
+        rlEnableVertexAttribute(3);
+        if (k == 0) {
+            rlEnableVertexBuffer(ch.vboB);
+            rlSetVertexAttribute(2, 4, 0x1400 /* GL_BYTE */, true, sizeof(NG), 0);
+            rlEnableVertexAttribute(2);
+            rlSetVertexAttribute(1, 1, RL_FLOAT, false, sizeof(NG), 4);
+            rlEnableVertexAttribute(1);
+        }
+    }
+    rlDisableVertexArray();
+    return ch;
 }
 
 void World::upload() {
-    auto make = [](MeshBuilder& b) {
-        Chunk ch{};
-        size_t n = b.count();
-        ch.mesh.vertexCount = (int)n;
-        ch.mesh.triangleCount = (int)(n / 3);
-        ch.mesh.vertices = (float*)MemAlloc((unsigned)(n * 3 * sizeof(float)));
-        ch.mesh.colors = (unsigned char*)MemAlloc((unsigned)(n * 4));
-        memcpy(ch.mesh.vertices, b.v.data(), n * 3 * sizeof(float));
-        memcpy(ch.mesh.colors, b.c.data(), n * 4);
-        ch.mn = {1e9f, 1e9f, 1e9f};
-        ch.mx = {-1e9f, -1e9f, -1e9f};
-        for (size_t i = 0; i < n; i++) {
-            Vector3 p = {b.v[i * 3], b.v[i * 3 + 1], b.v[i * 3 + 2]};
-            ch.mn = Vector3Min(ch.mn, p);
-            ch.mx = Vector3Max(ch.mx, p);
+    std::vector<MeshBuilder*> list;
+    std::vector<int> keys;
+    for (auto& kv : builders)
+        if (kv.second.count() >= 3) { list.push_back(&kv.second); keys.push_back(kv.first); }
+    list.push_back(&waterB);
+    keys.push_back(-1);
+    // normals and ground heights for every chunk in parallel, then hand each to the GPU in turn
+    std::vector<std::vector<GVert>> baked(list.size());
+    std::atomic<size_t> next{0};
+    unsigned nt = std::max(2u, std::thread::hardware_concurrency());
+    std::vector<std::thread> th;
+    for (unsigned t = 0; t < nt; t++)
+        th.emplace_back([&] {
+            for (size_t k; (k = next++) < list.size();) bakeVerts(*this, *list[k], baked[k]);
+        });
+    for (auto& t : th) t.join();
+    size_t verts = 0;
+    for (size_t k = 0; k < list.size(); k++) {
+        verts += baked[k].size();
+        Chunk ch = uploadVerts(baked[k]);
+        std::vector<GVert>().swap(baked[k]);
+        list[k]->release();
+        if (list[k] == &waterB) { water = ch; continue; }
+        // the cell's own square decides when a layer switches, so the detail and far layers trade places exactly
+        int base = keys[k] % LAYER_STRIDE;
+        ch.layer = keys[k] / LAYER_STRIDE;
+        ch.c0 = {ch.mn.x, ch.mn.z};
+        ch.c1 = {ch.mx.x, ch.mx.z};
+        if (base < 800000) {
+            ch.c0 = {WX0 + (base % 1000) * CHUNK, WZ0 + (base / 1000) * CHUNK};
+            ch.c1 = {ch.c0.x + CHUNK, ch.c0.y + CHUNK};
         }
-        UploadMesh(&ch.mesh, false);
-        return ch;
-    };
-    for (auto& kv : builders) {
-        if (kv.second.count() < 3) continue;
-        chunks.push_back(make(kv.second));
-        MeshBuilder().v.swap(kv.second.v);
-        MeshBuilder().c.swap(kv.second.c);
+        chunks.push_back(ch);
     }
+    TraceLog(LOG_INFO, "SFSKATE: %zu static vertices in %d chunks", verts, (int)chunks.size());
     builders.clear();
-    waterMesh = make(waterB).mesh;
 }
 
-void World::drawPass(const Camera3D& cam, float nearD, float farD, const Material& mat) {
+static void drawChunk(const Chunk& ch, bool slim) {
+    rlEnableVertexArray(slim ? ch.vaoFar : ch.vao);
+    rlDrawVertexArray(0, ch.count);
+}
+
+// Static meshes go straight to GL with the current camera's matrices (the immediate-mode batch is flushed first).
+static void beginStatic(const Shader& sh) {
+    rlDrawRenderBatchActive();
+    rlEnableShader(sh.id);
+    rlSetUniformMatrix(sh.locs[SHADER_LOC_MATRIX_MVP], MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection()));
+}
+static void endStatic() {
+    rlDisableVertexArray();
+    rlDisableShader();
+}
+
+void World::drawPass(const Camera3D& cam, float nearD, float farD, const Shader& sh, bool slim) {
+    beginStatic(sh);
+    // the four side planes of the view frustum, straight from the view-projection matrix (Gribb & Hartmann):
+    // chunks off to the side cost as much vertex work as visible ones, so skip them
+    float16 mv = MatrixToFloatV(MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection()));   // column-major
+    const float* a = mv.v;
+    auto row = [&](int r) { return Vector4{a[r], a[4 + r], a[8 + r], a[12 + r]}; };
+    Vector4 r0 = row(0), r1 = row(1), r3 = row(3);
+    Vector4 planes[4] = {{r3.x + r0.x, r3.y + r0.y, r3.z + r0.z, r3.w + r0.w}, {r3.x - r0.x, r3.y - r0.y, r3.z - r0.z, r3.w - r0.w},
+                         {r3.x + r1.x, r3.y + r1.y, r3.z + r1.z, r3.w + r1.w}, {r3.x - r1.x, r3.y - r1.y, r3.z - r1.z, r3.w - r1.w}};
     Vector3 fwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
     for (auto& ch : chunks) {
         Vector3 c = Vector3Scale(Vector3Add(ch.mn, ch.mx), 0.5f);
         float rad = Vector3Distance(ch.mn, ch.mx) * 0.5f;
         Vector3 d = Vector3Subtract(c, cam.position);
         if (Vector3DotProduct(d, fwd) < -rad) continue;
+        bool out = false;
+        for (auto& p : planes) {   // the box corner furthest along the plane normal still behind it: outside
+            float v = p.x * (p.x > 0 ? ch.mx.x : ch.mn.x) + p.y * (p.y > 0 ? ch.mx.y : ch.mn.y) + p.z * (p.z > 0 ? ch.mx.z : ch.mn.z) + p.w;
+            if (v < 0) { out = true; break; }
+        }
+        if (out) continue;
         // nearest and farthest distance from camera to the chunk box
         Vector3 q = {std::max(std::max(ch.mn.x - cam.position.x, 0.f), cam.position.x - ch.mx.x),
                      std::max(std::max(ch.mn.y - cam.position.y, 0.f), cam.position.y - ch.mx.y),
@@ -949,9 +1104,42 @@ void World::drawPass(const Camera3D& cam, float nearD, float farD, const Materia
                      std::max(fabsf(ch.mn.y - cam.position.y), fabsf(ch.mx.y - cam.position.y)),
                      std::max(fabsf(ch.mn.z - cam.position.z), fabsf(ch.mx.z - cam.position.z))};
         if (Vector3Length(f) < nearD) continue;
-        DrawMesh(ch.mesh, mat, MatrixIdentity());
+        if (ch.layer != LAYER_MAIN) {
+            float dx = std::max(std::max(ch.c0.x - cam.position.x, 0.f), cam.position.x - ch.c1.x);
+            float dz = std::max(std::max(ch.c0.y - cam.position.z, 0.f), cam.position.z - ch.c1.y);
+            float dc = sqrtf(dx * dx + dz * dz);
+            if (ch.layer == LAYER_DETAIL && dc >= DETAIL_DIST) continue;
+            if (ch.layer == LAYER_FAR && dc < DETAIL_DIST) continue;
+            if (ch.layer == LAYER_INTERIOR && nearest > INTERIOR_DIST) continue;
+        }
+        drawChunk(ch, slim);
     }
+    endStatic();
 }
 
-void World::drawWater(const Material& mat) { DrawMesh(waterMesh, mat, MatrixIdentity()); }
+int World::drawCasters(Matrix lightView, float half, float zFar, const Shader& sh) {
+    beginStatic(sh);
+    int n = 0;
+    for (auto& ch : chunks) {
+        if (ch.layer == LAYER_FAR || ch.layer == LAYER_INTERIOR) continue;
+        // the chunk box in light space must overlap the shadow map's square and depth range
+        Vector3 lo = {1e9f, 1e9f, 1e9f}, hi = {-1e9f, -1e9f, -1e9f};
+        for (int k = 0; k < 8; k++) {
+            Vector3 p = {(k & 1) ? ch.mx.x : ch.mn.x, (k & 2) ? ch.mx.y : ch.mn.y, (k & 4) ? ch.mx.z : ch.mn.z};
+            p = Vector3Transform(p, lightView);
+            lo = Vector3Min(lo, p); hi = Vector3Max(hi, p);
+        }
+        if (hi.x < -half || lo.x > half || hi.y < -half || lo.y > half || hi.z < -zFar || lo.z > 0) continue;
+        drawChunk(ch, true);
+        n++;
+    }
+    endStatic();
+    return n;
+}
+
+void World::drawWater(const Shader& sh, bool slim) {
+    beginStatic(sh);
+    drawChunk(water, slim);
+    endStatic();
+}
 

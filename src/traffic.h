@@ -43,7 +43,15 @@ struct Ped {
     uint8_t pet = 0;            // 0 none, 1 a dog on a leash
     Color petC{}, petC2{};      // coat and the darker ears / patches
     float petS = 1;             // dog size
+    // looks: hair style, what they carry, what they do while standing, build, and the bag / hat color
+    uint8_t hairStyle = 0, carry = 0, idle = 0;
+    float build = 1;
+    Color extra{};
+    float wait = 0;             // waiting at a corner to cross
 };
+enum { HAIR_SHORT, HAIR_LONG, HAIR_BUN, HAIR_BALD, HAIR_CAP, HAIR_CURLY };
+enum { CARRY_NONE, CARRY_BACKPACK, CARRY_SHOULDER, CARRY_SHOPPING, CARRY_PHONE };
+enum { IDLE_WAIT, IDLE_CHAT, IDLE_CALL, IDLE_ARMS };
 
 // Cats on front steps and sidewalks: sitting, loafing or grooming, and bolting if you skate at them.
 struct Cat {
@@ -61,13 +69,18 @@ struct Traffic {
     std::vector<Cat> cats;
     std::vector<Train> trains; // Caltrain
     bool evHonk = false, evCrash = false;
+    float clock = 0;            // drives the traffic signals
 
     void init(World& w);
     void update(float dt, World& w, const Player& p);
     void interact(Player& p);
-    void draw(Vector3 cam, Vector3 camFwd) const;
+    // nearPass: everything within reach of the near clip range; otherwise only cars far enough to need the far pass
+    void draw(Vector3 cam, Vector3 camFwd, bool nearPass) const;
+    // sun shadow casters: cars within rCars of c, people (and their dogs) within rPeds
+    void drawCasters(Vector3 c, float rCars, float rPeds) const;
     void drawShadows(Vector3 cam) const;
     void drawTrains(const World& w, Vector3 cam) const;
+    void drawSignals(const World& w, Vector3 cam) const;   // the lamps of the traffic lights, cycling
     static void drawTrain(const World& w, float s, int dir, Vector3 cam);
 
 private:

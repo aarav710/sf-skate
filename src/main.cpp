@@ -9,166 +9,40 @@
 #include "jetski.h"
 #include "gondola.h"
 #include "seaplane.h"
+#include "render.h"
+#include "weather.h"
+#include "birds.h"
 #include <cstdio>
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
-
-// ---------------------------------------------------------------- shader
-static const char* VS = R"(#version 330
-in vec3 vertexPosition;
-in vec4 vertexColor;
-uniform mat4 mvp;
-out vec3 wPos;
-out vec4 vCol;
-void main() {
-    wPos = vertexPosition;
-    vCol = vertexColor;
-    gl_Position = mvp * vec4(vertexPosition, 1.0);
-})";
-
-static const char* FS = R"(#version 330
-in vec3 wPos;
-in vec4 vCol;
-uniform vec3 camPos;
-uniform vec3 sunDir;
-uniform vec3 sunCol;
-uniform vec3 ambCol;
-uniform vec3 fogCol;
-uniform vec3 skyCol;
-uniform float fogDen;
-uniform float night;
-uniform float time;
-out vec4 finalColor;
-
-float h21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
-float vnoise(vec2 p) {
-    vec2 i = floor(p), f = fract(p);
-    f = f * f * (3.0 - 2.0 * f);
-    float a = h21(i), b = h21(i + vec2(1, 0)), c = h21(i + vec2(0, 1)), d = h21(i + vec2(1, 1));
-    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-}
-
-void main() {
-    vec3 N = normalize(cross(dFdx(wPos), dFdy(wPos)));
-    vec3 toCam = camPos - wPos;
-    float dist = length(toCam);
-    vec3 V = toCam / max(dist, 1e-3);
-    if (dot(N, V) < 0.0) N = -N;
-    int m = int(floor((1.0 - vCol.a) * 17.0 + 0.5));
-    vec3 base = vCol.rgb;
-    vec3 emis = vec3(0.0);
-    float specK = 0.0, specP = 32.0;
-    float near = clamp(1.0 - dist / 260.0, 0.0, 1.0);
-
-    if (m == 5) {                       // ground: subtle noise
-        float n = vnoise(wPos.xz * 0.8) * 0.5 + vnoise(wPos.xz * 0.11) * 0.5;
-        base *= mix(1.0, 0.84 + 0.32 * n, 0.35 + 0.65 * near);
-    } else if (m == 1 || m == 2 || m == 6 || (m >= 7 && m <= 9)) {   // facades with windows
-        if (abs(N.y) < 0.45) {
-            bool house = (m == 2 || m >= 7);            // 7..9 are house materials with shifted floor lines
-            float u = abs(N.x) > abs(N.z) ? wPos.z : wPos.x;
-            float y = wPos.y - (m >= 7 ? 0.825 * float(m - 6) : 0.0);
-            float fh = house ? 3.3 : 3.8;
-            float fw = house ? 2.6 : (m == 6 ? 1.6 : 3.0);
-            vec2 cell = vec2(floor(u / fw), floor(y / fh));
-            vec2 f = vec2(fract(u / fw), fract(y / fh));
-            // how big one window cell is on screen: fade the pattern out before it turns into speckle
-            float px = max(fwidth(u / fw), fwidth(y / fh));
-            float detail = house ? clamp(1.6 - px * 7.0, 0.0, 1.0) : 1.0;
-            vec3 plain = base;
-            bool win;
-            bool trimmed = false;
-            if (house) {                                // tall sash windows, white surround, hood, sill, meeting rail
-                win = f.x > 0.31 && f.x < 0.69 && f.y > 0.27 && f.y < 0.83;
-                bool rail = win && abs(f.y - 0.55) < 0.014;
-                trimmed = rail || (f.x > 0.25 && f.x < 0.75 && f.y > 0.2 && f.y < 0.89 && !win) || f.y < 0.035;
-                if (rail) win = false;
-            } else if (m == 1) win = f.x > 0.1 && f.x < 0.9 && f.y > 0.3 && f.y < 0.92;
-            else win = f.x > 0.05 && f.y > 0.07;
-            if (win) {
-                float fres = pow(1.0 - abs(dot(N, V)), 2.0);
-                vec3 glass = house ? vec3(0.17, 0.2, 0.25) : mix(vec3(0.14, 0.2, 0.27), skyCol, 0.25 + 0.55 * fres);
-                if (m == 6) glass = mix(base * 0.6, skyCol, 0.3 + 0.5 * fres);
-                base = mix(base, glass, 0.92);
-                specK = 0.7; specP = 70.0;
-                float lit = h21(cell + floor(wPos.xz / 23.0) * 7.13);
-                if (lit > 0.42) emis = vec3(1.0, 0.82, 0.55) * (0.5 + 0.5 * h21(cell * 1.7)) * night * (m == 6 ? 0.8 : 1.0);
-            } else if (trimmed) {
-                base = mix(base, vec3(0.94, 0.92, 0.86), 0.88);
-            } else if (m == 6) {
-                base *= 0.9;
-            }
-            if (house) {
-                // average facade tone seen from afar: wall, a share of dark glass and cream trim
-                vec3 avg = plain * 0.62 + vec3(0.17, 0.2, 0.25) * 0.21 + vec3(0.94, 0.92, 0.86) * 0.17;
-                base = mix(avg, base, detail);
-                specK *= detail;
-            }
-        }
-    } else if (m == 3) {                 // water
-        vec2 p = wPos.xz;
-        float t = time;
-        float fade = clamp(1.0 - dist / 1800.0, 0.15, 1.0);
-        float a = p.x * 0.11 + t * 1.1, b = p.x * 0.23 + p.y * 0.17 - t * 1.6, c = p.y * 0.13 + t * 0.9, d = p.x * 0.6 - p.y * 0.5 + t * 2.5;
-        float dx = 0.35 * 0.11 * cos(a) + 0.18 * 0.23 * cos(b) + 0.08 * 0.6 * cos(d);
-        float dz = 0.18 * 0.17 * cos(b) + 0.25 * 0.13 * cos(c) - 0.08 * 0.5 * cos(d);
-        N = normalize(vec3(-dx * fade * 3.0, 1.0, -dz * fade * 3.0));
-        float fres = 0.04 + 0.96 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
-        vec3 deep = base * (ambCol * 1.2 + sunCol * 0.35);
-        vec3 refl = mix(fogCol, skyCol, 0.4);
-        vec3 col = mix(deep, refl, clamp(fres * 0.9, 0.0, 0.85));
-        vec3 H = normalize(sunDir + V);
-        col += sunCol * pow(max(dot(N, H), 0.0), 220.0) * 2.2;
-        float f = 1.0 - exp(-dist * fogDen);
-        finalColor = vec4(mix(col, fogCol, f), 1.0);
-        return;
-    } else if (m == 4) {                 // lights
-        emis = base * night * 1.3;
-    }
-
-    float diff = max(dot(N, sunDir), 0.0);
-    float hemi = 0.62 + 0.38 * N.y;
-    vec3 light = ambCol * hemi + sunCol * diff;
-    if (m == 10) {                       // rooms: warm lamp light and soft window light, warmer still at night
-        vec3 day = (ambCol * 1.2 + sunCol * 0.2 + vec3(0.28, 0.22, 0.12)) * (0.88 + 0.12 * hemi);
-        light = mix(day, vec3(1.0, 0.88, 0.7) * (0.9 + 0.1 * hemi), night);
-    }
-    vec3 col = base * light;
-    if (specK > 0.0) {
-        vec3 H = normalize(sunDir + V);
-        col += sunCol * specK * pow(max(dot(N, H), 0.0), specP);
-    }
-    col += emis;
-    // aerial perspective: distant hills fade into a blue-grey haze
-    float f = 1.0 - exp(-dist * fogDen);
-    float sunAmt = pow(max(dot(-V, sunDir), 0.0), 8.0);
-    vec3 fc = mix(fogCol, sunCol, sunAmt * 0.3 * (1.0 - night));
-    if (length(emis) > 0.05) f *= 0.75;   // lights shine through the fog a bit
-    col = mix(col, fc, f);
-    finalColor = vec4(col, 1.0);
-})";
 
 // ---------------------------------------------------------------- lighting presets
 struct Sky {
     Vector3 sunDir, sunCol, amb, top, horizon, fog;
     float night;
+    Vector3 gain;             // color grade: tint, saturation, contrast, how much the lights bloom
+    float sat, contrast, bloom;
 };
 static Sky PRESETS[3] = {
-    // day
+    // day: crisp and a little cool in the shade
     {Vector3Normalize({-0.35f, 0.8f, 0.45f}), {0.84f, 0.8f, 0.72f}, {0.38f, 0.42f, 0.5f},
-     {0.32f, 0.55f, 0.88f}, {0.76f, 0.85f, 0.94f}, {0.76f, 0.84f, 0.92f}, 0.0f},
-    // golden hour: sun setting over the Pacific
-    {Vector3Normalize({-0.9f, 0.16f, 0.25f}), {1.1f, 0.72f, 0.45f}, {0.36f, 0.32f, 0.42f},
-     {0.22f, 0.3f, 0.56f}, {0.98f, 0.66f, 0.44f}, {0.88f, 0.66f, 0.55f}, 0.35f},
-    // night
+     {0.32f, 0.55f, 0.88f}, {0.76f, 0.85f, 0.94f}, {0.76f, 0.84f, 0.92f}, 0.0f,
+     {1.0f, 1.0f, 1.0f}, 1.04f, 1.05f, 0.35f},
+    // golden hour: sun setting over the Pacific, warm and saturated
+    {Vector3Normalize({-0.9f, 0.16f, 0.25f}), {1.32f, 0.84f, 0.5f}, {0.31f, 0.28f, 0.38f},
+     {0.22f, 0.3f, 0.56f}, {0.98f, 0.66f, 0.44f}, {0.88f, 0.66f, 0.55f}, 0.35f,
+     {1.05f, 0.99f, 0.92f}, 1.12f, 1.07f, 0.7f},
+    // night: moonlit blue, lights bloom
     {Vector3Normalize({0.3f, 0.6f, -0.4f}), {0.22f, 0.26f, 0.4f}, {0.1f, 0.11f, 0.17f},
-     {0.01f, 0.02f, 0.06f}, {0.07f, 0.09f, 0.16f}, {0.07f, 0.09f, 0.15f}, 1.0f},
+     {0.01f, 0.02f, 0.06f}, {0.07f, 0.09f, 0.16f}, {0.07f, 0.09f, 0.15f}, 1.0f,
+     {0.96f, 0.99f, 1.06f}, 0.96f, 1.06f, 1.1f},
 };
 static const char* PRESET_NAMES[3] = {"Day", "Golden Hour", "Night"};
 
 static Sky lerpSky(const Sky& a, const Sky& b, float t) {
     return {Vector3Normalize(Vector3Lerp(a.sunDir, b.sunDir, t)), Vector3Lerp(a.sunCol, b.sunCol, t), Vector3Lerp(a.amb, b.amb, t),
-            Vector3Lerp(a.top, b.top, t), Vector3Lerp(a.horizon, b.horizon, t), Vector3Lerp(a.fog, b.fog, t), lerpf(a.night, b.night, t)};
+            Vector3Lerp(a.top, b.top, t), Vector3Lerp(a.horizon, b.horizon, t), Vector3Lerp(a.fog, b.fog, t), lerpf(a.night, b.night, t),
+            Vector3Lerp(a.gain, b.gain, t), lerpf(a.sat, b.sat, t), lerpf(a.contrast, b.contrast, t), lerpf(a.bloom, b.bloom, t)};
 }
 static Color toColor(Vector3 v) { return {(unsigned char)clampf(v.x * 255, 0, 255), (unsigned char)clampf(v.y * 255, 0, 255), (unsigned char)clampf(v.z * 255, 0, 255), 255}; }
 
@@ -181,6 +55,9 @@ static Chase CH;
 static JetSkis JS;
 static Seaplanes SP;
 static Gondolas GO;
+static Renderer R;
+static Weather WX;
+static Birds BI;
 
 static const Color C_COP = {255, 70, 60, 255};
 
@@ -385,7 +262,8 @@ static void airTraffic(float t, Jet out[2]) {
 
 // ---------------------------------------------------------------- main
 int main() {
-    SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+    // no MSAA on the window itself: the 3D scene is drawn multisampled into its own target (see render.cpp)
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow(1600, 900, "SF Skate");
     SetTargetFPS(60);
     S.init();
@@ -410,12 +288,12 @@ int main() {
     TraceLog(LOG_INFO, "SFSKATE: %d jet skis moored along the shore", (int)JS.skis.size());
     if (getenv("SFSKATE_SKI")) for (auto& s : JS.skis) TraceLog(LOG_INFO, "SFSKATE: ski at %.0f,%.0f yaw %.2f", s.pos.x, s.pos.z, s.yaw); // test hook
 
-    Shader sh = LoadShaderFromMemory(VS, FS);
-    Material mat = LoadMaterialDefault();
-    mat.shader = sh;
-    int locCam = GetShaderLocation(sh, "camPos"), locSun = GetShaderLocation(sh, "sunDir"), locSunC = GetShaderLocation(sh, "sunCol");
-    int locAmb = GetShaderLocation(sh, "ambCol"), locFog = GetShaderLocation(sh, "fogCol"), locSky = GetShaderLocation(sh, "skyCol");
-    int locFogD = GetShaderLocation(sh, "fogDen"), locNight = GetShaderLocation(sh, "night"), locTime = GetShaderLocation(sh, "time");
+    if (getenv("SFSKATE_QUALITY")) R.quality = clampf((float)atoi(getenv("SFSKATE_QUALITY")), 0, 2); // test hook
+    R.init();
+    WX.init();
+    BI.init(W);
+    if (getenv("SFSKATE_RAIN")) WX.raining = true, WX.rain = WX.wet = 1; // test hook: start in the rain
+    const Shader& sh = R.city;
     rlDisableBackfaceCulling();
 
     const Spot& start = W.spots[0];
@@ -432,6 +310,7 @@ int main() {
 
     int preset = 0;
     Sky sky = PRESETS[0];
+    bool skySnap = true;
     bool heavyFog = false;
     float fogDen = 0.00011f;
     bool showHelp = true, showMap = false, title = true, paused = false;
@@ -464,6 +343,7 @@ int main() {
     }
     float titleT = 0, sirenT = 0, landKick = 0, swingT = 0, squeezeYaw = 0;
     if (getenv("SFSKATE_NIGHT")) preset = 2; // test hook: start at night
+    if (getenv("SFSKATE_TOD")) preset = atoi(getenv("SFSKATE_TOD")) % 3; // test hook: 0 day, 1 golden hour, 2 night
     if (getenv("SFSKATE_COPS")) CH.calmT = 0.5f; // test hook: cops show up right away
     int tokensGot = 0;
     // SFSKATE_AUTOTEST=1: visit each teleport spot, save a screenshot, log FPS, then quit (used for testing)
@@ -607,6 +487,15 @@ int main() {
             if (IsKeyPressed(KEY_F3)) { preset = 2; P.say(PRESET_NAMES[2], {255, 225, 160, 255}, "Time of day"); }
         }
         if (IsKeyPressed(KEY_F)) heavyFog = !heavyFog;
+        if (IsKeyPressed(KEY_G) && !title) {
+            WX.raining = !WX.raining;
+            P.say(WX.raining ? "Rain" : "Clearing up", {190, 210, 235, 255}, WX.raining ? "Streets get wet and shiny (G)" : "The streets will dry out");
+        }
+        if (IsKeyPressed(KEY_V) && !title) {
+            R.setQuality((R.quality + 2) % 3);
+            P.say(TextFormat("Graphics: %s", Renderer::QUALITY_NAMES[R.quality]), WHITE,
+                  R.quality == 2 ? "Sharp sun shadows, bloom" : R.quality == 1 ? "Softer shadows, bloom" : "No sun shadows or bloom (fastest)");
+        }
         if (IsKeyPressed(KEY_C)) camMode = (camMode + 1) % 3;
         for (int k = 0; k < 10 && !title && !picker; k++) {
             if (IsKeyPressed(KEY_ONE + k) || (k == 9 && IsKeyPressed(KEY_ZERO))) {
@@ -804,15 +693,76 @@ int main() {
         else if (JS.riding) S.setLevels(0.15f + 0.3f * JS.throttle, 0, fabsf(JS.speed) / 24.f);
         else S.setLevels(running && P.state == Player::RIDE ? spd / 14.f : 0.f, running && P.state == Player::GRIND ? 0.8f : 0.f,
                     running ? (spd - 6.f) / 22.f : 0.f);
+        // the sound of where you are: traffic downtown, surf and sea lions on the waterfront, wind on the bridges and
+        // hilltops, music from a pedal bus rolling by, rain
+        {
+            Vector3 ear = ride.on ? cam.target : P.pos;
+            static float waterK = 0, waterT = 0;
+            if ((waterT -= dt) <= 0) {   // how much open water is around (sampled a few times a second)
+                waterT = 0.25f;
+                float wsum = 0;
+                for (int k = 0; k < 12; k++) {
+                    float a = k * TAU_F / 12, r = (k % 3 + 1) * 28.f;
+                    if (W.isWater(ear.x + cosf(a) * r, ear.z + sinf(a) * r, 0.3f)) wsum += (k % 3 == 0 ? 1.6f : k % 3 == 1 ? 1.f : 0.6f);
+                }
+                waterK = clampf(wsum / 7.f, 0, 1);
+            }
+            float traffic = 0, music = 0;
+            for (auto& c : T.cars) {
+                float d2 = sq(c.pos.x - ear.x) + sq(c.pos.z - ear.z);
+                if (d2 > 160 * 160) continue;
+                if (c.type == CT_PEDALBUS) music = std::max(music, 1.f - smooth01(10.f, 75.f, sqrtf(d2)));
+                traffic += (0.3f + c.speed / 15.f) / (1.f + d2 / 900.f);
+            }
+            float above = ear.y - W.terrain(ear.x, ear.z);
+            float high = std::max(W.onBridge(ear.x, ear.z) ? 0.75f : 0.f, smooth01(70.f, 200.f, ear.y));
+            if (SP.riding) high = std::max(high, smooth01(5.f, 60.f, above) * 0.9f);
+            float seal = 1.f - smooth01(40.f, 260.f, Vector2Distance({ear.x, ear.z}, {975, -1255}));
+            bool inside = W.houseAt(ear.x, ear.z, ear.y) >= 0;
+            float muffle = inside ? 0.35f : 1.f;
+            float quiet = title ? 0.f : 1.f;
+            S.setAmbience(clampf(traffic / 3.5f, 0, 0.8f) * muffle * quiet, waterK * 0.9f * muffle * quiet, seal * quiet, high * 0.8f * quiet,
+                          music * 0.8f * muffle * quiet, WX.rain * (inside ? 0.4f : 0.85f) * quiet);
+            // now and then a gull cries somewhere overhead
+            static float gullT = 3;
+            if ((gullT -= dt) <= 0) {
+                gullT = 2.5f + GetRandomValue(0, 60) / 10.f;
+                for (auto& b : BI.birds)
+                    if (b.gull && Vector3Distance(b.pos, ear) < 90) {
+                        S.play(S.gull, clampf(1.1f - Vector3Distance(b.pos, ear) / 90.f, 0.15f, 0.7f) * quiet, 0.9f + GetRandomValue(0, 25) / 100.f);
+                        break;
+                    }
+            }
+        }
 
         // sky & fog
         if (!paused) GO.update(dt, W);
-        sky = lerpSky(sky, PRESETS[preset], 1 - expf(-dt * 2.0f));
+        sky = lerpSky(sky, PRESETS[preset], skySnap ? 1.f : 1 - expf(-dt * 2.0f));
+        skySnap = false;
+        if (!paused) {
+            WX.update(dt);
+            BI.update(dt, W, P.pos, running ? spd : 0.f);
+            if (BI.evScatter) S.play(S.flutter, 0.8f, 1.f + GetRandomValue(-10, 10) / 100.f);
+        }
         float fogTarget = heavyFog ? 0.0022f : (preset == 2 ? 0.00009f : 0.00011f);
         fogDen = lerpf(fogDen, fogTarget, 1 - expf(-dt * 1.5f));
         Vector3 fogC = sky.fog;
         if (heavyFog) fogC = Vector3Lerp(fogC, Vector3Scale({0.78f, 0.8f, 0.83f}, 1.0f - sky.night * 0.8f), 0.7f);
         Vector3 horizonC = heavyFog ? fogC : sky.horizon;
+        // rain: a low grey overcast, weak sun, thicker haze, duller colors
+        Sky lit = sky;
+        float rainK = WX.rain;
+        if (rainK > 0.001f) {
+            Vector3 grey = Vector3Scale({0.56f, 0.6f, 0.65f}, 1.f - sky.night * 0.82f);
+            fogC = Vector3Lerp(fogC, grey, 0.65f * rainK);
+            horizonC = Vector3Lerp(horizonC, grey, 0.7f * rainK);
+            lit.top = Vector3Lerp(sky.top, Vector3Scale(grey, 0.8f), 0.75f * rainK);
+            lit.sunCol = Vector3Scale(sky.sunCol, 1.f - 0.7f * rainK);
+            lit.amb = Vector3Scale(sky.amb, 1.f + 0.12f * rainK);
+            lit.sat = sky.sat * (1.f - 0.18f * rainK);
+            lit.gain = Vector3Lerp(sky.gain, {0.95f, 0.98f, 1.03f}, rainK);
+        }
+        float fogUse = fogDen * (1.f + 2.2f * rainK);
 
         // ---------------- camera
         if (title) {
@@ -920,6 +870,22 @@ int main() {
             cam.position = {at.x + cosf(yw + 1.1f) * dd, at.y + (cat ? 1.3f : 2.0f), at.z + sinf(yw + 1.1f) * dd};
             cam.target = {at.x + cosf(yw) * (cat ? 0 : 0.5f), at.y + (cat ? 0.2f : 0.6f), at.z + sinf(yw) * (cat ? 0 : 0.5f)};
         }
+        if (autotest && getenv("SFSKATE_PED")) { // test hook: look at a pedestrian up close, "k" picks which (odd: one standing still)
+            int k = atoi(getenv("SFSKATE_PED")), seen = 0;
+            for (auto& p : T.peds) {
+                if (p.mode != (k % 2 ? 2 : 0) || p.pos.x < -1300 || p.pos.x > 1250 || p.pos.z < -1000 || p.pos.z > 1000) continue;
+                if (seen++ < k / 2) continue;
+                cam.position = {p.pos.x + cosf(p.yaw + 0.5f) * 3.2f, p.pos.y + 1.7f, p.pos.z + sinf(p.yaw + 0.5f) * 3.2f};
+                cam.target = {p.pos.x, p.pos.y + 1.1f, p.pos.z};
+                break;
+            }
+        }
+        if (autotest && getenv("SFSKATE_STEAM") && !W.steamVents.empty()) { // test hook: look at the steaming manhole nearest the skater
+            Vector3 v = W.steamVents[0];
+            for (auto& q : W.steamVents) if (Vector3Distance(q, P.pos) < Vector3Distance(v, P.pos)) v = q;
+            cam.position = {v.x + 7.f, v.y + 2.5f, v.z + 5.f};
+            cam.target = {v.x, v.y + 1.5f, v.z};
+        }
         if (autotest && getenv("SFSKATE_PEDAL")) // test hook: look at the first pedal bus from the side and a little ahead
             for (auto& c : T.cars)
                 if (c.type == CT_PEDALBUS) {
@@ -932,31 +898,57 @@ int main() {
         gMapFocus = ride.on ? cam.target : P.pos;
 
         // ---------------- shader uniforms
-        SetShaderValue(sh, locCam, &cam.position, SHADER_UNIFORM_VEC3);
-        SetShaderValue(sh, locSun, &sky.sunDir, SHADER_UNIFORM_VEC3);
-        SetShaderValue(sh, locSunC, &sky.sunCol, SHADER_UNIFORM_VEC3);
-        SetShaderValue(sh, locAmb, &sky.amb, SHADER_UNIFORM_VEC3);
-        SetShaderValue(sh, locFog, &fogC, SHADER_UNIFORM_VEC3);
-        SetShaderValue(sh, locSky, &horizonC, SHADER_UNIFORM_VEC3);
-        SetShaderValue(sh, locFogD, &fogDen, SHADER_UNIFORM_FLOAT);
-        SetShaderValue(sh, locNight, &sky.night, SHADER_UNIFORM_FLOAT);
-        SetShaderValue(sh, locTime, &now, SHADER_UNIFORM_FLOAT);
+        Look look{cam.position, sky.sunDir, lit.sunCol, lit.amb, fogC, horizonC, fogUse, sky.night, now};
+        look.fogH = heavyFog ? 70.f : 300.f - 120.f * rainK;
+        look.wet = WX.wet;
+        R.setLook(look);
 
         // ---------------- draw
         BeginDrawing();
-        ClearBackground(toColor(fogC));
+        // sun shadows: the city, traffic and people near the camera, into one or two cascades
+        {
+            float strength = title ? 0.f : (heavyFog ? 0.45f : 1.f) * (1.f - 0.75f * rainK);
+            int nc = R.planShadows(cam.position, camFwd, sky.sunDir, strength);
+            for (int k = 0; k < nc; k++) {
+                R.beginCascade(k);
+                W.drawCasters(R.lightView[k], R.half[k], 2600.f, R.depth);
+                BeginShaderMode(R.depth);
+                Vector3 c = Vector3Add(cam.position, Vector3Scale(Vector3Normalize({camFwd.x, 0, camFwd.z}), k == 0 ? 38.f : 150.f));
+                T.drawCasters(c, k == 0 ? 75.f : 230.f, k == 0 ? 60.f : 0.f);
+                T.drawTrains(W, cam.position);
+                GO.draw(W, cam.position);
+                if (k == 0) {
+                    if (!ride.on && !JS.riding && !SP.riding) P.draw();
+                    JS.draw(now, cam.position);
+                    if (CH.on && !ride.on)
+                        for (size_t i = 0; i < CH.cops.size(); i++) {
+                            const Cop& cp = CH.cops[i];
+                            if (Vector3Distance(cp.pos, cam.position) > 120) continue;
+                            if (cp.onFoot) drawCop(cp, now, CH.scuffle && (int)i == CH.scCop);
+                            else drawCruiser(cp.pos, cp.yaw, now);
+                        }
+                }
+                if (CH.on && !ride.on)
+                    for (auto& pc : CH.parked)
+                        if (Vector3Distance(pc.pos, cam.position) < 230) drawCruiser(pc.pos, pc.yaw, now);
+                EndShaderMode();
+                R.endCascade();
+            }
+        }
+        R.beginScene(toColor(fogC));
         {
             // sky gradient down to the horizon line
             float pitch = asinf(clampf(camFwd.y, -1, 1));
             float horizonY = sh2 * 0.5f + tanf(pitch) * (sh2 * 0.5f) / tanf(cam.fovy * 0.5f * DEG2RAD);
-            Color top = toColor(heavyFog ? Vector3Lerp(sky.top, fogC, 0.7f) : sky.top);
+            Color top = toColor(heavyFog ? Vector3Lerp(lit.top, fogC, 0.7f) : lit.top);
             int hy = (int)clampf(horizonY, 0, (float)sh2);
             if (hy > 0) DrawRectangleGradientV(0, 0, sw, hy, top, toColor(horizonC));
             {
                 float pxPerRad = (sh2 * 0.5f) / tanf(cam.fovy * 0.5f * DEG2RAD);
                 Vector3 cc = Vector3Lerp(Vector3Scale(sky.sunCol, 1.15f), {1, 1, 1}, 0.5f);
                 if (sky.night > 0.6f) cc = {0.25f, 0.27f, 0.35f};
-                unsigned char ca = heavyFog ? 25 : (sky.night > 0.6f ? 40 : 70);
+                unsigned char ca = heavyFog ? 25 : (unsigned char)((sky.night > 0.6f ? 40 : 70) + 90 * rainK);
+                if (rainK > 0.01f) cc = Vector3Lerp(cc, Vector3Scale({0.5f, 0.53f, 0.58f}, 1.f - sky.night * 0.8f), rainK);
                 Color c = toColor(cc);
                 c.a = ca;
                 for (auto& p : clouds) {
@@ -967,34 +959,44 @@ int main() {
                     DrawCircleV({sp.x, sp.y - rad * 0.25f}, rad * 0.7f, c);
                 }
             }
-            if (sky.night > 0.6f && !heavyFog) {
+            // the sun (or moon) also marks the bloom mask in alpha so it glows in the post pass
+            auto glow = [&](Vector2 p, float r, float amount) {
+                rlDrawRenderBatchActive();
+                glBlendFuncSeparate(GL_ZERO, GL_ONE, GL_ONE, GL_ZERO);
+                DrawCircleV(p, r, {0, 0, 0, (unsigned char)(255 * (1 - amount))});
+                rlDrawRenderBatchActive();
+                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+            };
+            if (rainK > 0.5f) {
+                // overcast: no sun, moon or stars
+            } else if (sky.night > 0.6f && !heavyFog) {
                 for (auto& s : stars) {
                     if (Vector3DotProduct(s, camFwd) < 0.2f) continue;
                     Vector2 p = GetWorldToScreen(Vector3Add(cam.position, Vector3Scale(s, 1000)), cam);
                     if (p.y < hy) DrawPixelV(p, {255, 255, 240, (unsigned char)(150 + (int)(s.x * 1000) % 100)});
                 }
                 Vector2 mp = GetWorldToScreen(Vector3Add(cam.position, Vector3Scale(sky.sunDir, 1000)), cam);
-                if (Vector3DotProduct(sky.sunDir, camFwd) > 0.2f) DrawCircleV(mp, 18, {235, 235, 220, 255});
+                if (Vector3DotProduct(sky.sunDir, camFwd) > 0.2f) { DrawCircleV(mp, 18, {235, 235, 220, 255}); glow(mp, 18, 0.45f); }
             } else if (Vector3DotProduct(sky.sunDir, camFwd) > 0.2f) {
                 Vector2 sp = GetWorldToScreen(Vector3Add(cam.position, Vector3Scale(sky.sunDir, 1000)), cam);
                 Color sc = toColor(Vector3Scale(sky.sunCol, 1.1f));
                 DrawCircleV(sp, 60, {sc.r, sc.g, sc.b, (unsigned char)(heavyFog ? 20 : 50)});
                 DrawCircleV(sp, 26, {255, 250, 230, (unsigned char)(heavyFog ? 60 : 255)});
+                if (!heavyFog) glow(sp, 26, 0.8f);
             }
         }
 
-        // far pass
-        rlSetClipPlanes(250.0, 40000.0);
-        BeginMode3D(cam);
-        W.drawPass(cam, 250, 40000, mat);
-        W.drawWater(mat);
-        BeginShaderMode(sh);
-        T.draw(cam.position, camFwd);
-        GO.draw(W, cam.position);
-        SP.draw(now, cam.position);
-        T.drawTrains(W, cam.position);
-        if (ride.on) Traffic::drawTrain(W, ride.s, ride.dir, cam.position);
-        {
+        // everything opaque draws with the city shader, which writes the bloom mask into alpha
+        R.opaque(true);
+        auto drawMovers = [&](bool nearPass) {
+            BeginShaderMode(nearPass ? sh : R.cityFar);
+            T.draw(cam.position, camFwd, nearPass);
+            if (nearPass) T.drawSignals(W, cam.position);
+            BI.draw(cam.position, camFwd);
+            GO.draw(W, cam.position);
+            SP.draw(now, cam.position);
+            T.drawTrains(W, cam.position);
+            if (ride.on) Traffic::drawTrain(W, ride.s, ride.dir, cam.position);
             Jet jets[2];
             airTraffic(now, jets);
             for (auto& j : jets)
@@ -1003,15 +1005,20 @@ int main() {
             for (int k = 0; k < 2; k++) {
                 float ph = fmodf(now + k * 38.f, 76.f);
                 const float stops[4] = {1460, 1640, 2000, 2165};
-                float x;
                 int leg = (int)(ph / 19.f);
                 float u = clampf((fmodf(ph, 19.f) - 5.f) / 14.f, 0, 1);
                 u = u * u * (3 - 2 * u);
                 const int order[4][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}};
-                x = lerpf(stops[order[leg][0]], stops[order[leg][1]], u);
+                float x = lerpf(stops[order[leg][0]], stops[order[leg][1]], u);
                 drawCarModel(CT_AIRTRAIN, WHITE, {x, AIRPORT_Y + 10, 1785}, 0, 0, false);
             }
-        }
+        };
+        // far pass
+        rlSetClipPlanes(250.0, 40000.0);
+        BeginMode3D(cam);
+        W.drawPass(cam, 250, 40000, R.cityFar, true);
+        W.drawWater(R.cityFar, true);
+        drawMovers(false);
         EndShaderMode();
         EndMode3D();
         rlDrawRenderBatchActive();
@@ -1019,32 +1026,11 @@ int main() {
         // near pass
         rlSetClipPlanes(0.15, 270.0);
         BeginMode3D(cam);
-        W.drawPass(cam, 0, 270, mat);
-        W.drawWater(mat);
-        BeginShaderMode(sh);
-        T.draw(cam.position, camFwd);
-        GO.draw(W, cam.position);
-        SP.draw(now, cam.position);
-        T.drawTrains(W, cam.position);
-        if (ride.on) Traffic::drawTrain(W, ride.s, ride.dir, cam.position);
-        {
-            Jet jets[2];
-            airTraffic(now, jets);
-            for (auto& j : jets)
-                if (j.visible) drawCarModel(CT_PLANE, j.livery, j.pos, j.yaw, j.pitch, false);
-            // AirTrain shuttling between the rental car center and the hotel, pausing at each station
-            for (int k = 0; k < 2; k++) {
-                float ph = fmodf(now + k * 38.f, 76.f);
-                const float stops[4] = {1460, 1640, 2000, 2165};
-                float x;
-                int leg = (int)(ph / 19.f);
-                float u = clampf((fmodf(ph, 19.f) - 5.f) / 14.f, 0, 1);
-                u = u * u * (3 - 2 * u);
-                const int order[4][2] = {{0, 1}, {1, 2}, {2, 3}, {3, 0}};
-                x = lerpf(stops[order[leg][0]], stops[order[leg][1]], u);
-                drawCarModel(CT_AIRTRAIN, WHITE, {x, AIRPORT_Y + 10, 1785}, 0, 0, false);
-            }
-        }
+        R.staticNormals(true);
+        W.drawPass(cam, 0, 270, sh, false);
+        W.drawWater(sh, false);
+        R.staticNormals(false);
+        drawMovers(true);
         if (!title && !ride.on && !JS.riding && !SP.riding) P.draw();
         JS.draw(now, cam.position);
         for (auto& t : W.tokens) {
@@ -1070,25 +1056,49 @@ int main() {
             }
         }
         EndShaderMode();
-        // soft blob shadows, drawn with the default shader so they blend
-        rlDrawRenderBatchActive();
+        // translucent bits, drawn with the default shader so they blend (and leave the bloom mask alone)
+        R.opaque(false);
         rlDisableDepthMask();
         JS.drawFx(cam.position);
         SP.drawFx();
+        WX.drawSteam(cam, W, now, sky.night);
+        WX.drawRain(cam, W, now, sky.night, R.quality);
+        // a soft contact blob under the skater helps judge landings (the sun's shadow can fall far away)
         if (!title && !ride.on && !JS.riding && !SP.riding && !(P.state == Player::BAIL && P.splashed)) {
             Vector3 sp = P.state == Player::BAIL ? P.boardPos : P.pos;
             float gy = W.ground(sp.x, sp.z, P.pos.y + 0.1f);
             float hgt = P.pos.y - gy;
-            if (hgt < 12) DrawCylinder({sp.x, gy + 0.12f, sp.z}, 0.6f, 0.6f, 0.01f, 14, {0, 0, 0, (unsigned char)(55 * clampf(1 - hgt / 8, 0.25f, 1))});
+            float k = R.nCasc > 0 ? 0.6f : 1.f;
+            if (hgt < 12) DrawCylinder({sp.x, gy + 0.12f, sp.z}, 0.6f, 0.6f, 0.01f, 14, {0, 0, 0, (unsigned char)(55 * k * clampf(1 - hgt / 8, 0.25f, 1))});
         }
-        if (CH.on) {
-            for (auto& cp : CH.cops) DrawCylinder({cp.pos.x, cp.pos.y + 0.12f, cp.pos.z}, cp.onFoot ? 0.5f : 2.0f, cp.onFoot ? 0.5f : 2.0f, 0.01f, 14, {0, 0, 0, 70});
-            for (auto& pc : CH.parked) DrawCylinder({pc.pos.x, pc.pos.y + 0.12f, pc.pos.z}, 2.0f, 2.0f, 0.01f, 14, {0, 0, 0, 70});
+        if (R.nCasc == 0) {   // without sun shadows, blobs keep everything grounded
+            if (CH.on) {
+                for (auto& cp : CH.cops) DrawCylinder({cp.pos.x, cp.pos.y + 0.12f, cp.pos.z}, cp.onFoot ? 0.5f : 2.0f, cp.onFoot ? 0.5f : 2.0f, 0.01f, 14, {0, 0, 0, 70});
+                for (auto& pc : CH.parked) DrawCylinder({pc.pos.x, pc.pos.y + 0.12f, pc.pos.z}, 2.0f, 2.0f, 0.01f, 14, {0, 0, 0, 70});
+            }
+            T.drawShadows(cam.position);
         }
-        T.drawShadows(cam.position);
         rlDrawRenderBatchActive();
         rlEnableDepthMask();
         EndMode3D();
+        R.endScene();
+
+        // graded, bloomed, and blurred at speed
+        {
+            static Vector3 lastCam = cam.position;
+            static float camSpd = 0;
+            float moved = Vector3Distance(cam.position, lastCam);
+            lastCam = cam.position;
+            if (moved < 6.f && dt > 0) camSpd = lerpf(camSpd, moved / dt, 1 - expf(-dt * 5));
+            Grade g;
+            g.gain = lit.gain;
+            g.sat = lit.sat;
+            g.contrast = sky.contrast;
+            g.bloom = sky.bloom * (heavyFog ? 1.2f : 1.f);
+            g.vignette = 0.22f;
+            g.blur = (title || paused) ? 0.f : smooth01(14.f, 45.f, camSpd) * 0.012f;
+            R.present(g);
+        }
 
         // ---------------- HUD
         if (title) textCenter("SF SKATE", sw / 2, 30, 80, {245, 95, 60, 255});
@@ -1223,13 +1233,14 @@ int main() {
             }
             if (showHelp) {
                 int hx = sw - 330, hy = 270;
-                DrawRectangle(hx, hy, 314, 458, {0, 0, 0, 140});
+                DrawRectangle(hx, hy, 314, 482, {0, 0, 0, 140});
                 const char* lines[] = {"CONTROLS", "W / Up      push", "S / Down    brake", "A D         steer / spin in air",
                                        "Shift       tuck (go faster)", "Space       ollie / jump off rail", "J  K  L     kickflip, heelflip, shove-it",
                                        "I (hold)    grab", "Land on rails & ledges to grind", "B  free roam / cop chase   N  difficulty", "Right mouse  look around", "Wheel       zoom    C  camera",
                                        "Tab  choose landmark / time", "M  map  1-0  teleport  E  train/jetski", "T or F1-F3  time of day",
-                                       "F  fog   R  reset   P  pause", "Caught: mash SPACE A D / J K L", "H  hide this help"};
-                for (int i = 0; i < 18; i++) DrawText(lines[i], hx + 14, hy + 12 + i * 24, i == 0 ? 22 : 18, i == 0 ? Color{255, 210, 60, 255} : WHITE);
+                                       "F fog  G rain  R reset  P pause", TextFormat("V  graphics: %s", Renderer::QUALITY_NAMES[R.quality]),
+                                       "Caught: mash SPACE A D / J K L", "H  hide this help"};
+                for (int i = 0; i < 19; i++) DrawText(lines[i], hx + 14, hy + 12 + i * 24, i == 0 ? 22 : 18, i == 0 ? Color{255, 210, 60, 255} : WHITE);
             }
             }
             if (nearSki >= 0) {

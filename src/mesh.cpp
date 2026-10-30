@@ -52,6 +52,8 @@ void MeshBuilder::beam(Vector3 a, Vector3 b, float w, float h, Color k) {
 void MeshBuilder::prism(Vector3 b, int n, float r0, float r1, float height, Color side, Color top,
                         float rot, bool cap, float ao) {
     Color sb = scaleC(side, ao);
+    signed char was = smooth;
+    if (n >= 8) smooth = SMOOTH_ORGANIC;   // round columns, tanks and domes shade smoothly
     for (int i = 0; i < n; i++) {
         float a0 = rot + TAU_F * i / n, a1 = rot + TAU_F * (i + 1) / n;
         Vector3 p0 = {b.x + cosf(a0) * r0, b.y, b.z + sinf(a0) * r0};
@@ -62,10 +64,13 @@ void MeshBuilder::prism(Vector3 b, int n, float r0, float r1, float height, Colo
         else { vert(p0, sb); vert(p1, sb); vert(q0, side); }
         if (cap && r1 > 0.001f) tri(q0, q1, {b.x, b.y + height, b.z}, top);
     }
+    smooth = was;
 }
 
 void MeshBuilder::sphere(Vector3 c, float r, int rings, int segs, Color k, bool hemi) {
     int r0 = hemi ? rings / 2 : 0;
+    signed char was = smooth;
+    smooth = SMOOTH_ORGANIC;
     for (int i = r0; i < rings; i++) {
         float t0 = PI * i / rings - PI / 2, t1 = PI * (i + 1) / rings - PI / 2;
         for (int j = 0; j < segs; j++) {
@@ -76,6 +81,7 @@ void MeshBuilder::sphere(Vector3 c, float r, int rings, int segs, Color k, bool 
             quad(P(t0, p0), P(t0, p1), P(t1, p1), P(t1, p0), k);
         }
     }
+    smooth = was;
 }
 
 void MeshBuilder::slab(float x0, float x1, float z0, float z1, float h0, float h1, int axis, float bottom,
@@ -139,10 +145,30 @@ void MeshBuilder::leaf(Vector3 p, Vector3 n, float len, float width, float roll,
     Vector3 l = Vector3Add(Vector3Add(p, Vector3Scale(rib, len * 0.38f)), Vector3Scale(side, width * 0.5f));
     Vector3 rr = Vector3Add(Vector3Add(p, Vector3Scale(rib, len * 0.38f)), Vector3Scale(side, -width * 0.5f));
     Color dk = scaleC(k, 0.86f);
+    if (volN) {   // part of a canopy: shade as a soft volume rather than as a flat card
+        vertN(p, k, *volN); vertN(l, k, *volN); vertN(tip, k, *volN);
+        vertN(p, dk, *volN); vertN(tip, dk, *volN); vertN(rr, dk, *volN);
+        return;
+    }
     tri(p, l, tip, k); tri(p, tip, rr, dk);        // two halves either side of the midrib catch the light differently
 }
 
 void MeshBuilder::leafCloud(Vector3 c, Vector3 rad, int count, float len, float width, Color base, RNG& rng, bool withCore, float autumn) {
+    if (detailB && detailB != this) {   // leaves go to the detail layer; far away the canopy is a five-sided blob
+        if (farB) {
+            Color k = scaleC(base, 0.9f);
+            for (int j = 0; j < 5; j++) {
+                float a0 = TAU_F * j / 5, a1 = TAU_F * (j + 1) / 5;
+                Vector3 e0 = {cosf(a0), 0.1f, sinf(a0)}, e1 = {cosf(a1), 0.1f, sinf(a1)};
+                auto P = [&](Vector3 d) { return V3(c.x + d.x * rad.x * 0.88f, c.y + d.y * rad.y * 0.88f, c.z + d.z * rad.z * 0.88f); };
+                Vector3 up = {0, 1, 0}, dn = {0, -0.8f, 0};
+                farB->vertN(P(up), scaleC(k, 1.1f), up); farB->vertN(P(e0), k, e0); farB->vertN(P(e1), k, e1);
+                farB->vertN(P(dn), scaleC(k, 0.7f), dn); farB->vertN(P(e1), k, e1); farB->vertN(P(e0), k, e0);
+            }
+        }
+        detailB->leafCloud(c, rad, count, len, width, base, rng, withCore, autumn);
+        return;
+    }
     // dark core: a low-poly ellipsoid inside so the canopy has depth
     Color core = scaleC(base, 0.62f);
     int rings = 3, segs = 6;
@@ -151,7 +177,9 @@ void MeshBuilder::leafCloud(Vector3 c, Vector3 rad, int count, float len, float 
         for (int j = 0; j < segs; j++) {
             float p0 = TAU_F * j / segs, p1 = TAU_F * (j + 1) / segs;
             auto P = [&](float t, float p) { return V3(c.x + rad.x * 0.62f * cosf(t) * cosf(p), c.y + rad.y * 0.62f * sinf(t), c.z + rad.z * 0.62f * cosf(t) * sinf(p)); };
-            quad(P(t0, p0), P(t0, p1), P(t1, p1), P(t1, p0), core);
+            auto Q = [&](float t, float p) { Vector3 q = P(t, p); vertN(q, core, {(q.x - c.x) / rad.x, (q.y - c.y) / rad.y, (q.z - c.z) / rad.z}); };
+            Q(t0, p0); Q(t0, p1); Q(t1, p1);
+            Q(t0, p0); Q(t1, p1); Q(t1, p0);
         }
     }
     for (int i = 0; i < count; i++) {
@@ -162,9 +190,10 @@ void MeshBuilder::leafCloud(Vector3 c, Vector3 rad, int count, float len, float 
         float depth = 1.f - 0.55f * rng.f() * rng.f();     // 0.45 .. 1 of the radius
         Vector3 off = {d.x * rad.x * depth, d.y * rad.y * depth, d.z * rad.z * depth};
         Vector3 pos = Vector3Add(c, off);
-        // lighting by where the leaf sits: top and the sun side bright, underside and interior dim
+        // lighting by where the leaf sits: the shader now lights the canopy as a volume (normals point out from
+        // its center), so only a little top / sun-side bias is baked in, plus darker leaves deep inside
         float up = d.y * 0.5f + 0.5f, sun = d.x * 0.35f - d.z * 0.2f + 0.5f;
-        float shade = 0.85f + 0.4f * up + 0.12f * sun;
+        float shade = 0.96f + 0.16f * up + 0.04f * sun;
         shade *= 0.72f + 0.28f * depth;
         shade *= rng.range(0.88f, 1.1f);
         Color k = scaleC(base, shade);
@@ -173,7 +202,10 @@ void MeshBuilder::leafCloud(Vector3 c, Vector3 rad, int count, float len, float 
         // leaves face roughly outward, tilted by a random amount; the tip droops under gravity
         Vector3 nrm = unitV(V3(d.x + rng.range(-0.7f, 0.7f), d.y + rng.range(-0.7f, 0.7f) + 0.2f, d.z + rng.range(-0.7f, 0.7f)));
         float s = rng.range(0.8f, 1.25f);
+        Vector3 vn = unitV(V3(d.x * 0.8f + nrm.x * 0.3f, d.y * 0.8f + nrm.y * 0.3f + 0.15f, d.z * 0.8f + nrm.z * 0.3f));
+        volN = &vn;
         leaf(pos, nrm, len * s, width * s, rng.range(0, TAU_F), k);
+        volN = nullptr;
     }
 }
 
@@ -185,6 +217,8 @@ void MeshBuilder::limb(Vector3 a, Vector3 b, float r0, float r1, Color k, int n)
     Vector3 ref = fabsf(f.y) > 0.95f ? V3(1, 0, 0) : V3(0, 1, 0);
     Vector3 u = unitV(Vector3CrossProduct(f, ref)), w = Vector3CrossProduct(f, u);
     Color kb = scaleC(k, 0.8f);
+    signed char was = smooth;
+    smooth = SMOOTH_ORGANIC;
     for (int i = 0; i < n; i++) {
         float a0 = TAU_F * i / n, a1 = TAU_F * (i + 1) / n;
         auto ring = [&](Vector3 base, float r, float ang) {
@@ -194,11 +228,14 @@ void MeshBuilder::limb(Vector3 a, Vector3 b, float r0, float r1, Color k, int n)
         Color s = (i & 1) ? scaleC(k, 0.88f) : k;
         quadC(ring(a, r0, a0), ring(a, r0, a1), ring(b, r1, a1), ring(b, r1, a0), scaleC(s, 0.85f), scaleC(s, 0.85f), s, s);
     }
+    smooth = was;
     (void)kb;
 }
 
 void MeshBuilder::frond(Vector3 p, Vector3 dir, float len, float droop, Color k, RNG& rng) {
     const int segs = 6;
+    signed char was = smooth;
+    smooth = SMOOTH_ORGANIC;
     Vector3 side = {-dir.z, 0, dir.x};
     Vector3 prev = p, cur;
     Color dk = scaleC(k, 0.8f);
@@ -216,6 +253,7 @@ void MeshBuilder::frond(Vector3 p, Vector3 dir, float len, float droop, Color k,
         beam(prev, cur, 0.07f, 0.05f, scaleC(k, 0.75f));
         prev = cur;
     }
+    smooth = was;
     (void)rng;
 }
 

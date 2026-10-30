@@ -77,11 +77,25 @@ struct Path {
 };
 
 struct Token { Vector3 pos; const char* name; bool got = false; };
+// A traffic signal head over (or beside) the lane it controls: lamps face `face` (toward oncoming traffic).
+struct SignalHead { Vector3 pos; Vector2 face; int node; uint8_t axis; };
+// Every signalized intersection runs the same 26 s cycle (offset per intersection): traffic along z gets green,
+// then yellow, then a moment of all-red, then traffic along x. 0 green, 1 yellow, 2 red.
+inline int signalState(int node, int axis, float t) {
+    float c = fmodf(t + hash01(node, 3, 11) * 26.f, 26.f);
+    if (axis == 1) return c < 10.f ? 0 : c < 13.f ? 1 : 2;
+    return c < 13.5f ? 2 : c < 23.5f ? 0 : c < 26.f - 0.5f ? 1 : 2;
+}
 struct Spot { const char* name; Vector3 pos; float yaw; };
 struct MapLabel { const char* name; float x, z; int size; };
 struct Pond { float x0, z0, x1, z1; };
 
-struct Chunk { Mesh mesh; Vector3 mn, mx; };
+// Static geometry is split into layers per 400 m cell: the main layer is always drawn; foliage detail (every leaf)
+// only up close, swapped for low-poly canopy blobs further out; house interiors only near the camera.
+enum : int { LAYER_MAIN, LAYER_DETAIL, LAYER_FAR, LAYER_INTERIOR };
+constexpr int LAYER_STRIDE = 10000000;
+constexpr float DETAIL_DIST = 650.f, INTERIOR_DIST = 110.f;
+struct Chunk { unsigned vao = 0, vaoFar = 0, vboA = 0, vboB = 0; int count = 0; Vector3 mn{}, mx{}; int layer = 0; Vector2 c0{}, c1{}; };
 
 // A house you can walk into: its ground floor is a real room behind an open door.
 struct House {
@@ -100,8 +114,11 @@ struct World {
     // ---- generation ----
     void generate(void (*progress)(const char*, float));
     void upload();
-    void drawPass(const Camera3D& cam, float nearD, float farD, const Material& mat);
-    void drawWater(const Material& mat);
+    // slim: position and color only (the far pass)
+    void drawPass(const Camera3D& cam, float nearD, float farD, const Shader& sh, bool slim);
+    void drawWater(const Shader& sh, bool slim);
+    // shadow maps: draw every chunk inside the light's box (lightView space: |x|,|y| < half, -zFar < z < 0)
+    int drawCasters(Matrix lightView, float half, float zFar, const Shader& sh);
 
     // ---- queries ----
     float terrain(float x, float z) const;                    // bare ground height
@@ -151,13 +168,17 @@ struct World {
     std::vector<Spot> spots;
     std::vector<MapLabel> labels;
     std::vector<Vector3> tourists;   // idle people at viewpoints
+    std::vector<uint8_t> signals;    // per SF grid node (j * ni + i): 1 where the intersection has traffic lights
+    std::vector<SignalHead> signalHeads;
+    std::vector<Vector3> steamVents; // manholes letting off steam
     Image mapImg{};
     std::vector<Chunk> chunks;
-    Mesh waterMesh{};
+    Chunk water{};
 
     // generation scratch
     std::unordered_map<int, MeshBuilder> builders;
     MeshBuilder waterB;
+    int layer = LAYER_MAIN;          // which layer mb() builds into
     MeshBuilder& mb(float x, float z);
     MeshBuilder& mbKey(int key) { return builders[key]; }
 
@@ -197,6 +218,10 @@ private:
     void addShrub(float x, float z, float scale, RNG& r, bool flowering = false);
     void addFlowerBed(float x0, float z0, float x1, float z1, int count, RNG& r);
     void addLamp(float x, float z, float yaw);
+    // curbside things: 0 hydrant, 1 trash can, 2 newspaper boxes, 3 bike rack with bikes, 4 parked scooters, 5 bus shelter.
+    // p is on the sidewalk, f runs along the street, o points out toward the road.
+    void addClutter(Vector2 p, Vector2 f, Vector2 o, int kind, uint32_t h);
+    void buildIntersections(const Grid& g);
     void addRamp(float x0, float z0, float x1, float z1, float rise, int axis, bool up);
     void addLedge(float x0, float z0, float x1, float z1, float h, Color c);
     void addRailObj(Vector3 a, Vector3 b, const char* name = nullptr);

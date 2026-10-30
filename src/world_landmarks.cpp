@@ -903,6 +903,7 @@ void World::generate(void (*progress)(const char*, float)) {
     buildBlocks(oak, true);
     progress("Planting trees and parking cars", 0.8f);
     buildStreetFurniture(sf, false);
+    buildIntersections(sf);
     buildStreetFurniture(oak, true);
     buildParks();
     progress("Drawing the map", 0.9f);

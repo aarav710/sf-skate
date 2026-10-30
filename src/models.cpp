@@ -1,4 +1,5 @@
 #include "models.h"
+#include "instance.h"
 
 static const Color GLASS = col(38, 46, 58);
 static const Color TIRE = col(22, 22, 24);
@@ -251,16 +252,17 @@ void addCarToMesh(MeshBuilder& mb, int type, Color body, Vector3 pos, float yaw,
     }
 }
 
+// queued as instances (see instance.h), drawn by inst::flush at the end of the pass
 void drawCarModel(int type, Color body, Vector3 pos, float yaw, float pitch, bool brake) {
     const CarModel& m = carModel(type);
-    rlPushMatrix();
-    rlTranslatef(pos.x, pos.y, pos.z);
-    rlRotatef(-yaw * RAD2DEG, 0, 1, 0);
-    rlRotatef(pitch * RAD2DEG, 0, 0, 1);
+    inst::push();
+    inst::translate(pos.x, pos.y, pos.z);
+    inst::rotate(-yaw * RAD2DEG, 0, 1, 0);
+    inst::rotate(pitch * RAD2DEG, 0, 0, 1);
     for (auto& b : m.boxes) {
         Color k = boxColor(b, body);
         if (brake && b.k.r == 200 && b.k.g == 25) k = col(255, 40, 30, M_EMISSIVE);
-        DrawCube(b.c, b.s.x, b.s.y, b.s.z, k);
+        inst::cube(b.c, b.s.x, b.s.y, b.s.z, k);
     }
-    rlPopMatrix();
+    inst::pop();
 }

@@ -565,6 +565,46 @@ int main() {
         snprintf(b, sizeof b, "3 stars, 5 presses/s: easy %s %.1fs, normal %s %.1fs, hard %s %.1fs", wins[0] ? "won" : "busted", secs[0], wins[1] ? "won" : "busted", secs[1], wins[2] ? "won" : "busted", secs[2]);
         check(wins[0] && wins[1] && secs[0] <= secs[1] && secs[1] <= secs[2] + 0.01f, "Fight is winnable by mashing, harder on hard", b);
     }
+    {   // gondola towers stand on four legs: you can ride straight through between them
+        // (each tower adds its four leg boxes in a row: PK_POLE, 4 m tall, about a metre across)
+        auto isLeg = [](const Platform& q) {
+            return q.kind == PK_POLE && fabsf(q.h0 - q.base - 4.f) < 0.01f && q.x1 - q.x0 > 0.6f && q.x1 - q.x0 < 1.6f;
+        };
+        int towers = 0, through = 0;
+        for (size_t i = 0; i + 3 < W.plats.size(); i++) {
+            const Platform* l[4] = {&W.plats[i], &W.plats[i + 1], &W.plats[i + 2], &W.plats[i + 3]};
+            bool ok = true;
+            Vector2 c[4], mid = {0, 0};
+            for (int k = 0; k < 4; k++) {
+                ok &= isLeg(*l[k]);
+                c[k] = {(l[k]->x0 + l[k]->x1) * 0.5f, (l[k]->z0 + l[k]->z1) * 0.5f};
+                mid = Vector2Add(mid, Vector2Scale(c[k], 0.25f));
+            }
+            for (int k = 0; k < 4 && ok; k++) ok &= Vector2Distance(c[k], mid) < 6.f;
+            if (!ok) continue;
+            towers++;
+            i += 3;
+            Vector2 d = Vector2Normalize(Vector2Subtract(c[1], c[0]));   // between legs 0 and 1 and out between 2 and 3
+            // ride in from the downhill side so the skater keeps speed
+            float hA = W.terrain(mid.x - d.x * 12, mid.y - d.y * 12), hB = W.terrain(mid.x + d.x * 12, mid.y + d.y * 12);
+            if (hA < hB) d = Vector2Scale(d, -1);
+            // start on the hillside itself, not on top of whatever might stand there
+            Sim s;
+            float sx = mid.x - d.x * 6, sz = mid.y - d.y * 6;   // close in: some towers sit on steep slopes
+            s.p.spawn({sx, W.ground(sx, sz, W.terrain(sx, sz) + 0.5f), sz}, atan2f(d.y, d.x));
+            s.p.speed = 6;
+            Input in; in.push = true;
+            bool bailed = false;
+            bool passed = s.run(360, in, [&](Player& p) {
+                bailed |= p.state == Player::BAIL;
+                return Vector2DotProduct({p.pos.x - mid.x, p.pos.z - mid.y}, d) > 5.f;
+            });
+            if (passed && !bailed) through++;
+        }
+        snprintf(b, sizeof b, "%d of %d towers ridden through", through, towers);
+        check(towers > 0 && through == towers, "Ride between gondola tower legs", b);
+    }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;
 }
+

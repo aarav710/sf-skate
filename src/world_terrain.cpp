@@ -2,6 +2,11 @@
 #include "world_internal.h"
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <condition_variable>
+#include <functional>
+#define GL_SILENCE_DEPRECATION
+#include <OpenGL/gl3.h>
 
 const Color C_ASPHALT = col(58, 58, 63, M_GROUND);
 const Color C_SIDEWALK = col(158, 156, 150, M_GROUND);
@@ -142,7 +147,13 @@ static float landHeight(int id, float x, float z) {
     }
     case P_YBI: return 3.0f + 48 * expf(-(sq(x - 2620) + sq(z - 170)) / sq(110));
     case P_TI: return 2.8f;
-    case P_ALCATRAZ: return 3.0f + 22 * expf(-(sq(x - 300) + sq(z - 1900 * -1)) / sq(70));
+    case P_ALCATRAZ: {   // a level top for the prison, steep rocky sides, a low rim at the water, and the road's shelf
+        float d = alcatrazD(x, z);
+        float h = 3.f + (AZ_TOP - 3.f) * (1.f - smooth01(0.5f, 0.98f, d));
+        float cliff = smooth01(0.5f, 0.65f, d) * (1.f - smooth01(0.85f, 1.f, d));
+        h += cliff * 1.8f * sinf(x * 0.21f + z * 0.13f) * cosf(z * 0.19f - x * 0.07f);   // rock ribs
+        return h;   // (the road's shelf is cut in rawHeight, after the beach, so by the dock it runs out along a seawall)
+    }
     case P_SFO: return AIRPORT_Y;
     case P_PEN: {
         float h = 3.0f + hillSum(PEN_H, sizeof(PEN_H) / sizeof(Hill), x, z) + std::max(rolling(x, z) * 3.0f, -1.5f) +
@@ -186,6 +197,19 @@ void initGeography() {
     initRail();
 }
 
+float alcatrazRoad(float x, float z, float* roadY) {
+    float best = 1e9f;
+    *roadY = AZ_TOP;
+    for (int k = 0; k + 1 < AZ_ROAD_N; k++) {
+        Vector3 a = AZ_ROAD[k], b = AZ_ROAD[k + 1];
+        float dx = b.x - a.x, dz = b.z - a.z, L2 = dx * dx + dz * dz;
+        float t = clampf(((x - a.x) * dx + (z - a.z) * dz) / L2, 0.f, 1.f);
+        float d = sqrtf(sq(x - a.x - dx * t) + sq(z - a.z - dz * t));
+        if (d < best) { best = d; *roadY = lerpf(a.y, b.y, t); }
+    }
+    return best;
+}
+
 static float rawHeight(float x, float z) {
     float best = -14.f;
     for (auto& P : gPolys) {
@@ -199,7 +223,10 @@ static float rawHeight(float x, float z) {
             float land = landHeight(P.id, x, z);
             h = 0.6f + (land - 0.6f) * smooth01(0, shoreW, sd);
         } else {
-            h = 0.6f - 14.6f * smooth01(0, 60, -sd);
+            // off the shore: drop a metre or so right away, so the bed never lies just under the water surface
+            // (the two would z-fight and flicker from a distance), then shelve on down to the bay floor
+            float s = smooth01(0, 60, -sd);
+            h = 0.6f - 14.6f * s - 1.2f * clampf(-sd / 4.f, 0, 1) * (1.f - s);
         }
         best = std::max(best, h);
     }
@@ -209,6 +236,11 @@ static float rawHeight(float x, float z) {
         float d = sqrtf(dx * dx + dz * dz);
         if (d == 0 && best > -2) best = AIRPORT_Y;
         else if (d < 140 && best > 0.6f) best = lerpf(best, AIRPORT_Y, 1 - smooth01(0, 140, d));
+    }
+    // Alcatraz: the road's level shelf, wide enough that the 4 m ground mesh stays under the asphalt
+    if (x > 140 && x < 460 && z > -2000 && z < -1800) {
+        float ry, rd = alcatrazRoad(x, z, &ry);
+        if (rd < 16.f) best = lerpf(ry, best, smooth01(9.5f, 16.f, rd));
     }
     for (auto& F : FLATS) {
         float d = sqrtf(sq(x - F.x) + sq(z - F.z));
@@ -465,7 +497,40 @@ void World::buildHeightfield() {
     for (auto& t : th) t.join();
 }
 
+// The ground is drawn as 10 m triangles (see buildTerrainMesh), coarser than the 4 m heightfield. On a curved
+// hill the two part by up to a metre or more, which sank the skater into slopes and let the camera slip under
+// the drawn hill. So the ground everything rides on is those same triangles, read off the heightfield at their corners.
+// Alcatraz gets its own finer ground mesh over this box (aligned to both the 10 m and 4 m grids)
+constexpr float AZB_X0 = 140, AZB_X1 = 460, AZB_Z0 = -2000, AZB_Z1 = -1800;
+
+static float meshTri(float h00, float h10, float h01, float h11, float tx, float tz) {
+    // each square splits along its (0,0)-(1,1) diagonal, the same way the mesh does
+    return tx >= tz ? h00 + (h10 - h00) * tx + (h11 - h10) * tz
+                    : h00 + (h11 - h01) * tx + (h01 - h00) * tz;
+}
+
 float World::terrain(float x, float z) const {
+    constexpr float S = 10.f;
+    if (x >= AZB_X0 && x < AZB_X1 && z >= AZB_Z0 && z < AZB_Z1) {
+        constexpr float S4 = 4.f;
+        float gx = (x - AZB_X0) / S4, gz = (z - AZB_Z0) / S4;
+        float x0 = AZB_X0 + floorf(gx) * S4, z0 = AZB_Z0 + floorf(gz) * S4;
+        return meshTri(terrainRaw(x0, z0), terrainRaw(x0 + S4, z0), terrainRaw(x0, z0 + S4), terrainRaw(x0 + S4, z0 + S4), gx - floorf(gx), gz - floorf(gz));
+    }
+    if (x >= WX0 && z >= WZ0 && x < WX1 - S && z < WZ1 - S) {
+        float gx = (x - WX0) / S, gz = (z - WZ0) / S;
+        float x0 = WX0 + floorf(gx) * S, z0 = WZ0 + floorf(gz) * S;
+        return meshTri(terrainRaw(x0, z0), terrainRaw(x0 + S, z0), terrainRaw(x0, z0 + S), terrainRaw(x0 + S, z0 + S), gx - floorf(gx), gz - floorf(gz));
+    }
+    if (x >= MX0 - 390 && z >= MZ0 - 390 && x < MX1 + 380 && z < MZ1 + 380) {   // Menlo Park's own 10 m mesh
+        float gx = (x - (MX0 - 390)) / S, gz = (z - (MZ0 - 390)) / S;
+        float x0 = MX0 - 390 + floorf(gx) * S, z0 = MZ0 - 390 + floorf(gz) * S;
+        return meshTri(terrainRaw(x0, z0), terrainRaw(x0 + S, z0), terrainRaw(x0, z0 + S), terrainRaw(x0 + S, z0 + S), gx - floorf(gx), gz - floorf(gz));
+    }
+    return terrainRaw(x, z);
+}
+
+float World::terrainRaw(float x, float z) const {
     float fx = (x - WX0) / HF_RES, fz = (z - WZ0) / HF_RES;
     if (fx < 0 || fz < 0 || fx >= hfW - 1 || fz >= hfH - 1) {
         float gx2 = (x - (MX0 - 400)) / HF_RES, gz2 = (z - (MZ0 - 400)) / HF_RES;
@@ -669,8 +734,19 @@ static float vnoise2(float x, float z, float cell, int seed) {
     return lerpf(lerpf(hash01(i, j, seed), hash01(i + 1, j, seed), tx), lerpf(hash01(i, j + 1, seed), hash01(i + 1, j + 1, seed), tx), tz);
 }
 
+
 static Color groundColor(const World& w, float x, float z, float h, float slope) {
     if (h < 0.5f) return col(196, 182, 146, M_GROUND);
+    if (x > AZB_X0 && x < AZB_X1 && z > AZB_Z0 && z < AZB_Z1) {   // Alcatraz
+        float d = alcatrazD(x, z), ry, rd = alcatrazRoad(x, z, &ry);
+        float n = vnoise2(x, z, 18.f, 11);
+        if (rd < 9.5f) return mixC(col(150, 146, 138, M_GROUND), col(132, 128, 120, M_GROUND), n);   // gravel shoulders
+        if (d < 0.53f) return mixC(col(176, 172, 164, M_GROUND), col(160, 156, 148, M_GROUND), n);   // the paved top
+        Color rock = mixC(col(118, 108, 96, M_GROUND), col(92, 86, 80, M_GROUND), n);
+        Color garden = mixC(col(84, 120, 62, M_GROUND), col(128, 140, 80, M_GROUND), n);   // the prison gardens, gone wild
+        if (d > 0.96f) return rock;
+        return mixC(garden, rock, smooth01(0.35f, 0.8f, n) * 0.6f + smooth01(0.9f, 1.4f, slope) * 0.6f);
+    }
     if (x > MX0 - 400 && x < MX1 + 400 && z > MZ0 - 400 && z < MZ1 + 400) {
         float n2 = vnoise2(x, z, 60.f, 9);
         if (x > 3450) return mixC(col(150, 140, 96, M_GROUND), col(110, 120, 80, M_GROUND), n2); // bayside marsh
@@ -708,6 +784,10 @@ static Color groundColor(const World& w, float x, float z, float h, float slope)
     return g;
 }
 
+// The bay floor is drawn down to this depth, where the water has all but closed over it; below that one flat
+// floor stands in for it (see buildTerrainMesh), so the see-through water never shows empty space
+constexpr float SEABED_MIN = -7.f;
+
 void World::buildTerrainMesh() {
     const float S = 10.f;
     int nx = (int)((WX1 - WX0) / S), nz = (int)((WZ1 - WZ0) / S);
@@ -715,7 +795,7 @@ void World::buildTerrainMesh() {
     std::vector<Color> C((size_t)(nx + 1) * (nz + 1));
     std::vector<Vector3> N(C.size());   // smooth normals straight from the heightfield, seamless across chunks
     for (int j = 0; j <= nz; j++)
-        for (int i = 0; i <= nx; i++) H[(size_t)j * (nx + 1) + i] = terrain(WX0 + i * S, WZ0 + j * S);
+        for (int i = 0; i <= nx; i++) H[(size_t)j * (nx + 1) + i] = terrainRaw(WX0 + i * S, WZ0 + j * S);
     for (int j = 0; j <= nz; j++)
         for (int i = 0; i <= nx; i++) {
             float x = WX0 + i * S, z = WZ0 + j * S;
@@ -730,13 +810,42 @@ void World::buildTerrainMesh() {
         for (int i = 0; i < nx; i++) {
             size_t a = (size_t)j * (nx + 1) + i, b = a + 1, c = a + nx + 1, d = c + 1;
             float mx = std::max(std::max(H[a], H[b]), std::max(H[c], H[d]));
-            if (mx < -1.0f) continue;
+            if (mx < SEABED_MIN) continue;
             float x0 = WX0 + i * S, z0 = WZ0 + j * S;
+            if (x0 >= AZB_X0 && x0 < AZB_X1 && z0 >= AZB_Z0 && z0 < AZB_Z1) continue;   // Alcatraz: its own mesh below
             MeshBuilder& m = mb(x0 + S / 2, z0 + S / 2);
             Vector3 pa = {x0, H[a], z0}, pb = {x0 + S, H[b], z0}, pc = {x0, H[c], z0 + S}, pd = {x0 + S, H[d], z0 + S};
             m.vertN(pa, C[a], N[a]); m.vertN(pb, C[b], N[b]); m.vertN(pd, C[d], N[d]);
             m.vertN(pa, C[a], N[a]); m.vertN(pd, C[d], N[d]); m.vertN(pc, C[c], N[c]);
         }
+    // Alcatraz at the heightfield's own 4 m spacing, so the ground you see is the ground you ride
+    {
+        const float S4 = 4.f;
+        int ax = (int)((AZB_X1 - AZB_X0) / S4), az = (int)((AZB_Z1 - AZB_Z0) / S4);
+        std::vector<float> H4((size_t)(ax + 1) * (az + 1));
+        for (int j = 0; j <= az; j++)
+            for (int i = 0; i <= ax; i++) H4[(size_t)j * (ax + 1) + i] = terrainRaw(AZB_X0 + i * S4, AZB_Z0 + j * S4);
+        auto at = [&](int i, int j) { return H4[(size_t)std::clamp(j, 0, az) * (ax + 1) + std::clamp(i, 0, ax)]; };
+        std::vector<Color> C4(H4.size());
+        std::vector<Vector3> N4(H4.size());
+        for (int j = 0; j <= az; j++)
+            for (int i = 0; i <= ax; i++) {
+                float hx = at(i + 1, j) - at(i - 1, j), hz = at(i, j + 1) - at(i, j - 1);
+                float x = AZB_X0 + i * S4, z = AZB_Z0 + j * S4;
+                C4[(size_t)j * (ax + 1) + i] = groundColor(*this, x, z, at(i, j), sqrtf(hx * hx + hz * hz) / (2 * S4));
+                N4[(size_t)j * (ax + 1) + i] = {-hx / (2 * S4), 1, -hz / (2 * S4)};
+            }
+        for (int j = 0; j < az; j++)
+            for (int i = 0; i < ax; i++) {
+                size_t a = (size_t)j * (ax + 1) + i, b = a + 1, c = a + ax + 1, d = c + 1;
+                if (std::max(std::max(H4[a], H4[b]), std::max(H4[c], H4[d])) < SEABED_MIN) continue;
+                float x0 = AZB_X0 + i * S4, z0 = AZB_Z0 + j * S4;
+                MeshBuilder& m = mb(x0 + S4 / 2, z0 + S4 / 2);
+                Vector3 pa = {x0, H4[a], z0}, pb = {x0 + S4, H4[b], z0}, pc = {x0, H4[c], z0 + S4}, pd = {x0 + S4, H4[d], z0 + S4};
+                m.vertN(pa, C4[a], N4[a]); m.vertN(pb, C4[b], N4[b]); m.vertN(pd, C4[d], N4[d]);
+                m.vertN(pa, C4[a], N4[a]); m.vertN(pd, C4[d], N4[d]); m.vertN(pc, C4[c], N4[c]);
+            }
+    }
     // detailed ground around Menlo Park
     {
         const float S2 = 10.f, X0 = MX0 - 390, Z0 = MZ0 - 390;
@@ -745,7 +854,7 @@ void World::buildTerrainMesh() {
         std::vector<Color> C2(H2.size());
         std::vector<Vector3> N2(H2.size());
         for (int j = 0; j <= mz; j++)
-            for (int i = 0; i <= mx; i++) H2[(size_t)j * (mx + 1) + i] = terrain(X0 + i * S2, Z0 + j * S2);
+            for (int i = 0; i <= mx; i++) H2[(size_t)j * (mx + 1) + i] = terrainRaw(X0 + i * S2, Z0 + j * S2);
         for (int j = 0; j <= mz; j++)
             for (int i = 0; i <= mx; i++) {
                 size_t k = (size_t)j * (mx + 1) + i;
@@ -764,6 +873,8 @@ void World::buildTerrainMesh() {
                 m.vertN(pa, C2[a], N2[a]); m.vertN(pd, C2[d], N2[d]); m.vertN(pc, C2[c], N2[c]);
             }
     }
+    // the deep bay floor under everything, below the deepest seabed
+    mbKey(900020).quad({-40000, -14.5f, -40000}, {40000, -14.5f, -40000}, {40000, -14.5f, 40000}, {-40000, -14.5f, 40000}, col(150, 140, 112, M_GROUND));
     // the sea: one large quad, the shader animates it
     Color wc = col(30, 78, 98, M_WATER);
     waterB.quad({-40000, 0, -40000}, {40000, 0, -40000}, {40000, 0, 40000}, {-40000, 0, 40000}, wc);
@@ -799,7 +910,7 @@ void World::buildBackdrop() {
             if (x0 >= WX0 && x0 + S <= WX1 && z0 >= WZ0 && z0 + S <= WZ1) continue;
             if (x0 >= MX0 - 390 && x0 + S <= MX1 + 390 && z0 >= MZ0 - 390 && z0 + S <= MZ1 + 390) continue;
             size_t a = (size_t)j * (nx + 1) + i, b = a + 1, c = a + nx + 1, d = c + 1;
-            if (std::max(std::max(H[a], H[b]), std::max(H[c], H[d])) < -1.0f) continue;
+            if (std::max(std::max(H[a], H[b]), std::max(H[c], H[d])) < SEABED_MIN) continue;
             MeshBuilder& m = mbKey(800000 + (j / 25) * 1000 + i / 25);
             Vector3 pa = {x0, H[a], z0}, pb = {x0 + S, H[b], z0}, pc = {x0, H[c], z0 + S}, pd = {x0 + S, H[d], z0 + S};
             m.vertN(pa, C[a], N[a]); m.vertN(pb, C[b], N[b]); m.vertN(pd, C[d], N[d]);
@@ -921,11 +1032,25 @@ static_assert(sizeof(GVert) == 24, "packed vertex");
 
 // Fill in normals: given ones are kept, the rest are averaged over the triangles meeting at each corner whose
 // faces bend less than the smoothing angle (so a box keeps its edges and a trunk or a hillside reads round).
-static void bakeVerts(const World& w, const MeshBuilder& b, std::vector<GVert>& out) {
+static void bakeVerts(const World& w, const MeshBuilder& b, BigVec<GVert>& out) {
     size_t n = b.count() / 3 * 3;
     out.resize(n);
-    std::vector<Vector3> fa(n / 3), fu(n / 3);   // area-weighted and unit face normals
+    size_t smooth = 0;   // vertices whose normal is worked out here
+    size_t rc = 0, rn = 0;   // the color and normal runs vertex i falls in
+    for (size_t i = 0; i < n; i++) {
+        GVert& g = out[i];
+        g.x = b.v[i * 3]; g.y = b.v[i * 3 + 1]; g.z = b.v[i * 3 + 2];
+        while (b.c[rc].end <= i) rc++;
+        while (b.n[rn].end <= i) rn++;
+        memcpy(g.c, b.c[rc].d, 4);
+        memcpy(g.n, b.n[rn].d, 4);
+        if (g.n[3] == NRM_EXPLICIT) g.gy = g.y - 100.f;   // terrain, foliage: no contact shadow
+        else smooth++;
+    }
+    if (!smooth) return;   // all normals given: nothing more to do
+    BigVec<Vector3> fa(n / 3), fu(n / 3);   // area-weighted and unit face normals
     for (size_t t = 0; t < n / 3; t++) {
+        if (out[t * 3].n[3] == NRM_EXPLICIT && out[t * 3 + 1].n[3] == NRM_EXPLICIT && out[t * 3 + 2].n[3] == NRM_EXPLICIT) continue;
         const float* p = &b.v[t * 9];
         Vector3 e1 = {p[3] - p[0], p[4] - p[1], p[5] - p[2]}, e2 = {p[6] - p[0], p[7] - p[1], p[8] - p[2]};
         Vector3 c = Vector3CrossProduct(e1, e2);
@@ -934,15 +1059,11 @@ static void bakeVerts(const World& w, const MeshBuilder& b, std::vector<GVert>& 
         fu[t] = l > 1e-9f ? Vector3Scale(c, 1.f / l) : V3(0, 1, 0);
     }
     struct Key { int x, y, z; uint32_t i; };
-    std::vector<Key> keys;
-    keys.reserve(n);
+    BigVec<Key> keys;
+    keys.reserve(smooth);
     for (size_t i = 0; i < n; i++) {
-        GVert& g = out[i];
-        g.x = b.v[i * 3]; g.y = b.v[i * 3 + 1]; g.z = b.v[i * 3 + 2];
-        memcpy(g.c, &b.c[i * 4], 4);
-        memcpy(g.n, &b.n[i * 4], 4);
-        if (g.n[3] == NRM_EXPLICIT) { g.gy = g.y - 100.f; continue; }   // terrain, foliage: no contact shadow
-        g.gy = w.terrain(g.x, g.z);
+        const GVert& g = out[i];
+        if (g.n[3] == NRM_EXPLICIT) continue;
         keys.push_back({(int)lroundf(g.x * 500.f), (int)lroundf(g.y * 500.f), (int)lroundf(g.z * 500.f), (uint32_t)i});
     }
     std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
@@ -952,6 +1073,13 @@ static void bakeVerts(const World& w, const MeshBuilder& b, std::vector<GVert>& 
         size_t s1 = s0 + 1;
         while (s1 < keys.size() && keys[s1].x == keys[s0].x && keys[s1].y == keys[s0].y && keys[s1].z == keys[s0].z) s1++;
         bool big = s1 - s0 > 48;   // a fan of dozens of faces: not worth smoothing
+        // ground height under the group: one lookup, reused for corners at exactly the same x,z (nearly all of them)
+        float gx = out[keys[s0].i].x, gz = out[keys[s0].i].z, gh = w.terrain(gx, gz);
+        for (size_t a = s0; a < s1; a++) {
+            GVert& g = out[keys[a].i];
+            if (memcmp(&g.x, &gx, 4) || memcmp(&g.z, &gz, 4)) { gx = g.x; gz = g.z; gh = w.terrain(gx, gz); }
+            g.gy = gh;
+        }
         for (size_t a = s0; a < s1; a++) {
             uint32_t vi = keys[a].i;
             Vector3 fv = fu[vi / 3], sum = fa[vi / 3];
@@ -974,72 +1102,217 @@ static void bakeVerts(const World& w, const MeshBuilder& b, std::vector<GVert>& 
     }
 }
 
-// Two buffers per chunk: position + color (16 bytes, all the far pass and the shadow maps need) and normal +
-// ground height (8 bytes, near pass only), so the far pass reads no more memory per vertex than it has to.
-static Chunk uploadVerts(const std::vector<GVert>& g) {
-    Chunk ch{};
-    ch.count = (int)g.size();
+// A chunk ready for the GPU: each distinct vertex once plus an index list, in two buffers: position + color (all
+// the far pass and the shadow maps need) and normal + height above the bare ground (near pass only).
+// Packed layout (20 bytes a vertex): position as whole 1/1024 m steps from the chunk's origin in 64 bits (x and z
+// 21 bits each, y 22), color; normal, height above ground as a half float. Every chunk rounds to the same grid, so
+// an edge two chunks share stays shared. A chunk too big for that (the bay floor, the water) keeps floats (24).
+constexpr float QS = 1.f / 1024.f;
+constexpr long QXZ_MAX = (1l << 21) - 1, QY_MAX = (1l << 22) - 1;
+struct QA { uint32_t p[2]; unsigned char c[4]; };
+struct QB { signed char n[4]; uint16_t h, pad; };
+struct QV { QA a; QB b; };
+struct PC { float x, y, z; unsigned char c[4]; };
+struct NG { signed char n[4]; float h; };
+struct FV { PC a; NG b; };
+static_assert(sizeof(QV) == 20 && sizeof(FV) == 24, "packed vertex");
+struct Baked { Chunk ch; BigVec<unsigned char> a, b, idx; size_t in = 0, verts = 0; };
+
+static uint16_t toHalf(float f) {   // round to nearest; tiny values flush to zero, huge ones clamp
+    uint32_t u;
+    memcpy(&u, &f, 4);
+    uint16_t sign = (u >> 16) & 0x8000;
+    float a = std::min(fabsf(f), 65504.f);
+    if (a < 6.104e-5f) return sign;
+    memcpy(&u, &a, 4);
+    int e = (int)((u >> 23) & 0xff) - 127 + 15;
+    uint32_t m = u & 0x7fffff;
+    uint32_t r = ((uint32_t)e << 10) + (m >> 13);
+    if ((m & 0x1fff) > 0x1000 || ((m & 0x1fff) == 0x1000 && (r & 1))) r++;
+    return (uint16_t)(sign | std::min(r, 0x7bffu));
+}
+
+// Merge identical vertices (open-addressing hash on the raw bytes), keeping first-seen order.
+template <class V, class F> static void dedup(size_t n, F get, BigVec<V>& uniq, BigVec<uint32_t>& idx) {
+    static_assert(sizeof(V) % 4 == 0, "whole words");
+    size_t cap = 64;
+    while (cap < n + n / 2) cap <<= 1;
+    BigVec<uint32_t> table(cap, UINT32_MAX);
+    uniq.reserve(n / 3 + 16);
+    idx.resize(n);
+    for (size_t i = 0; i < n; i++) {
+        V v;
+        get(i, v);
+        uint32_t w[sizeof(V) / 4];
+        uint64_t h = 0x9E3779B97F4A7C15ull;
+        memcpy(w, &v, sizeof(V));
+        for (uint32_t x : w) { h = (h ^ x) * 0xff51afd7ed558ccdull; h ^= h >> 31; }
+        size_t s = h & (cap - 1);
+        while (table[s] != UINT32_MAX && memcmp(&uniq[table[s]], &v, sizeof(V))) s = (s + 1) & (cap - 1);
+        if (table[s] == UINT32_MAX) { table[s] = (uint32_t)uniq.size(); uniq.push_back(v); }
+        idx[i] = table[s];
+    }
+}
+
+// Runs on the worker threads: normals, then packing and dedup; frees the builder as soon as it is done with.
+static void bakeChunk(const World& w, MeshBuilder& mb, Baked& out) {
+    BigVec<GVert> g;
+    bakeVerts(w, mb, g);
+    mb.release();
+    Chunk& ch = out.ch;
     ch.mn = {1e9f, 1e9f, 1e9f};
     ch.mx = {-1e9f, -1e9f, -1e9f};
     for (auto& q : g) {
         ch.mn = Vector3Min(ch.mn, {q.x, q.y, q.z});
         ch.mx = Vector3Max(ch.mx, {q.x, q.y, q.z});
     }
-    struct PC { float x, y, z; unsigned char c[4]; };
-    struct NG { signed char n[4]; float gy; };
-    std::vector<PC> pc(g.size());
-    std::vector<NG> ng(g.size());
-    for (size_t i = 0; i < g.size(); i++) {
-        pc[i] = {g[i].x, g[i].y, g[i].z, {g[i].c[0], g[i].c[1], g[i].c[2], g[i].c[3]}};
-        ng[i] = {{g[i].n[0], g[i].n[1], g[i].n[2], g[i].n[3]}, g[i].gy};
+    out.in = g.size();
+    long ox = lroundf(floorf(ch.mn.x / QS)), oy = lroundf(floorf(ch.mn.y / QS)), oz = lroundf(floorf(ch.mn.z / QS));
+    ch.packed = !g.empty() && lroundf(ch.mx.x / QS) - ox <= QXZ_MAX && lroundf(ch.mx.y / QS) - oy <= QY_MAX &&
+                lroundf(ch.mx.z / QS) - oz <= QXZ_MAX;
+    BigVec<uint32_t> idx;
+    auto split = [&](auto& uniq) {
+        out.verts = uniq.size();
+        out.a.resize(uniq.size() * sizeof(uniq[0].a));
+        out.b.resize(uniq.size() * sizeof(uniq[0].b));
+        for (size_t i = 0; i < uniq.size(); i++) {
+            memcpy(&out.a[i * sizeof(uniq[0].a)], &uniq[i].a, sizeof(uniq[0].a));
+            memcpy(&out.b[i * sizeof(uniq[0].b)], &uniq[i].b, sizeof(uniq[0].b));
+        }
+    };
+    if (ch.packed) {
+        ch.org = {ox * QS, oy * QS, oz * QS, 1};
+        BigVec<QV> uniq;
+        dedup<QV>(g.size(), [&](size_t i, QV& v) {
+            const GVert& q = g[i];
+            uint32_t x = (uint32_t)(lroundf(q.x / QS) - ox), y = (uint32_t)(lroundf(q.y / QS) - oy), z = (uint32_t)(lroundf(q.z / QS) - oz);
+            v.a.p[0] = x | (y & 0x7ff) << 21;
+            v.a.p[1] = z | (y >> 11) << 21;
+            memcpy(v.a.c, q.c, 4);
+            memcpy(v.b.n, q.n, 4);
+            v.b.h = toHalf(q.y - q.gy);
+            v.b.pad = 0;
+        }, uniq, idx);
+        BigVec<GVert>().swap(g);
+        split(uniq);
+    } else {
+        BigVec<FV> uniq;
+        dedup<FV>(g.size(), [&](size_t i, FV& v) {
+            const GVert& q = g[i];
+            v.a = {q.x, q.y, q.z, {q.c[0], q.c[1], q.c[2], q.c[3]}};
+            v.b = {{q.n[0], q.n[1], q.n[2], q.n[3]}, q.y - q.gy};
+        }, uniq, idx);
+        BigVec<GVert>().swap(g);
+        split(uniq);
     }
-    ch.vboA = rlLoadVertexBuffer(pc.data(), (int)(pc.size() * sizeof(PC)), false);
-    ch.vboB = rlLoadVertexBuffer(ng.data(), (int)(ng.size() * sizeof(NG)), false);
-    // locations raylib binds by name: 0 vertexPosition, 1 vertexTexCoord (ground height here), 2 vertexNormal, 3 vertexColor
+    ch.count = (int)idx.size();
+    ch.idx32 = out.verts > 65536;
+    if (ch.idx32) {
+        out.idx.resize(idx.size() * 4);
+        memcpy(out.idx.data(), idx.data(), out.idx.size());
+    } else {
+        out.idx.resize(idx.size() * 2);
+        for (size_t i = 0; i < idx.size(); i++) { uint16_t s = (uint16_t)idx[i]; memcpy(&out.idx[i * 2], &s, 2); }
+    }
+}
+
+// locations raylib binds by name: 0 vertexPosition, 1 vertexTexCoord (height above ground here), 2 vertexNormal,
+// 3 vertexColor; the shaders take a packed position at 10 (PACKED_LOC). Two VAOs share the buffers: the full one
+// and a slim one (position + color) for the far pass.
+static Chunk uploadBaked(Baked& bk) {
+    Chunk ch = bk.ch;
+    bool p = ch.packed;
+    int sa = p ? sizeof(QA) : sizeof(PC), sb = p ? sizeof(QB) : sizeof(NG);
     for (int k = 0; k < 2; k++) {
         unsigned& vao = k ? ch.vaoFar : ch.vao;
         vao = rlLoadVertexArray();
         rlEnableVertexArray(vao);
-        rlEnableVertexBuffer(ch.vboA);
-        rlSetVertexAttribute(0, 3, RL_FLOAT, false, sizeof(PC), 0);
-        rlEnableVertexAttribute(0);
-        rlSetVertexAttribute(3, 4, RL_UNSIGNED_BYTE, true, sizeof(PC), 12);
+        if (k == 0) ch.vboA = rlLoadVertexBuffer(bk.a.data(), (int)bk.a.size(), false);
+        else rlEnableVertexBuffer(ch.vboA);
+        if (p) {
+            glVertexAttribIPointer(PACKED_LOC, 2, GL_UNSIGNED_INT, sa, nullptr);
+            glEnableVertexAttribArray(PACKED_LOC);
+        } else {
+            rlSetVertexAttribute(0, 3, GL_FLOAT, false, sa, 0);
+            rlEnableVertexAttribute(0);
+        }
+        rlSetVertexAttribute(3, 4, GL_UNSIGNED_BYTE, true, sa, p ? 8 : 12);
         rlEnableVertexAttribute(3);
         if (k == 0) {
-            rlEnableVertexBuffer(ch.vboB);
-            rlSetVertexAttribute(2, 4, 0x1400 /* GL_BYTE */, true, sizeof(NG), 0);
+            ch.vboB = rlLoadVertexBuffer(bk.b.data(), (int)bk.b.size(), false);
+            rlSetVertexAttribute(2, 4, GL_BYTE, true, sb, 0);
             rlEnableVertexAttribute(2);
-            rlSetVertexAttribute(1, 1, RL_FLOAT, false, sizeof(NG), 4);
+            rlSetVertexAttribute(1, 1, p ? GL_HALF_FLOAT : GL_FLOAT, false, sb, 4);
             rlEnableVertexAttribute(1);
-        }
+            ch.ebo = rlLoadVertexBufferElement(bk.idx.data(), (int)bk.idx.size(), false);
+        } else rlEnableVertexBufferElement(ch.ebo);
     }
     rlDisableVertexArray();
     return ch;
 }
 
-void World::upload() {
+void World::upload(const std::function<void()>& meanwhile) {
     std::vector<MeshBuilder*> list;
     std::vector<int> keys;
     for (auto& kv : builders)
         if (kv.second.count() >= 3) { list.push_back(&kv.second); keys.push_back(kv.first); }
     list.push_back(&waterB);
     keys.push_back(-1);
-    // normals and ground heights for every chunk in parallel, then hand each to the GPU in turn
-    std::vector<std::vector<GVert>> baked(list.size());
+    // normals, ground heights, packing and dedup for every chunk in parallel; this thread hands each one to the GPU
+    // as soon as it is ready and frees it, so the baked copy of the whole city is never in memory at once
+    std::vector<Baked> baked(list.size());
+    // biggest chunks first so no thread is left with a big one at the end
+    std::vector<size_t> order(list.size());
+    for (size_t k = 0; k < order.size(); k++) order[k] = k;
+    std::vector<size_t> sizes(list.size());
+    for (size_t k = 0; k < list.size(); k++) sizes[k] = list[k]->count();
+    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return sizes[a] > sizes[b]; });
     std::atomic<size_t> next{0};
+    std::mutex readyM;
+    std::condition_variable readyCv;
+    std::vector<size_t> ready;   // baked, waiting for upload
     unsigned nt = std::max(2u, std::thread::hardware_concurrency());
     std::vector<std::thread> th;
+    double bakeT0 = GetTime();
     for (unsigned t = 0; t < nt; t++)
         th.emplace_back([&] {
-            for (size_t k; (k = next++) < list.size();) bakeVerts(*this, *list[k], baked[k]);
+            for (size_t q; (q = next++) < order.size();) {
+                bakeChunk(*this, *list[order[q]], baked[order[q]]);
+                std::lock_guard<std::mutex> lk(readyM);
+                ready.push_back(order[q]);
+                readyCv.notify_one();
+            }
         });
+    if (meanwhile) meanwhile();   // GL setup on this thread while the workers bake
+    double upT0 = GetTime();
+    size_t verts = 0, uniq = 0, idxN = 0, packedV = 0, gpuBytes = 0;
+    int idx32 = 0, floatCh = 0;
+    std::vector<Chunk> done(list.size());   // uploaded, kept in list order
+    for (size_t left = list.size(); left;) {
+        std::vector<size_t> now;
+        {
+            std::unique_lock<std::mutex> lk(readyM);
+            readyCv.wait(lk, [&] { return !ready.empty(); });
+            now.swap(ready);
+        }
+        for (size_t k : now) {
+            Baked& bk = baked[k];
+            verts += bk.in;
+            uniq += bk.verts;
+            idxN += bk.ch.count;
+            if (bk.ch.packed) packedV += bk.verts;
+            else floatCh++;
+            idx32 += bk.ch.idx32;
+            gpuBytes += bk.a.size() + bk.b.size() + bk.idx.size();
+            done[k] = uploadBaked(bk);
+            bk = Baked{};
+            left--;
+        }
+    }
     for (auto& t : th) t.join();
-    size_t verts = 0;
+    TraceLog(LOG_INFO, "SFSKATE: bake and upload %.3fs (%.3fs after the renderer setup)", GetTime() - bakeT0, GetTime() - upT0);
     for (size_t k = 0; k < list.size(); k++) {
-        verts += baked[k].size();
-        Chunk ch = uploadVerts(baked[k]);
-        std::vector<GVert>().swap(baked[k]);
-        list[k]->release();
+        Chunk ch = done[k];
         if (list[k] == &waterB) { water = ch; continue; }
         // the cell's own square decides when a layer switches, so the detail and far layers trade places exactly
         int base = keys[k] % LAYER_STRIDE;
@@ -1053,12 +1326,20 @@ void World::upload() {
         chunks.push_back(ch);
     }
     TraceLog(LOG_INFO, "SFSKATE: %zu static vertices in %d chunks", verts, (int)chunks.size());
+    TraceLog(LOG_INFO, "SFSKATE: %zu unique vertices (%zu packed, %zu float in %d chunks), %zu indices (%d chunks 32-bit), %.0f MB on GPU",
+             uniq, packedV, uniq - packedV, floatCh, idxN, idx32, gpuBytes / 1048576.0);
     builders.clear();
 }
 
+// Packed chunks are placed by a per-chunk origin (w = 1: read the packed position); anything else drawn with these
+// shaders gets w = 0 (set back in endStatic).
+static int locOrg = -1;
+static void setChunkOrg(Vector4 org) { rlSetUniform(locOrg, &org, RL_SHADER_UNIFORM_VEC4, 1); }
+
 static void drawChunk(const Chunk& ch, bool slim) {
+    setChunkOrg(ch.org);
     rlEnableVertexArray(slim ? ch.vaoFar : ch.vao);
-    rlDrawVertexArray(0, ch.count);
+    glDrawElements(GL_TRIANGLES, ch.count, ch.idx32 ? GL_UNSIGNED_INT : GL_UNSIGNED_SHORT, nullptr);
 }
 
 // Static meshes go straight to GL with the current camera's matrices (the immediate-mode batch is flushed first).
@@ -1066,8 +1347,10 @@ static void beginStatic(const Shader& sh) {
     rlDrawRenderBatchActive();
     rlEnableShader(sh.id);
     rlSetUniformMatrix(sh.locs[SHADER_LOC_MATRIX_MVP], MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection()));
+    locOrg = GetShaderLocation(sh, "chunkOrg");
 }
 static void endStatic() {
+    setChunkOrg({0, 0, 0, 0});
     rlDisableVertexArray();
     rlDisableShader();
 }
@@ -1083,27 +1366,31 @@ void World::drawPass(const Camera3D& cam, float nearD, float farD, const Shader&
     Vector4 planes[4] = {{r3.x + r0.x, r3.y + r0.y, r3.z + r0.z, r3.w + r0.w}, {r3.x - r0.x, r3.y - r0.y, r3.z - r0.z, r3.w - r0.w},
                          {r3.x + r1.x, r3.y + r1.y, r3.z + r1.z, r3.w + r1.w}, {r3.x - r1.x, r3.y - r1.y, r3.z - r1.z, r3.w - r1.w}};
     Vector3 fwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
-    for (auto& ch : chunks) {
+    // in view and within [nearD, farD]: the distance to the box's nearest point, else -1
+    auto inView = [&](const Chunk& ch) {
         Vector3 c = Vector3Scale(Vector3Add(ch.mn, ch.mx), 0.5f);
         float rad = Vector3Distance(ch.mn, ch.mx) * 0.5f;
         Vector3 d = Vector3Subtract(c, cam.position);
-        if (Vector3DotProduct(d, fwd) < -rad) continue;
-        bool out = false;
+        if (Vector3DotProduct(d, fwd) < -rad) return -1.f;
         for (auto& p : planes) {   // the box corner furthest along the plane normal still behind it: outside
             float v = p.x * (p.x > 0 ? ch.mx.x : ch.mn.x) + p.y * (p.y > 0 ? ch.mx.y : ch.mn.y) + p.z * (p.z > 0 ? ch.mx.z : ch.mn.z) + p.w;
-            if (v < 0) { out = true; break; }
+            if (v < 0) return -1.f;
         }
-        if (out) continue;
         // nearest and farthest distance from camera to the chunk box
         Vector3 q = {std::max(std::max(ch.mn.x - cam.position.x, 0.f), cam.position.x - ch.mx.x),
                      std::max(std::max(ch.mn.y - cam.position.y, 0.f), cam.position.y - ch.mx.y),
                      std::max(std::max(ch.mn.z - cam.position.z, 0.f), cam.position.z - ch.mx.z)};
         float nearest = Vector3Length(q);
-        if (nearest > farD) continue;
+        if (nearest > farD) return -1.f;
         Vector3 f = {std::max(fabsf(ch.mn.x - cam.position.x), fabsf(ch.mx.x - cam.position.x)),
                      std::max(fabsf(ch.mn.y - cam.position.y), fabsf(ch.mx.y - cam.position.y)),
                      std::max(fabsf(ch.mn.z - cam.position.z), fabsf(ch.mx.z - cam.position.z))};
-        if (Vector3Length(f) < nearD) continue;
+        if (Vector3Length(f) < nearD) return -1.f;
+        return nearest;
+    };
+    for (auto& ch : chunks) {
+        float nearest = inView(ch);
+        if (nearest < 0) continue;
         if (ch.layer != LAYER_MAIN) {
             float dx = std::max(std::max(ch.c0.x - cam.position.x, 0.f), cam.position.x - ch.c1.x);
             float dz = std::max(std::max(ch.c0.y - cam.position.z, 0.f), cam.position.z - ch.c1.y);
@@ -1114,7 +1401,72 @@ void World::drawPass(const Camera3D& cam, float nearD, float farD, const Shader&
         }
         drawChunk(ch, slim);
     }
+    // the rooms near the camera: seen only from inside or through the front door, so not from behind the street wall
+    Vector3 e = cam.position;
+    for (auto& kv : interiorMesh) {
+        const House& h = interiorSrc[kv.first].h;
+        bool inside = e.x > h.x0 && e.x < h.x1 && e.z > h.z0 && e.z < h.z1;
+        float front = h.facing == 0 ? h.z0 - e.z : h.facing == 1 ? e.z - h.z1 : h.facing == 2 ? h.x0 - e.x : e.x - h.x1;
+        if ((inside || front > -0.05f) && inView(kv.second) >= 0) drawChunk(kv.second, slim);
+    }
     endStatic();
+}
+
+static void freeChunk(Chunk& ch) {
+    rlUnloadVertexArray(ch.vao);
+    rlUnloadVertexArray(ch.vaoFar);
+    rlUnloadVertexBuffer(ch.vboA);
+    rlUnloadVertexBuffer(ch.vboB);
+    rlUnloadVertexBuffer(ch.ebo);
+    ch = Chunk{};
+}
+
+// Rooms are meshed one house at a time on this (the GL) thread: about 0.1-0.3 ms each, so a few a frame keeps up
+// with skating and a teleport fills in nearest first. Like the static interior layer they cast no sun shadow.
+InteriorStats World::updateInteriors(Vector3 cam, double budget) {
+    InteriorStats st;
+    double t0 = GetTime();
+    auto dist = [&](const House& h) {   // camera to the room's box
+        float dx = std::max(std::max(h.x0 - cam.x, 0.f), cam.x - h.x1), dz = std::max(std::max(h.z0 - cam.z, 0.f), cam.z - h.z1);
+        float dy = std::max(std::max(h.floorY - cam.y, 0.f), cam.y - (h.floorY + 3.6f));   // floor to ceiling
+        return sqrtf(dx * dx + dy * dy + dz * dz);
+    };
+    for (auto it = interiorMesh.begin(); it != interiorMesh.end();) {
+        if (dist(interiorSrc[it->first].h) > INTERIOR_DROP) { freeChunk(it->second); it = interiorMesh.erase(it); }
+        else ++it;
+    }
+    std::vector<std::pair<float, int>> want;
+    for (int i = 0; i < (int)interiorSrc.size(); i++) {
+        const House& h = interiorSrc[i].h;
+        if (fabsf((h.x0 + h.x1) * 0.5f - cam.x) > INTERIOR_LOAD + 20.f || fabsf((h.z0 + h.z1) * 0.5f - cam.z) > INTERIOR_LOAD + 20.f) continue;
+        float d = dist(h);
+        if (d < INTERIOR_LOAD && !interiorMesh.count(i)) want.push_back({d, i});
+    }
+    std::sort(want.begin(), want.end());
+    size_t k = 0;
+    for (; k < want.size() && (k == 0 || GetTime() - t0 < budget); k++) {
+        const InteriorSrc& s = interiorSrc[want[k].second];
+        MeshBuilder m;
+        RNG hr = s.hr;
+        addHouseInterior(s.h, s.base, s.top, s.doorU, hr, &m);
+        Baked bk;
+        bakeChunk(*this, m, bk);
+        Chunk ch = uploadBaked(bk);
+        ch.layer = LAYER_INTERIOR;
+        ch.c0 = {ch.mn.x, ch.mn.z};
+        ch.c1 = {ch.mx.x, ch.mx.z};
+        interiorMesh[want[k].second] = ch;
+        st.built++;
+    }
+    for (; k < want.size() && want[k].first < 30.f; k++) st.missingNear++;
+    st.cached = (int)interiorMesh.size();
+    st.ms = (GetTime() - t0) * 1000.0;
+    return st;
+}
+
+void World::freeInteriors() {
+    for (auto& kv : interiorMesh) freeChunk(kv.second);
+    interiorMesh.clear();
 }
 
 int World::drawCasters(Matrix lightView, float half, float zFar, const Shader& sh) {

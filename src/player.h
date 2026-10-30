@@ -26,6 +26,7 @@ struct Player {
 
     // animation
     float crouch = 0, lean = 0, pushPhase = 0, pushAmt = 0;
+    float pitch = 0;   // board tilt along the ground or rail (radians, + = nose up), so it sits on hills instead of in them
     float flipT = -1, flipDur = 0.42f, flipDir = 1; // board roll
     float shoveT = -1, shoveDur = 0.4f;           // board spin
     float flipAngle = 0, shoveAngle = 0;

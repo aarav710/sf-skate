@@ -160,7 +160,15 @@ void World::buildGondolas() {
                 m.obox({n.x, n.y + h - 0.7f, n.z}, {0.5f, 0.25f, 3.0f}, yaw, 0, d.accent);
                 // red and white aviation bands near the top
                 for (int k = 0; k < 4; k++) m.beam(foot(k, 0.82f), foot(k, 0.96f), 0.34f, 0.34f, col(220, 60, 50));
-                addPlat({n.x - hw, n.x + hw, n.z - hw, n.z + hw, n.y + 3.f, n.y + 3.f, n.y - 1.f, 0, PK_POLE});
+                // collision on each leg only, so you can ride through between them (the lowest ties are ~5 m up);
+                // each box covers the leg from its foot to the collision top, where it has leaned in a little
+                float uTop = 4.f / (h + 1.f);
+                for (int k = 0; k < 4; k++) {
+                    Vector3 p0 = foot(k, 0), p1 = foot(k, uTop);
+                    float r = 0.35f;
+                    addPlat({std::min(p0.x, p1.x) - r, std::max(p0.x, p1.x) + r, std::min(p0.z, p1.z) - r, std::max(p0.z, p1.z) + r,
+                             n.y + 3.f, n.y + 3.f, n.y - 1.f, 0, PK_POLE});
+                }
             }
         }
         gondolas.push_back(gl);

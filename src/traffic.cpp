@@ -1,4 +1,5 @@
 #include "traffic.h"
+#include "instance.h"
 #include "models.h"
 
 static RNG gR(20240);
@@ -22,8 +23,8 @@ static void colorPed(Ped& p, RNG& r) {
     static const uint8_t HAIRS[] = {HAIR_SHORT, HAIR_SHORT, HAIR_LONG, HAIR_LONG, HAIR_BUN, HAIR_BALD, HAIR_CAP, HAIR_CURLY};
     uint32_t h = r.next();
     p.hairStyle = HAIRS[h % 8];
-    int c = (h >> 3) % 20;   // about half carry something; phones are everywhere
-    p.carry = c < 9 ? CARRY_NONE : c < 12 ? CARRY_BACKPACK : c < 14 ? CARRY_SHOULDER : c < 16 ? CARRY_SHOPPING : CARRY_PHONE;
+    int c = (h >> 3) % 20;   // about half carry something; phones are everywhere, and the odd laptop open on the go
+    p.carry = c < 8 ? CARRY_NONE : c < 9 ? CARRY_LAPTOP : c < 12 ? CARRY_BACKPACK : c < 14 ? CARRY_SHOULDER : c < 16 ? CARRY_SHOPPING : CARRY_PHONE;
     p.idle = (h >> 8) % 4;
     p.build = 0.9f + ((h >> 12) % 100) * 0.0022f;
     p.extra = EXTRA[(h >> 20) % 8];
@@ -235,6 +236,20 @@ void Traffic::init(World& w) {
         colorPed(p, r);
         peds.push_back(p);
     }
+    // people sitting on benches and park lawns, more than half of them working on a laptop
+    {
+        RNG sr(777);   // its own stream, so nothing else in the city moves
+        for (auto& st : w.seats) {
+            if (sr.f() >= (st.grass ? 1.f : 0.45f)) continue;
+            Ped p;
+            p.mode = 3; p.grass = st.grass;
+            p.pos = st.pos; p.from = {st.pos.x, st.pos.z}; p.yaw = st.yaw;
+            colorPed(p, sr);
+            float c = sr.f();
+            p.carry = c < 0.6f ? CARRY_LAPTOP : c < 0.85f ? CARRY_PHONE : (p.carry == CARRY_PHONE ? CARRY_NONE : p.carry);
+            peds.push_back(p);
+        }
+    }
 
     // dogs: about one walker in ten has one on a leash (seeded per person, so nothing else in the city moves)
     static const Color COAT[] = {{214, 170, 90, 255}, {120, 80, 50, 255}, {30, 30, 32, 255}, {236, 232, 222, 255}, {150, 150, 155, 255},
@@ -242,7 +257,7 @@ void Traffic::init(World& w) {
     for (size_t i = 0; i < peds.size(); i++) {
         Ped& p = peds[i];
         uint32_t h = hashu((int)i, 13, 3);
-        float chance = p.mode == 0 ? 0.11f : p.mode == 1 ? 0.07f : 0.05f;
+        float chance = p.mode == 0 ? 0.11f : p.mode == 1 ? 0.07f : p.mode == 2 ? 0.05f : 0.f;
         if ((h % 1000) / 1000.f >= chance) continue;
         p.pet = 1;
         p.petC = COAT[(h >> 10) % 8];
@@ -299,6 +314,61 @@ void Traffic::nextPedMove(Ped& p, RNG& r) {
     p.to = {nd.x + p.qx * g.walkOff, nd.y + p.qz * g.walkOff};
     p.len = std::max(0.5f, Vector2Distance(p.from, p.to));
     p.t = 0;
+}
+
+void Traffic::startEvade(Ped& p, int kind, Vector2 dir, float dist) {
+    p.evade = (uint8_t)kind;
+    p.evT = 0;
+    p.evFrom = p.dodge;
+    p.evTo = Vector2Add(p.dodge, Vector2Scale(dir, dist));
+    p.wait = 0;
+    if (kind == EV_STEP)      { p.evMove = std::max(0.5f, dist / 2.6f); p.evDur = p.evMove + 0.35f; }   // brisk walk, then settle
+    else if (kind == EV_BACK) { p.evMove = std::max(0.6f, dist / 2.0f); p.evDur = p.evMove + 0.5f; }
+    else if (kind == EV_HOP)  { p.evMove = 0.5f; p.evDur = 0.95f; }                                     // hop, land in a crouch
+    else                      { p.evMove = 0.65f; p.evDur = 0.65f + 1.4f + 0.95f; }                     // leap, lie there, get up
+}
+
+// The cheap update for someone far from the skater and the camera: walk the route with no dodging and no
+// wall checks (the full update skips those past 250 m anyway), and one ground lookup for the height, so
+// they're on their route at the right height whenever they come back into view.
+void Traffic::farPedUpdate(Ped& p, float dt, World& w, RNG& r) {
+    if (p.knock > 0) { p.knock -= dt; return; }
+    if (p.mode == 3) return;
+    float prevGround = p.pos.y - p.evY;
+    if (p.evade != EV_NONE) { p.dodge = p.evTo; p.evade = EV_NONE; }   // nobody's dodging out here: finish the move
+    p.evY = 0; p.evTilt = 0;
+    float L = Vector2Length(p.dodge);   // and they drift back onto their route at a walk
+    if (L > 0.01f) p.dodge = Vector2Scale(p.dodge, (L - std::min(L, 1.0f * dt)) / L);
+    Vector2 base, routeDir = {0, 0};
+    bool walking = false;
+    if (p.mode == 0) {
+        if (p.wait > 0) p.wait -= dt;
+        else { p.t += p.speed * dt / p.len; walking = true; }
+        if (p.t >= 1) { p.t = 1; nextPedMove(p, r); if (r.chance(0.22f)) p.wait = r.range(1.5f, 5.f); }
+        base = Vector2Lerp(p.from, p.to, clampf(p.t, 0, 1));
+        if (Vector2Length(Vector2Subtract(p.to, p.from)) > 0.1f) routeDir = Vector2Normalize(Vector2Subtract(p.to, p.from));
+    } else if (p.mode == 1) {
+        const Path& P = w.pedPaths[p.path];
+        p.s += p.pdir * p.speed * dt;
+        if (p.s > P.len) { p.s = P.len; p.pdir = -1; }
+        if (p.s < 0) { p.s = 0; p.pdir = 1; }
+        Vector2 dir;
+        base = P.at(p.s, &dir);
+        dir = Vector2Scale(dir, (float)p.pdir);
+        base = Vector2Add(base, Vector2Scale({-dir.y, dir.x}, p.lane));
+        routeDir = dir;
+        walking = true;
+    } else {
+        base = p.from;
+        p.idleTurn -= dt;
+        if (p.idleTurn < 0) { p.idleTurn = r.range(2, 7); p.yaw += r.range(-1.2f, 1.2f); }
+    }
+    float x = base.x + p.dodge.x, z = base.y + p.dodge.y;
+    float y = w.ground(x, z, std::max(w.terrain(x, z), prevGround));   // same step-climbing reference as the full update
+    p.pos = {x, y, z};
+    p.gait = walking && p.mode != 2 ? p.speed : 0;
+    if (walking && (routeDir.x != 0 || routeDir.y != 0)) p.yaw = atan2f(routeDir.y, routeDir.x);
+    p.phase += dt * p.gait * 5.2f;
 }
 
 void Traffic::update(float dt, World& w, const Player& pl) {
@@ -460,50 +530,179 @@ void Traffic::update(float dt, World& w, const Player& pl) {
         c.placed = true;
     }
 
-    for (auto& p : peds) {
+    // the skater's velocity on the ground, for the people deciding whether to get out of the way
+    Vector2 skV = pl.state == Player::AIR ? Vector2{pl.vel.x, pl.vel.z} : Vector2{cosf(pl.yaw) * pl.speed, sinf(pl.yaw) * pl.speed};
+    float skSp = Vector2Length(skV);
+    Vector2 skDir = skSp > 0.1f ? Vector2Scale(skV, 1.f / skSp) : Vector2{1, 0};
+    // Only people within PED_NEAR of the skater or the camera get the full update below (dodging, walls,
+    // climbing steps). Nobody is drawn past 230 m, so the rest just walk their routes: each frame one slice
+    // of them catches up on the time they've missed, and anyone coming into range catches up first.
+    const float PED_NEAR = 300.f;
+    const int FAR_SLICES = 16;
+    farTurn = (farTurn + 1) % FAR_SLICES;
+    for (size_t pi = 0; pi < peds.size(); pi++) {
+        Ped& p = peds[pi];
         float dP2 = sq(p.pos.x - pp.x) + sq(p.pos.z - pp.z);
+        if (std::min(dP2, sq(p.pos.x - view.x) + sq(p.pos.z - view.z)) > PED_NEAR * PED_NEAR) {
+            p.lag += dt;
+            if ((int)(pi % FAR_SLICES) == farTurn) { farPedUpdate(p, p.lag, w, r); p.lag = 0; }
+            continue;
+        }
+        if (p.lag > 0) { farPedUpdate(p, p.lag, w, r); p.lag = 0; }
         if (p.knock > 0) { p.knock -= dt; continue; }
-        // step aside when a skater comes flying at you
-        if (dP2 < 64 && pl.hspeed() > 3) {
-            Vector2 pv = pl.state == Player::AIR ? Vector2{pl.vel.x, pl.vel.z} : Vector2{cosf(pl.yaw) * pl.speed, sinf(pl.yaw) * pl.speed};
-            Vector2 rel = {p.pos.x - pp.x, p.pos.z - pp.z};
-            float sp = Vector2Length(pv);
-            if (sp > 0.1f && Vector2DotProduct(pv, rel) / sp > 0.5f * sqrtf(dP2)) {
-                Vector2 perp = {-pv.y / sp, pv.x / sp};
-                float side = Vector2DotProduct(perp, rel) > 0 ? 1.f : -1.f;
-                p.dodge = Vector2Lerp(p.dodge, Vector2Scale(perp, side * 1.8f), 1 - expf(-dt * 6));
-            }
-        } else p.dodge = Vector2Scale(p.dodge, expf(-dt * 0.6f));
+        if (p.mode == 3) continue;   // sitting: stays put, on the seat
+        Vector3 prev = p.pos;
+        float prevGround = p.pos.y - p.evY;
 
-        Vector2 base;
-        float walk = 1;
+        // ---- getting out of the skater's way
+        // how soon they notice: someone heads-down in a phone or laptop spots the skater late, others at varying distances
+        uint32_t ph = hashu((int)(p.scale * 1e4f), (int)(p.build * 1e4f), 9);
+        float u01 = (ph % 1000) / 1000.f;
+        bool distracted = p.carry == CARRY_PHONE || p.carry == CARRY_LAPTOP;
+        float notice = distracted ? lerpf(3.5f, 7.f, u01) : lerpf(6.f, 14.f, u01);
+        if (p.evade == EV_NONE && dP2 < notice * notice && skSp > 3.f && pl.state != Player::BAIL) {
+            Vector2 rel = {p.pos.x - pp.x, p.pos.z - pp.z};
+            Vector2 perp = {-skDir.y, skDir.x};
+            float along = Vector2DotProduct(rel, skDir), lat = Vector2DotProduct(rel, perp);
+            float tti = along / skSp;   // seconds until the skater is level with them
+            if (along > -0.3f && fabsf(lat) < 1.5f && tti < 1.5f && fabsf(pl.pos.y - p.pos.y) < 2.f) {
+                uint32_t h = hashu((int)(p.phase * 1000.f), (int)(along * 10.f), 41);
+                // away from the skater's line, to the side they're already on (a coin toss when dead ahead)
+                float side = fabsf(lat) > 0.2f ? (lat > 0 ? 1.f : -1.f) : ((h & 1) ? 1.f : -1.f);
+                float clear = 1.5f - fabsf(lat) + 0.4f;   // how far to go to be clear of the board and the body
+                auto blocked = [&](Vector2 off) {
+                    Vector2 to = Vector2Add(Vector2Add({p.pos.x, p.pos.z}, Vector2Subtract(off, p.dodge)), Vector2Scale(Vector2Normalize(off), 0.4f));
+                    float g = w.terrain(to.x, to.y);
+                    return w.solidAt({to.x, std::max(prevGround, g) + 0.6f, to.y}) || w.isWater(to.x, to.y, g);
+                };
+                // pick the move: time to spare means a brisk walk out of the way; the closer and faster the
+                // skater, the more desperate it gets: a hop aside, or a dive and a sprawl on the ground
+                float r01 = ((h >> 4) % 1000) / 1000.f;
+                int kind;
+                if (tti > 0.85f || skSp < 6.f) {
+                    float faceSk = cosf(p.yaw) * -skDir.x + sinf(p.yaw) * -skDir.y;   // already looking at the skater?
+                    kind = faceSk > 0.4f ? EV_BACK : EV_STEP;
+                } else if (tti < 0.55f && skSp > 9.f && r01 < 0.55f) kind = EV_DIVE;
+                else kind = EV_HOP;
+                float dist = kind == EV_DIVE ? clear + 1.1f : kind == EV_HOP ? clear + 0.35f : clear;
+                Vector2 dir = Vector2Scale(perp, side);
+                if (kind == EV_BACK) dir = Vector2Normalize(Vector2Add(Vector2Scale(perp, side), Vector2Scale(skDir, 0.45f)));
+                Vector2 off = Vector2Add(p.dodge, Vector2Scale(dir, dist));
+                if (blocked(off)) {   // a wall or the water that way: go the other way instead
+                    side = -side;
+                    dist += 2.f * fabsf(lat);
+                    dir = kind == EV_BACK ? Vector2Normalize(Vector2Add(Vector2Scale(perp, side), Vector2Scale(skDir, 0.45f))) : Vector2Scale(perp, side);
+                    off = Vector2Add(p.dodge, Vector2Scale(dir, dist));
+                    if (kind == EV_DIVE && blocked(off)) kind = EV_HOP;   // nowhere to land a dive
+                }
+                startEvade(p, kind, dir, Vector2Length(Vector2Subtract(off, p.dodge)));
+            }
+        }
+        bool evading = p.evade != EV_NONE;
+        p.evY = 0;
+        if (evading) {
+            p.evT += dt;
+            float k = clampf(p.evT / p.evMove, 0, 1);
+            float e = p.evade == EV_STEP || p.evade == EV_BACK ? k * k * (3 - 2 * k)       // ease in and out
+                                                               : k * (1.5f - 0.5f * k);    // launch quick, ease into the landing
+            p.dodge = Vector2Lerp(p.evFrom, p.evTo, e);
+            if (p.evade == EV_HOP) p.evY = 4.f * 0.38f * k * (1 - k);
+            if (p.evade == EV_DIVE) {
+                p.evY = 4.f * 0.45f * k * (1 - k);
+                float up = p.evDur - 0.95f;   // when they start getting up
+                p.evTilt = p.evT < p.evMove ? smooth01(0.f, 1.f, k) : 1.f - smooth01(up, p.evDur - 0.1f, p.evT);
+            } else p.evTilt = 0;
+            if (p.evT >= p.evDur) { p.evade = EV_NONE; p.evTilt = 0; }
+        } else if (Vector2Length(p.dodge) > 0.01f) {
+            // back to their route at a walk once the skater has gone by (they turn and walk it, see the facing below)
+            bool clear = dP2 > 6 * 6 || skSp < 1.f;
+            if (clear) {
+                float L = Vector2Length(p.dodge), step = std::min(L, 1.0f * dt);
+                p.dodge = Vector2Subtract(p.dodge, Vector2Scale(p.dodge, step / L));
+            }
+        }
+
+        Vector2 base, routeDir = {0, 0};
+        bool hold = evading;   // mid-dodge they stop following their route
         if (p.mode == 0) {
-            if (p.wait > 0) { p.wait -= dt; walk = 0; }   // waiting at the corner to cross
-            else p.t += p.speed * dt / p.len;
+            if (p.wait > 0) p.wait -= dt;   // waiting at the corner to cross
+            else if (!hold) p.t += p.speed * dt / p.len;
             if (p.t >= 1) { p.t = 1; nextPedMove(p, r); if (r.chance(0.22f)) p.wait = r.range(1.5f, 5.f); }
             base = Vector2Lerp(p.from, p.to, clampf(p.t, 0, 1));
-            Vector2 d = Vector2Subtract(p.to, p.from);
-            if (Vector2Length(d) > 0.1f) p.yaw = lerpAngle(p.yaw, atan2f(d.y, d.x), 1 - expf(-dt * 6));
+            if (Vector2Length(Vector2Subtract(p.to, p.from)) > 0.1f) routeDir = Vector2Normalize(Vector2Subtract(p.to, p.from));
         } else if (p.mode == 1) {
             const Path& P = w.pedPaths[p.path];
-            p.s += p.pdir * p.speed * dt;
+            if (!hold) p.s += p.pdir * p.speed * dt;
             if (p.s > P.len) { p.s = P.len; p.pdir = -1; }
             if (p.s < 0) { p.s = 0; p.pdir = 1; }
             Vector2 dir;
             base = P.at(p.s, &dir);
             dir = Vector2Scale(dir, (float)p.pdir);
             base = Vector2Add(base, Vector2Scale({-dir.y, dir.x}, p.lane));
-            p.yaw = lerpAngle(p.yaw, atan2f(dir.y, dir.x), 1 - expf(-dt * 6));
+            routeDir = dir;
         } else {
             base = p.from;
-            walk = 0;
             p.idleTurn -= dt;
-            if (p.idleTurn < 0) { p.idleTurn = r.range(2, 7); p.yaw += r.range(-1.2f, 1.2f); }
+            if (p.idleTurn < 0 && p.gait < 0.2f && !evading) { p.idleTurn = r.range(2, 7); p.yaw += r.range(-1.2f, 1.2f); }
         }
-        if (walk > 0) p.phase += dt * p.speed * 5.2f;
         float x = base.x + p.dodge.x, z = base.y + p.dodge.y;
-        float g = w.terrain(x, z);
-        p.pos = {x, w.ground(x, z, g), z};
+        // climb steps one at a time from where they stood last frame, like the skater does,
+        // instead of reading the ground from street level and walking through a stoop
+        float yRef = std::max(w.terrain(x, z), prevGround);
+        float y = w.ground(x, z, yRef);
+        if (dP2 < 250 * 250) {
+            // keep the body out of walls (a sidestep or a route clipping a corner would sink them into it);
+            // the push also comes off the sidestep, so it can't keep shoving them back in
+            Vector3 c = {x, y, z};
+            if (w.collide(c, 0.32f, y, 1.7f, nullptr)) {
+                // remember only the sideways part of the push, so they walk round a pole or a news box; a push back
+                // along the route would leave them stuck behind it while the route ran on without them
+                Vector2 push = {c.x - x, c.z - z}, keep = push;
+                if (routeDir.x != 0 || routeDir.y != 0) {
+                    float back = Vector2DotProduct(push, routeDir);
+                    keep = Vector2Subtract(push, Vector2Scale(routeDir, back));
+                    if (back < 0 && Vector2Length(keep) < -back * 0.5f) {   // walked square into it: pick a side to go round
+                        Vector2 side = {-routeDir.y, routeDir.x};
+                        float sg = Vector2DotProduct(keep, side) < 0 ? -1.f : 1.f;
+                        keep = Vector2Add(keep, Vector2Scale(side, sg * -back * 0.5f));
+                    }
+                }
+                p.dodge = Vector2Add(p.dodge, keep);
+                float L = Vector2Length(p.dodge);
+                if (L > 4.f) p.dodge = Vector2Scale(p.dodge, 4.f / L);
+                if (evading) { p.evTo = Vector2Add(p.evTo, keep); p.evFrom = Vector2Add(p.evFrom, keep); }
+                x = c.x; z = c.z;
+                y = w.ground(x, z, std::max(w.terrain(x, z), yRef));
+            }
+        }
+        // never faster than a person moves: a correction (rounding an obstacle the route runs through, say)
+        // plays out as a quick step instead of a pop. A huge gap is a fresh placement (start of the game), taken as is.
+        {
+            float mx = x - prev.x, mz = z - prev.z, d = sqrtf(mx * mx + mz * mz);
+            float vmax = (evading ? 9.f : 4.f) * dt;
+            if (d > vmax && d < 30.f) {
+                x = prev.x + mx * vmax / d; z = prev.z + mz * vmax / d;
+                y = w.ground(x, z, std::max(w.terrain(x, z), yRef));
+                Vector3 c = {x, y, z};   // a step this short from a clear spot only ever needs a nudge to stay clear
+                if (dP2 < 250 * 250 && w.collide(c, 0.32f, y, 1.7f, nullptr)) { x = c.x; z = c.z; y = w.ground(x, z, std::max(w.terrain(x, z), yRef)); }
+            }
+        }
+        p.pos = {x, y + p.evY, z};
+
+        // legs and facing follow how they actually move: walking the route, stepping aside, walking back
+        Vector2 v = {(p.pos.x - prev.x) / std::max(dt, 1e-4f), (p.pos.z - prev.z) / std::max(dt, 1e-4f)};
+        float vs = Vector2Length(v);
+        if (vs > 8.f) vs = 0, v = {0, 0};   // a jump to a new route corner, not a step
+        p.gait = lerpf(p.gait, vs, 1 - expf(-dt * 10));
+        if (p.evade == EV_BACK) {
+            // backing off: keep facing the skater, the legs stepping backwards
+            p.yaw = lerpAngle(p.yaw, atan2f(pp.z - p.pos.z, pp.x - p.pos.x), 1 - expf(-dt * 8));
+            p.phase -= dt * vs * 5.2f;
+        } else {
+            if (vs > 0.3f && p.evTilt < 0.5f && !(p.evade == EV_DIVE && p.evT > p.evMove))
+                p.yaw = lerpAngle(p.yaw, atan2f(v.y, v.x), 1 - expf(-dt * (evading ? 12.f : 6.f)));
+            p.phase += dt * vs * 5.2f;
+        }
     }
     // Caltrain: accelerate, brake for the next station, dwell, reverse at the ends
     float lineEnd = w.railLen() - 25, lineStart = w.stations.empty() ? 0 : w.stations[0].s;
@@ -568,7 +767,7 @@ void Traffic::interact(Player& pl) {
         pl.speed *= 0.5f;
     }
     for (auto& p : peds) {
-        if (p.knock > 0) continue;
+        if (p.knock > 0 || p.evade == EV_DIVE || p.evY > 0.25f) continue;   // mid-leap or sprawled: already out of the way
         float dx = pl.pos.x - p.pos.x, dz = pl.pos.z - p.pos.z;
         if (dx * dx + dz * dz > 0.55f * 0.55f || fabsf(pl.pos.y - p.pos.y) > 1.4f) continue;
         if (pl.hspeed() < 2.0f) continue;
@@ -579,17 +778,20 @@ void Traffic::interact(Player& pl) {
     }
 }
 
+// The people, pets and riders below draw through inst:: (instance.h): every box, sphere and cylinder is queued as an
+// instance and the whole pass is drawn at once by inst::flush (in main), instead of vertex by vertex.
+
 // The riders of a pedal bus: ten on stools facing the bar, pedalling, and a driver steering up front.
 static void drawPedalRiders(const Car& c, int seed) {
     static const Color SKIN[] = {{240, 205, 175, 255}, {214, 170, 134, 255}, {170, 120, 85, 255}, {120, 80, 55, 255}};
     static const Color SHIRT[] = {{200, 50, 50, 255}, {40, 90, 170, 255}, {240, 240, 235, 255}, {240, 200, 60, 255}, {60, 140, 90, 255},
                                   {150, 80, 160, 255}, {230, 120, 40, 255}, {30, 30, 35, 255}};
     Color pants = {50, 56, 80, 255}, shoe = {35, 35, 38, 255};
-    rlPushMatrix();
-    rlTranslatef(c.pos.x, c.pos.y, c.pos.z);
-    rlRotatef(-c.yaw * RAD2DEG, 0, 1, 0);
-    rlRotatef(c.pitch * RAD2DEG, 0, 0, 1);
-    auto limb = [](Vector3 a, Vector3 b, float r, Color k) { DrawCylinderEx(a, b, r, r * 0.85f, 5, k); };
+    inst::push();
+    inst::translate(c.pos.x, c.pos.y, c.pos.z);
+    inst::rotate(-c.yaw * RAD2DEG, 0, 1, 0);
+    inst::rotate(c.pitch * RAD2DEG, 0, 0, 1);
+    auto limb = [](Vector3 a, Vector3 b, float r, Color k) { inst::cylinder(a, b, r, r * 0.85f, 5, k); };
     for (int k = 0; k < 10; k++) {
         uint32_t h = hashu(seed, k, 5);
         if ((h & 7) == 0) continue;                       // the odd empty stool
@@ -599,7 +801,7 @@ static void drawPedalRiders(const Car& c, int seed) {
         Vector3 hip = {sx, 1.1f + bob, sd * 0.98f};
         Vector3 sh = {sx, 1.62f + bob, sd * 0.88f};      // leaning in toward the bar
         limb(hip, sh, 0.17f, shirt);
-        DrawSphereEx({sx, 1.84f + bob, sd * 0.84f}, 0.12f, 5, 6, skin);
+        inst::sphere({sx, 1.84f + bob, sd * 0.84f}, 0.12f, 5, 6, skin);
         for (int a = -1; a <= 1; a += 2) {                // forearms on the bar
             Vector3 s = {sx + a * 0.18f, 1.55f + bob, sd * 0.86f}, hand = {sx + a * 0.16f, 1.3f, sd * 0.45f};
             limb(s, hand, 0.045f, shirt);
@@ -613,19 +815,19 @@ static void drawPedalRiders(const Car& c, int seed) {
             Vector3 knee = {(hp.x + foot.x) * 0.5f, (hp.y + foot.y) * 0.5f + 0.22f, (hp.z + foot.z) * 0.5f - sd * 0.12f};
             limb(hp, knee, 0.075f, pants);
             limb(knee, foot, 0.06f, pants);
-            DrawCube(foot, 0.12f, 0.07f, 0.2f, shoe);
+            inst::cube(foot, 0.12f, 0.07f, 0.2f, shoe);
         }
     }
     // the driver, steering
     Color ds = {40, 40, 44, 255};
     limb({2.55f, 1.1f, 0}, {2.62f, 1.7f, 0}, 0.17f, ds);
-    DrawSphereEx({2.66f, 1.92f, 0}, 0.12f, 5, 6, SKIN[seed % 4]);
-    DrawCube({2.66f, 2.03f, 0}, 0.26f, 0.07f, 0.26f, {200, 40, 40, 255});
+    inst::sphere({2.66f, 1.92f, 0}, 0.12f, 5, 6, SKIN[seed % 4]);
+    inst::cube({2.66f, 2.03f, 0}, 0.26f, 0.07f, 0.26f, {200, 40, 40, 255});
     for (int a = -1; a <= 1; a += 2) {
         limb({2.62f, 1.62f, a * 0.2f}, {2.95f, 1.32f, a * 0.3f}, 0.045f, ds);
         limb({2.55f, 1.1f, a * 0.12f}, {2.95f, 0.75f, a * 0.15f}, 0.07f, pants);
     }
-    rlPopMatrix();
+    inst::pop();
 }
 
 // A dog on a leash, trotting a little ahead of its walker (sitting beside them when they stand still).
@@ -634,30 +836,30 @@ static void drawDog(const Ped& p, float now) {
     bool sit = p.mode == 2 || p.knock > 0;
     auto W = [&](float x, float y, float z) { return Vector3{p.pos.x + x * cy - z * sy, p.pos.y + y, p.pos.z + x * sy + z * cy}; };
     Vector3 at = sit ? W(0.15f, 0, 0.65f) : W(0.95f, 0, 0.5f);
-    rlPushMatrix();
-    rlTranslatef(at.x, at.y, at.z);
-    rlRotatef(-p.yaw * RAD2DEG, 0, 1, 0);
+    inst::push();
+    inst::translate(at.x, at.y, at.z);
+    inst::rotate(-p.yaw * RAD2DEG, 0, 1, 0);
     float sw = sit ? 0.f : sinf(p.phase * 1.6f) * 0.55f;
     for (int i = 0; i < 4; i++) {   // legs: diagonal pairs swing together
         float lx = (i & 1) ? 0.24f * s : -0.24f * s, lz = (i & 2) ? 0.09f * s : -0.09f * s;
         float a = ((i == 0 || i == 3) ? sw : -sw) * RAD2DEG;
-        rlPushMatrix();
-        rlTranslatef(lx, 0.3f * s, lz);
-        rlRotatef(sit && lx < 0 ? 70.f : a, 0, 0, 1);
-        DrawCube({0, -0.15f * s, 0}, 0.08f * s, 0.3f * s, 0.08f * s, p.petC);
-        rlPopMatrix();
+        inst::push();
+        inst::translate(lx, 0.3f * s, lz);
+        inst::rotate(sit && lx < 0 ? 70.f : a, 0, 0, 1);
+        inst::cube({0, -0.15f * s, 0}, 0.08f * s, 0.3f * s, 0.08f * s, p.petC);
+        inst::pop();
     }
-    rlPushMatrix();
-    if (sit) { rlTranslatef(-0.2f * s, 0, 0); rlRotatef(28, 0, 0, 1); rlTranslatef(0.2f * s, -0.06f * s, 0); }
-    DrawCube({0, 0.42f * s, 0}, 0.66f * s, 0.26f * s, 0.25f * s, p.petC);                 // body
-    DrawCube({0.4f * s, 0.6f * s, 0}, 0.24f * s, 0.22f * s, 0.2f * s, p.petC);            // head
-    DrawCube({0.56f * s, 0.55f * s, 0}, 0.14f * s, 0.1f * s, 0.12f * s, p.petC2);         // muzzle
-    DrawCube({0.63f * s, 0.58f * s, 0}, 0.03f * s, 0.05f * s, 0.06f * s, {20, 20, 20, 255});
-    for (int e = -1; e <= 1; e += 2) DrawCube({0.36f * s, 0.73f * s, e * 0.08f * s}, 0.06f * s, 0.12f * s, 0.06f * s, p.petC2);
+    inst::push();
+    if (sit) { inst::translate(-0.2f * s, 0, 0); inst::rotate(28, 0, 0, 1); inst::translate(0.2f * s, -0.06f * s, 0); }
+    inst::cube({0, 0.42f * s, 0}, 0.66f * s, 0.26f * s, 0.25f * s, p.petC);                 // body
+    inst::cube({0.4f * s, 0.6f * s, 0}, 0.24f * s, 0.22f * s, 0.2f * s, p.petC);            // head
+    inst::cube({0.56f * s, 0.55f * s, 0}, 0.14f * s, 0.1f * s, 0.12f * s, p.petC2);         // muzzle
+    inst::cube({0.63f * s, 0.58f * s, 0}, 0.03f * s, 0.05f * s, 0.06f * s, {20, 20, 20, 255});
+    for (int e = -1; e <= 1; e += 2) inst::cube({0.36f * s, 0.73f * s, e * 0.08f * s}, 0.06f * s, 0.12f * s, 0.06f * s, p.petC2);
     float wag = sinf(now * 13.f + p.phase) * 0.12f * s;
-    DrawCylinderEx({-0.32f * s, 0.5f * s, 0}, {-0.48f * s, 0.72f * s, wag}, 0.035f * s, 0.02f * s, 4, p.petC);   // tail
-    rlPopMatrix();
-    rlPopMatrix();
+    inst::cylinder({-0.32f * s, 0.5f * s, 0}, {-0.48f * s, 0.72f * s, wag}, 0.035f * s, 0.02f * s, 4, p.petC);   // tail
+    inst::pop();
+    inst::pop();
     // the leash, from the walker's hand to the collar, sagging a little
     float ps = p.scale;
     Vector3 hand = W(0.12f * ps, 0.86f * ps, 0.27f * ps);
@@ -669,78 +871,100 @@ static void drawDog(const Ped& p, float now) {
 }
 
 static void drawCat(const Cat& c) {
-    rlPushMatrix();
-    rlTranslatef(c.pos.x, c.pos.y, c.pos.z);
-    rlRotatef(-c.yaw * RAD2DEG, 0, 1, 0);
+    inst::push();
+    inst::translate(c.pos.x, c.pos.y, c.pos.z);
+    inst::rotate(-c.yaw * RAD2DEG, 0, 1, 0);
     Color pink = {220, 150, 150, 255};
     float swish = sinf(c.t * 2.3f) * 0.08f;
     if (c.pose == 2) {   // running flat out, tail up
         float sw = sinf(c.t * 22.f) * 0.7f;
         for (int i = 0; i < 4; i++) {
             float lx = (i & 1) ? 0.14f : -0.14f, lz = (i & 2) ? 0.05f : -0.05f;
-            rlPushMatrix();
-            rlTranslatef(lx, 0.17f, lz);
-            rlRotatef((lx > 0 ? sw : -sw) * RAD2DEG, 0, 0, 1);
-            DrawCube({0, -0.08f, 0}, 0.05f, 0.17f, 0.05f, c.c);
-            rlPopMatrix();
+            inst::push();
+            inst::translate(lx, 0.17f, lz);
+            inst::rotate((lx > 0 ? sw : -sw) * RAD2DEG, 0, 0, 1);
+            inst::cube({0, -0.08f, 0}, 0.05f, 0.17f, 0.05f, c.c);
+            inst::pop();
         }
-        DrawCube({0, 0.2f, 0}, 0.42f, 0.13f, 0.13f, c.c);
-        DrawCube({0.02f, 0.25f, 0}, 0.2f, 0.04f, 0.12f, c.patch);
-        DrawCube({0.27f, 0.25f, 0}, 0.14f, 0.12f, 0.13f, c.c);
-        DrawCylinderEx({-0.2f, 0.24f, 0}, {-0.34f, 0.44f, swish}, 0.022f, 0.016f, 4, c.c);
-        for (int e = -1; e <= 1; e += 2) DrawCube({0.27f, 0.33f, e * 0.04f}, 0.03f, 0.05f, 0.03f, c.c);
+        inst::cube({0, 0.2f, 0}, 0.42f, 0.13f, 0.13f, c.c);
+        inst::cube({0.02f, 0.25f, 0}, 0.2f, 0.04f, 0.12f, c.patch);
+        inst::cube({0.27f, 0.25f, 0}, 0.14f, 0.12f, 0.13f, c.c);
+        inst::cylinder({-0.2f, 0.24f, 0}, {-0.34f, 0.44f, swish}, 0.022f, 0.016f, 4, c.c);
+        for (int e = -1; e <= 1; e += 2) inst::cube({0.27f, 0.33f, e * 0.04f}, 0.03f, 0.05f, 0.03f, c.c);
     } else if (c.pose == 1) {   // loafing: a compact lump with the paws tucked in
-        DrawCube({0, 0.08f, 0}, 0.34f, 0.15f, 0.2f, c.c);
-        DrawCube({-0.03f, 0.15f, 0}, 0.2f, 0.04f, 0.18f, c.patch);
-        DrawCube({0.18f, 0.16f, 0}, 0.13f, 0.12f, 0.13f, c.c);
-        for (int e = -1; e <= 1; e += 2) DrawCube({0.18f, 0.24f, e * 0.04f}, 0.03f, 0.05f, 0.03f, c.c);
-        DrawCylinderEx({-0.16f, 0.03f, 0.06f}, {0.05f, 0.03f, 0.14f + swish * 0.3f}, 0.02f, 0.016f, 4, c.c);
+        inst::cube({0, 0.08f, 0}, 0.34f, 0.15f, 0.2f, c.c);
+        inst::cube({-0.03f, 0.15f, 0}, 0.2f, 0.04f, 0.18f, c.patch);
+        inst::cube({0.18f, 0.16f, 0}, 0.13f, 0.12f, 0.13f, c.c);
+        for (int e = -1; e <= 1; e += 2) inst::cube({0.18f, 0.24f, e * 0.04f}, 0.03f, 0.05f, 0.03f, c.c);
+        inst::cylinder({-0.16f, 0.03f, 0.06f}, {0.05f, 0.03f, 0.14f + swish * 0.3f}, 0.02f, 0.016f, 4, c.c);
     } else {   // sitting up, now and then dipping its head to groom
         float groom = fmaxf(0.f, sinf(c.t * 0.7f)) > 0.8f ? sinf(c.t * 9.f) * 0.03f - 0.06f : 0.f;
-        rlPushMatrix();
-        rlRotatef(35, 0, 0, 1);
-        DrawCube({0, 0.14f, 0}, 0.3f, 0.15f, 0.16f, c.c);
-        DrawCube({0, 0.2f, 0}, 0.2f, 0.04f, 0.15f, c.patch);
-        rlPopMatrix();
-        DrawCube({0.08f, 0.04f, 0}, 0.05f, 0.08f, 0.12f, c.c);                         // front paws
-        DrawCube({0.1f, 0.33f + groom, 0}, 0.14f, 0.13f, 0.14f, c.c);                  // head
+        inst::push();
+        inst::rotate(35, 0, 0, 1);
+        inst::cube({0, 0.14f, 0}, 0.3f, 0.15f, 0.16f, c.c);
+        inst::cube({0, 0.2f, 0}, 0.2f, 0.04f, 0.15f, c.patch);
+        inst::pop();
+        inst::cube({0.08f, 0.04f, 0}, 0.05f, 0.08f, 0.12f, c.c);                         // front paws
+        inst::cube({0.1f, 0.33f + groom, 0}, 0.14f, 0.13f, 0.14f, c.c);                  // head
         for (int e = -1; e <= 1; e += 2) {
-            DrawCube({0.1f, 0.42f + groom, e * 0.045f}, 0.03f, 0.06f, 0.03f, c.c);     // ears
-            DrawCube({0.11f, 0.42f + groom, e * 0.045f}, 0.01f, 0.03f, 0.015f, pink);
+            inst::cube({0.1f, 0.42f + groom, e * 0.045f}, 0.03f, 0.06f, 0.03f, c.c);     // ears
+            inst::cube({0.11f, 0.42f + groom, e * 0.045f}, 0.01f, 0.03f, 0.015f, pink);
         }
-        DrawCylinderEx({-0.12f, 0.02f, 0}, {-0.22f, 0.02f, 0.14f + swish}, 0.022f, 0.016f, 4, c.c);   // tail round the feet
+        inst::cylinder({-0.12f, 0.02f, 0}, {-0.22f, 0.02f, 0.14f + swish}, 0.022f, 0.016f, 4, c.c);   // tail round the feet
     }
-    rlPopMatrix();
+    inst::pop();
 }
 
 // A pedestrian in three levels of detail. Up close: jointed arms and legs, a round head with a hair style, shoulders,
 // whatever they carry, and when standing a little idle routine (waiting, chatting, on a call, arms folded).
 // Further out the same figure in plain boxes, and far away just a handful of them.
 static void drawPerson(const Ped& p, float dist2, float now) {
-    rlPushMatrix();
-    rlTranslatef(p.pos.x, p.pos.y, p.pos.z);
-    rlRotatef(-p.yaw * RAD2DEG, 0, 1, 0);
+    inst::push();
+    inst::translate(p.pos.x, p.pos.y, p.pos.z);
+    inst::rotate(-p.yaw * RAD2DEG, 0, 1, 0);
     if (p.knock > 0) {
-        rlTranslatef(0, 0.15f, 0);
-        rlRotatef(-85.f * clampf((4.0f - p.knock) / 0.3f, 0, 1), 0, 0, 1);
+        inst::translate(0, 0.15f, 0);
+        inst::rotate(-85.f * clampf((4.0f - p.knock) / 0.3f, 0, 1), 0, 0, 1);
+    } else if (p.evTilt > 0) {   // diving out of the way: pitching forward to land flat, then pushing back up
+        inst::translate(0, 0.15f * p.evTilt, 0);
+        inst::rotate(-88.f * p.evTilt, 0, 0, 1);
     }
     float s = p.scale;
-    rlScalef(s, s, s);
+    bool seated = p.mode == 3 && p.knock <= 0;
+    if (seated) {
+        if (p.grass) {   // a picnic blanket on the lawn
+            static const Color BLANKET[] = {{196, 58, 52, 255}, {52, 96, 168, 255}, {226, 186, 64, 255}, {70, 140, 96, 255}, {236, 232, 220, 255}};
+            Color bc = BLANKET[(int)(p.phase * 10.f) % 5];
+            inst::cube({0.3f, 0.015f, 0}, 1.7f, 0.03f, 1.25f, bc);
+            if (dist2 < 35 * 35) inst::cube({0.3f, 0.032f, 0}, 1.7f, 0.004f, 0.18f, scaleC(bc, 0.75f));   // a stripe across it
+        }
+        inst::translate(0, (p.grass ? 0.12f : 0.06f) - 0.92f * s, 0);   // drop the hips (0.92 m up when standing) onto the seat
+    }
+    inst::scale(s, s, s);
     Color shoe = {40, 40, 40, 255};
-    bool standing = p.mode == 2 || p.wait > 0 || p.knock > 0;
+    bool standing = p.knock > 0 || p.gait < 0.35f;   // walking whenever they're actually on the move
+    float stride = clampf(p.gait / 1.3f, 0.7f, 1.6f);  // a brisk step out of the way takes longer strides
+    bool hop = p.evade == EV_HOP, dive = p.evade == EV_DIVE, inAir = (hop || dive) && p.evT < p.evMove;
+    bool laptop = p.carry == CARRY_LAPTOP && p.knock <= 0;
     float sh = 0.19f * p.build;   // shoulder half-width
     if (dist2 > 110 * 110) {      // far away: legs, body, head
         float sw = standing ? 0.f : sinf(p.phase) * 0.5f;
         for (int side = -1; side <= 1; side += 2) {
-            rlPushMatrix();
-            rlTranslatef(0, 0.9f, side * 0.1f);
-            rlRotatef(sw * side * RAD2DEG, 0, 0, 1);
-            DrawCube({0, -0.45f, 0}, 0.15f, 0.9f, 0.15f, p.pants);
-            rlPopMatrix();
+            if (seated) {   // thighs forward along the seat, shins down (bench) or out along the lawn
+                inst::cube({0.22f, 0.92f, side * 0.1f}, 0.45f, 0.15f, 0.15f, p.pants);
+                if (p.grass) inst::cube({0.66f, 0.9f, side * 0.1f}, 0.45f, 0.13f, 0.13f, p.pants);
+                else inst::cube({0.44f, 0.7f, side * 0.1f}, 0.15f, 0.45f, 0.15f, p.pants);
+                continue;
+            }
+            inst::push();
+            inst::translate(0, 0.9f, side * 0.1f);
+            inst::rotate(sw * side * RAD2DEG, 0, 0, 1);
+            inst::cube({0, -0.45f, 0}, 0.15f, 0.9f, 0.15f, p.pants);
+            inst::pop();
         }
-        DrawCube({0, 1.2f, 0}, 0.24f, 0.56f, sh * 2 + 0.06f, p.shirt);
-        DrawCube({0, 1.66f, 0}, 0.2f, 0.26f, 0.19f, p.hairStyle == HAIR_BALD ? p.skin : p.hair);
-        rlPopMatrix();
+        inst::cube({0, 1.2f, 0}, 0.24f, 0.56f, sh * 2 + 0.06f, p.shirt);
+        inst::cube({0, 1.66f, 0}, 0.2f, 0.26f, 0.19f, p.hairStyle == HAIR_BALD ? p.skin : p.hair);
+        inst::pop();
         return;
     }
     bool close = dist2 < 35 * 35;
@@ -751,12 +975,15 @@ static void drawPerson(const Ped& p, float dist2, float now) {
     if (!standing) {
         for (int k = 0; k < 2; k++) {
             float sd = k ? 1.f : -1.f;
-            swing[k] = -sinf(p.phase) * 0.42f * sd;
+            swing[k] = -sinf(p.phase) * 0.42f * sd * stride;
             elbow[k] = 0.25f + 0.2f * std::max(0.f, swing[k]);
         }
         bob = fabsf(sinf(p.phase)) * 0.035f;
         if (p.carry == CARRY_PHONE) { swing[1] = 0.45f; elbow[1] = 1.45f; out[1] = 0.12f; headPitch = 0.35f; phoneHand = true; }
         if (p.carry == CARRY_SHOPPING) { swing[1] *= 0.35f; elbow[1] = 0.1f; }
+        if (laptop) {   // walking along with the laptop open in both hands, eyes on the screen
+            swing[0] = swing[1] = 0.35f; elbow[0] = elbow[1] = 1.0f; out[0] = out[1] = -0.15f; headPitch = 0.4f;
+        }
     } else {
         for (int k = 0; k < 2; k++) { swing[k] = 0.04f; elbow[k] = 0.12f; }
         int idle = p.knock > 0 ? -1 : (p.carry == CARRY_PHONE && p.idle == IDLE_WAIT ? IDLE_ARMS : p.idle);
@@ -778,139 +1005,183 @@ static void drawPerson(const Ped& p, float dist2, float now) {
             swing[0] = swing[1] = 0.5f; elbow[0] = elbow[1] = 1.55f; out[0] = out[1] = -0.32f;
             if (p.carry == CARRY_PHONE) { out[0] = out[1] = -0.2f; headPitch = 0.4f; phoneHand = true; }
         }
+        if (laptop) {   // typing away: forearms out over the keyboard, head down, glancing up now and then
+            swing[0] = swing[1] = 0.35f; elbow[0] = elbow[1] = 1.0f; out[0] = out[1] = -0.15f;
+            elbow[0] += 0.05f * sinf(t * 9.f); elbow[1] += 0.05f * sinf(t * 8.f + 1.f);
+            headPitch = 0.4f - 0.35f * smooth01(0.85f, 0.95f, sinf(t * 0.3f));
+            headYaw = 0; phoneHand = phoneEar = false;
+        } else if (seated) {
+            if (p.carry == CARRY_PHONE) { swing[0] = swing[1] = 0.5f; elbow[0] = elbow[1] = 1.55f; out[0] = out[1] = -0.2f; headPitch = 0.4f; phoneHand = true; phoneEar = false; }
+            else { swing[0] = swing[1] = 0.45f; elbow[0] = elbow[1] = 0.5f; out[0] = out[1] = 0.f; headPitch = 0.05f; }   // hands on the knees, watching the world go by
+        }
     }
-    rlTranslatef(0, bob, sway);
+    // hop and dive poses: arms flung up and legs tucked in the air, a crouch on landing; arms out ahead in a dive
+    if (hop) {
+        for (int k = 0; k < 2; k++) {
+            if (inAir) { swing[k] = 0.7f; out[k] = 0.75f; elbow[k] = 0.5f; }
+            else { swing[k] = 0.35f; out[k] = 0.35f; elbow[k] = 0.4f; }
+        }
+        headYaw = 0; headPitch = -0.1f; phoneHand = phoneEar = false;
+    } else if (dive) {
+        float upK = 1.f - p.evTilt;   // 0 flat on the ground, 1 back on their feet
+        for (int k = 0; k < 2; k++) {
+            swing[k] = lerpf(2.9f, 0.4f, upK); out[k] = 0.15f; elbow[k] = lerpf(0.1f, 0.9f, upK);
+        }
+        headYaw = 0; headPitch = -0.3f * p.evTilt; phoneHand = phoneEar = false;
+    }
+    inst::translate(0, bob, sway);
     // legs: thigh and shin, the knee bending as the leg comes through
     for (int k = 0; k < 2; k++) {
         float sd = k ? 1.f : -1.f;
         float lp = p.phase + (k ? 0.f : PI);
-        float th = standing ? (k ? 0.03f : -0.02f) : sinf(lp) * 0.42f;
-        float knee = standing ? 0.04f : 0.12f + std::max(0.f, cosf(lp)) * 0.55f;
-        rlPushMatrix();
-        rlTranslatef(0, 0.92f, sd * 0.1f);
-        rlRotatef(th * RAD2DEG, 0, 0, 1);
-        DrawCube({0, -0.22f, 0}, 0.16f, 0.46f, 0.16f, p.pants);
-        rlTranslatef(0, -0.45f, 0);
-        rlRotatef(-knee * RAD2DEG, 0, 0, 1);
-        DrawCube({0, -0.21f, 0}, 0.13f, 0.43f, 0.13f, p.pants);
-        DrawCube({0.05f, -0.43f, 0}, 0.26f, 0.08f, 0.12f, shoe);
-        rlPopMatrix();
+        float th = standing ? (k ? 0.03f : -0.02f) : sinf(lp) * 0.42f * stride;
+        float knee = standing ? 0.04f : 0.12f + std::max(0.f, cosf(lp)) * 0.55f * stride;
+        if (hop) {
+            if (inAir) { th = k ? 0.65f : -0.3f; knee = k ? 1.1f : 0.8f; }   // knees tucked up mid-hop
+            else { float c = 1.f - smooth01(p.evMove, p.evDur, p.evT); th = 0.55f * c; knee = 1.0f * c; }   // landing crouch
+        } else if (dive) {
+            float upK = 1.f - p.evTilt;
+            th = lerpf(-0.08f, 0.9f, upK * (1 - upK) * 4.f * (p.evT > p.evMove ? 1.f : 0.f));   // a knee comes under as they push up
+            knee = lerpf(0.1f, 1.3f, upK * (1 - upK) * 4.f * (p.evT > p.evMove ? 1.f : 0.f));
+            if (k == 0) th *= 0.5f;
+        }
+        if (seated) { th = PI / 2; knee = p.grass ? 0.25f + 0.1f * k : PI / 2 - 0.15f * k; }
+        inst::push();
+        inst::translate(0, 0.92f, sd * 0.1f);
+        inst::rotate(th * RAD2DEG, 0, 0, 1);
+        inst::cube({0, -0.22f, 0}, 0.16f, 0.46f, 0.16f, p.pants);
+        inst::translate(0, -0.45f, 0);
+        inst::rotate(-knee * RAD2DEG, 0, 0, 1);
+        inst::cube({0, -0.21f, 0}, 0.13f, 0.43f, 0.13f, p.pants);
+        inst::cube({0.05f, -0.43f, 0}, 0.26f, 0.08f, 0.12f, shoe);
+        inst::pop();
     }
     // hips, waist, chest and rounded shoulders
-    DrawCube({0, 0.96f, 0}, 0.21f, 0.16f, 0.3f, p.pants);
-    DrawCube({0, 1.1f, 0}, 0.2f, 0.2f, 0.32f + 0.02f * p.build, p.shirt);
-    DrawCube({0, 1.32f, 0}, 0.24f, 0.28f, sh * 2, p.shirt);
-    if (close) DrawCylinderEx({0, 1.43f, -sh + 0.02f}, {0, 1.43f, sh - 0.02f}, 0.08f, 0.08f, 6, p.shirt);
-    DrawCube({0, 1.5f, 0}, 0.09f, 0.1f, 0.09f, p.skin);   // neck
+    inst::cube({0, 0.96f, 0}, 0.21f, 0.16f, 0.3f, p.pants);
+    inst::cube({0, 1.1f, 0}, 0.2f, 0.2f, 0.32f + 0.02f * p.build, p.shirt);
+    inst::cube({0, 1.32f, 0}, 0.24f, 0.28f, sh * 2, p.shirt);
+    if (close) inst::zcylinder(1.43f, sh - 0.02f, 0.08f, 6, p.shirt);
+    inst::cube({0, 1.5f, 0}, 0.09f, 0.1f, 0.09f, p.skin);   // neck
     // carried things on the body
     if (p.carry == CARRY_BACKPACK) {
-        DrawCube({-0.2f, 1.24f, 0}, 0.15f, 0.4f, 0.3f, p.extra);
-        if (close) DrawCube({-0.28f, 1.18f, 0}, 0.04f, 0.16f, 0.22f, scaleC(p.extra, 0.8f));
+        inst::cube({-0.2f, 1.24f, 0}, 0.15f, 0.4f, 0.3f, p.extra);
+        if (close) inst::cube({-0.28f, 1.18f, 0}, 0.04f, 0.16f, 0.22f, scaleC(p.extra, 0.8f));
     } else if (p.carry == CARRY_SHOULDER) {
-        DrawCube({0.0f, 0.98f, -(sh + 0.05f)}, 0.27f, 0.22f, 0.08f, p.extra);
-        if (close) DrawCube({0.0f, 1.25f, -(sh - 0.04f)}, 0.035f, 0.34f, 0.03f, scaleC(p.extra, 0.7f));   // strap
+        inst::cube({0.0f, 0.98f, -(sh + 0.05f)}, 0.27f, 0.22f, 0.08f, p.extra);
+        if (close) inst::cube({0.0f, 1.25f, -(sh - 0.04f)}, 0.035f, 0.34f, 0.03f, scaleC(p.extra, 0.7f));   // strap
     }
     // arms: upper arm, forearm, hand (and whatever is in it)
     for (int k = 0; k < 2; k++) {
         float sd = k ? 1.f : -1.f;
-        rlPushMatrix();
-        rlTranslatef(0, 1.43f, sd * (sh + 0.03f));
-        rlRotatef(swing[k] * RAD2DEG, 0, 0, 1);
-        rlRotatef(-sd * out[k] * RAD2DEG, 1, 0, 0);
-        DrawCube({0, -0.15f, 0}, 0.1f, 0.3f, 0.1f, p.shirt);
-        rlTranslatef(0, -0.29f, 0);
-        rlRotatef(elbow[k] * RAD2DEG, 0, 0, 1);
-        DrawCube({0, -0.13f, 0}, 0.085f, 0.26f, 0.085f, p.shirt);
-        DrawCube({0, -0.29f, 0}, 0.075f, 0.09f, 0.06f, p.skin);
+        inst::push();
+        inst::translate(0, 1.43f, sd * (sh + 0.03f));
+        inst::rotate(swing[k] * RAD2DEG, 0, 0, 1);
+        inst::rotate(-sd * out[k] * RAD2DEG, 1, 0, 0);
+        inst::cube({0, -0.15f, 0}, 0.1f, 0.3f, 0.1f, p.shirt);
+        inst::translate(0, -0.29f, 0);
+        inst::rotate(elbow[k] * RAD2DEG, 0, 0, 1);
+        inst::cube({0, -0.13f, 0}, 0.085f, 0.26f, 0.085f, p.shirt);
+        inst::cube({0, -0.29f, 0}, 0.075f, 0.09f, 0.06f, p.skin);
         if (k == 1 && (phoneHand || phoneEar)) {
-            DrawCube({0.02f, -0.31f, 0}, 0.025f, 0.14f, 0.07f, {25, 25, 28, 255});
-            if (close) DrawCube({0.035f, -0.31f, 0}, 0.006f, 0.12f, 0.06f, {150, 190, 255, M_EMISSIVE});   // the screen
+            inst::cube({0.02f, -0.31f, 0}, 0.025f, 0.14f, 0.07f, {25, 25, 28, 255});
+            if (close) inst::cube({0.035f, -0.31f, 0}, 0.006f, 0.12f, 0.06f, {150, 190, 255, M_EMISSIVE});   // the screen
         }
         if (k == 1 && p.carry == CARRY_SHOPPING) {
-            rlRotatef(-(swing[k] + elbow[k]) * RAD2DEG, 0, 0, 1);   // the bag hangs straight down
-            DrawCube({0, -0.5f, 0}, 0.3f, 0.32f, 0.12f, p.extra);
-            if (close) DrawCube({0, -0.32f, 0}, 0.02f, 0.06f, 0.1f, scaleC(p.extra, 0.6f));
+            inst::rotate(-(swing[k] + elbow[k]) * RAD2DEG, 0, 0, 1);   // the bag hangs straight down
+            inst::cube({0, -0.5f, 0}, 0.3f, 0.32f, 0.12f, p.extra);
+            if (close) inst::cube({0, -0.32f, 0}, 0.02f, 0.06f, 0.1f, scaleC(p.extra, 0.6f));
         }
-        rlPopMatrix();
+        inst::pop();
+    }
+    if (laptop) {   // the laptop: open on the lap, or held out in front, the screen glowing toward its owner
+        float by = seated ? 1.01f : 1.06f;
+        Color shell = (int)(p.phase * 7.f) % 3 ? Color{176, 178, 184, 255} : Color{46, 48, 54, 255};
+        inst::cube({0.37f, by, 0}, 0.24f, 0.02f, 0.33f, shell);
+        inst::push();
+        inst::translate(0.49f, by + 0.01f, 0);
+        inst::rotate(-14.f, 0, 0, 1);   // the screen tipped back a little
+        inst::cube({0, 0.11f, 0}, 0.014f, 0.22f, 0.33f, shell);
+        if (close) inst::cube({-0.009f, 0.11f, 0}, 0.004f, 0.19f, 0.29f, {170, 200, 245, M_EMISSIVE});
+        inst::pop();
     }
     // head and hair
-    rlPushMatrix();
-    rlTranslatef(0, 1.56f, 0);
-    rlRotatef(headYaw * RAD2DEG, 0, 1, 0);
-    rlRotatef(-headPitch * RAD2DEG, 0, 0, 1);
+    inst::push();
+    inst::translate(0, 1.56f, 0);
+    inst::rotate(headYaw * RAD2DEG, 0, 1, 0);
+    inst::rotate(-headPitch * RAD2DEG, 0, 0, 1);
     Vector3 hc = {0.01f, 0.13f, 0};
     Color hair = p.hairStyle == HAIR_CAP ? p.extra : p.hair;
     if (close) {
-        rlPushMatrix();
-        rlTranslatef(hc.x, hc.y, hc.z);
-        rlScalef(1.f, 1.16f, 0.95f);
-        DrawSphereEx({0, 0, 0}, 0.11f, 5, 8, p.skin);
-        rlPopMatrix();
+        inst::push();
+        inst::translate(hc.x, hc.y, hc.z);
+        inst::scale(1.f, 1.16f, 0.95f);
+        inst::sphere({0, 0, 0}, 0.11f, 5, 8, p.skin);
+        inst::pop();
         Color eye = {30, 26, 24, 255};
-        for (int e = -1; e <= 1; e += 2) DrawCube({hc.x + 0.1f, hc.y + 0.015f, e * 0.038f}, 0.012f, 0.018f, 0.022f, eye);
-        DrawCube({hc.x + 0.112f, hc.y - 0.015f, 0}, 0.02f, 0.035f, 0.025f, scaleC(p.skin, 0.92f));   // nose
+        for (int e = -1; e <= 1; e += 2) inst::cube({hc.x + 0.1f, hc.y + 0.015f, e * 0.038f}, 0.012f, 0.018f, 0.022f, eye);
+        inst::cube({hc.x + 0.112f, hc.y - 0.015f, 0}, 0.02f, 0.035f, 0.025f, scaleC(p.skin, 0.92f));   // nose
         if (p.hairStyle != HAIR_BALD) {   // a cap of hair over the crown and the back of the head
-            rlPushMatrix();
+            inst::push();
             float big = p.hairStyle == HAIR_CURLY ? 1.22f : 1.f;
-            rlTranslatef(hc.x - 0.014f, hc.y + 0.045f, 0);
-            rlScalef(1.03f * big, (p.hairStyle == HAIR_CAP ? 0.55f : 0.66f) * big, 1.03f * big);
-            DrawSphereEx({0, 0, 0}, 0.118f, 4, 8, hair);
-            rlPopMatrix();
+            inst::translate(hc.x - 0.014f, hc.y + 0.045f, 0);
+            inst::scale(1.03f * big, (p.hairStyle == HAIR_CAP ? 0.55f : 0.66f) * big, 1.03f * big);
+            inst::sphere({0, 0, 0}, 0.118f, 4, 8, hair);
+            inst::pop();
         }
     } else {
-        DrawCube({hc.x, hc.y, 0}, 0.2f, 0.25f, 0.19f, p.skin);
-        if (p.hairStyle != HAIR_BALD) DrawCube({hc.x - 0.015f, hc.y + 0.11f, 0}, 0.23f, 0.06f, 0.22f, hair);
+        inst::cube({hc.x, hc.y, 0}, 0.2f, 0.25f, 0.19f, p.skin);
+        if (p.hairStyle != HAIR_BALD) inst::cube({hc.x - 0.015f, hc.y + 0.11f, 0}, 0.23f, 0.06f, 0.22f, hair);
     }
     switch (p.hairStyle) {
-    case HAIR_SHORT: if (!close) DrawCube({hc.x - 0.1f, hc.y + 0.03f, 0}, 0.04f, 0.15f, 0.2f, hair); break;
+    case HAIR_SHORT: if (!close) inst::cube({hc.x - 0.1f, hc.y + 0.03f, 0}, 0.04f, 0.15f, 0.2f, hair); break;
     case HAIR_LONG:
-        DrawCube({hc.x - 0.09f, hc.y - 0.09f, 0}, 0.07f, 0.32f, 0.21f, hair);
-        if (close) for (int e = -1; e <= 1; e += 2) DrawCube({hc.x - 0.02f, hc.y - 0.06f, e * 0.1f}, 0.12f, 0.24f, 0.03f, hair);
+        inst::cube({hc.x - 0.09f, hc.y - 0.09f, 0}, 0.07f, 0.32f, 0.21f, hair);
+        if (close) for (int e = -1; e <= 1; e += 2) inst::cube({hc.x - 0.02f, hc.y - 0.06f, e * 0.1f}, 0.12f, 0.24f, 0.03f, hair);
         break;
     case HAIR_BUN:
-        if (close) DrawSphereEx({hc.x - 0.1f, hc.y + 0.08f, 0}, 0.055f, 4, 6, hair);
-        else DrawCube({hc.x - 0.11f, hc.y + 0.07f, 0}, 0.08f, 0.08f, 0.08f, hair);
+        if (close) inst::sphere({hc.x - 0.1f, hc.y + 0.08f, 0}, 0.055f, 4, 6, hair);
+        else inst::cube({hc.x - 0.11f, hc.y + 0.07f, 0}, 0.08f, 0.08f, 0.08f, hair);
         break;
-    case HAIR_CAP: DrawCube({hc.x + 0.12f, hc.y + 0.065f, 0}, 0.12f, 0.018f, 0.17f, scaleC(p.extra, 0.8f)); break;   // the brim
-    case HAIR_CURLY: if (!close) DrawCube({hc.x - 0.02f, hc.y + 0.06f, 0}, 0.26f, 0.16f, 0.26f, hair); break;
+    case HAIR_CAP: inst::cube({hc.x + 0.12f, hc.y + 0.065f, 0}, 0.12f, 0.018f, 0.17f, scaleC(p.extra, 0.8f)); break;   // the brim
+    case HAIR_CURLY: if (!close) inst::cube({hc.x - 0.02f, hc.y + 0.06f, 0}, 0.26f, 0.16f, 0.26f, hair); break;
     }
-    rlPopMatrix();
-    rlPopMatrix();
+    inst::pop();
+    inst::pop();
 }
 
 // Cable car riders, drawn in the person's own frame (x = the way they face, origin at the feet or the seat).
 enum { R_HANG, R_BENCH, R_INSIDE, R_GRIP };
 static void drawRider(const Ped& p, int pose, int side, float t) {
     float sc = pose == R_INSIDE ? std::min(p.scale, 1.0f) : p.scale;
-    rlScalef(sc, sc, sc);
+    inst::scale(sc, sc, sc);
     Color shoe = {40, 40, 40, 255};
     if (pose == R_HANG || pose == R_GRIP) {
-        if (pose == R_HANG) rlRotatef(side * (9 + 3 * sinf(t * 1.7f + p.phase)), 1, 0, 0); // lean out over the street
+        if (pose == R_HANG) inst::rotate(side * (9 + 3 * sinf(t * 1.7f + p.phase)), 1, 0, 0); // lean out over the street
         for (int k = -1; k <= 1; k += 2) {
-            DrawCube({0, 0.46f, k * 0.1f}, 0.15f, 0.88f, 0.15f, p.pants);
-            DrawCube({0.05f, 0.04f, k * 0.1f}, 0.24f, 0.07f, 0.13f, shoe);
+            inst::cube({0, 0.46f, k * 0.1f}, 0.15f, 0.88f, 0.15f, p.pants);
+            inst::cube({0.05f, 0.04f, k * 0.1f}, 0.24f, 0.07f, 0.13f, shoe);
         }
     } else if (pose == R_BENCH) {
         for (int k = -1; k <= 1; k += 2) {
-            DrawCube({0.22f, 0.02f, k * 0.1f}, 0.45f, 0.15f, 0.15f, p.pants);   // thighs
-            DrawCube({0.44f, -0.23f, k * 0.1f}, 0.15f, 0.46f, 0.15f, p.pants);  // shins
-            DrawCube({0.49f, -0.47f, k * 0.1f}, 0.24f, 0.07f, 0.13f, shoe);
+            inst::cube({0.22f, 0.02f, k * 0.1f}, 0.45f, 0.15f, 0.15f, p.pants);   // thighs
+            inst::cube({0.44f, -0.23f, k * 0.1f}, 0.15f, 0.46f, 0.15f, p.pants);  // shins
+            inst::cube({0.49f, -0.47f, k * 0.1f}, 0.24f, 0.07f, 0.13f, shoe);
         }
-        rlTranslatef(0, -0.89f, 0);   // same body as standing, from the hips up
-    } else rlTranslatef(0, -0.89f, 0);
-    DrawCube({0, 1.18f, 0}, 0.24f, 0.58f, 0.4f, p.shirt);
-    DrawCube({0, 1.6f, 0}, 0.2f, 0.24f, 0.2f, p.skin);
-    DrawCube({-0.02f, 1.74f, 0}, 0.23f, 0.06f, 0.22f, p.hair);
+        inst::translate(0, -0.89f, 0);   // same body as standing, from the hips up
+    } else inst::translate(0, -0.89f, 0);
+    inst::cube({0, 1.18f, 0}, 0.24f, 0.58f, 0.4f, p.shirt);
+    inst::cube({0, 1.6f, 0}, 0.2f, 0.24f, 0.2f, p.skin);
+    inst::cube({-0.02f, 1.74f, 0}, 0.23f, 0.06f, 0.22f, p.hair);
     for (int k = -1; k <= 1; k += 2) {
-        rlPushMatrix();
-        rlTranslatef(0, 1.43f, k * 0.25f);
-        if (pose == R_HANG && k == -side) rlRotatef(side * 150.f, 1, 0, 0);            // inner hand up on the pole
-        else if (pose == R_HANG) rlRotatef(-side * (15 + 10 * sinf(t * 0.9f + p.phase)), 1, 0, 0);
-        else if (pose == R_GRIP) rlRotatef(35.f, 0, 0, 1);                               // both hands on the grip lever
-        else if (pose == R_BENCH) rlRotatef(25.f, 0, 0, 1);                              // hands in the lap
-        DrawCube({0, -0.28f, 0}, 0.11f, 0.58f, 0.11f, p.shirt);
-        DrawCube({0, -0.6f, 0}, 0.1f, 0.1f, 0.1f, p.skin);
-        rlPopMatrix();
+        inst::push();
+        inst::translate(0, 1.43f, k * 0.25f);
+        if (pose == R_HANG && k == -side) inst::rotate(side * 150.f, 1, 0, 0);            // inner hand up on the pole
+        else if (pose == R_HANG) inst::rotate(-side * (15 + 10 * sinf(t * 0.9f + p.phase)), 1, 0, 0);
+        else if (pose == R_GRIP) inst::rotate(35.f, 0, 0, 1);                               // both hands on the grip lever
+        else if (pose == R_BENCH) inst::rotate(25.f, 0, 0, 1);                              // hands in the lap
+        inst::cube({0, -0.28f, 0}, 0.11f, 0.58f, 0.11f, p.shirt);
+        inst::cube({0, -0.6f, 0}, 0.1f, 0.1f, 0.1f, p.skin);
+        inst::pop();
     }
 }
 
@@ -919,17 +1190,17 @@ static void drawRider(const Ped& p, int pose, int side, float t) {
 static void drawCableRiders(const Car& c, int idx) {
     RNG r(9137 + idx * 7919);
     float t = (float)GetTime();
-    rlPushMatrix();
-    rlTranslatef(c.pos.x, c.pos.y, c.pos.z);
-    rlRotatef(-c.yaw * RAD2DEG, 0, 1, 0);
-    rlRotatef(c.pitch * RAD2DEG, 0, 0, 1);
+    inst::push();
+    inst::translate(c.pos.x, c.pos.y, c.pos.z);
+    inst::rotate(-c.yaw * RAD2DEG, 0, 1, 0);
+    inst::rotate(c.pitch * RAD2DEG, 0, 0, 1);
     auto place = [&](float x, float y, float z, float face, int pose, int side) {
         Ped p; colorPed(p, r);
-        rlPushMatrix();
-        rlTranslatef(x, y, z);
-        rlRotatef(face, 0, 1, 0);
+        inst::push();
+        inst::translate(x, y, z);
+        inst::rotate(face, 0, 1, 0);
         drawRider(p, pose, side, t);
-        rlPopMatrix();
+        inst::pop();
     };
     for (int s = -1; s <= 1; s += 2)
         for (float x : {-3.5f, -2.7f, 2.7f, 3.5f})
@@ -941,8 +1212,8 @@ static void drawCableRiders(const Car& c, int idx) {
         for (float x : {-1.5f, -0.75f, 0.f, 0.75f, 1.5f})
             if (r.chance(0.5f)) place(x, 1.65f, s * 0.75f, 90.f * s, R_INSIDE, s);
     place(2.45f, 1.04f, 0, 0, R_GRIP, 0);
-    DrawCube({2.85f, 1.45f, 0}, 0.06f, 0.9f, 0.06f, {60, 60, 64, 255});    // grip lever
-    rlPopMatrix();
+    inst::cube({2.85f, 1.45f, 0}, 0.06f, 0.9f, 0.06f, {60, 60, 64, 255});    // grip lever
+    inst::pop();
 }
 
 void Traffic::drawShadows(Vector3 cam) const {

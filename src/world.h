@@ -3,6 +3,7 @@
 #include "common.h"
 #include "mesh.h"
 #include <unordered_map>
+#include <functional>
 
 // Terrain extent (includes background hills) and the area the skater can reach.
 constexpr float WX0 = -2900, WX1 = 6500, WZ0 = -3900, WZ1 = 3400;
@@ -87,6 +88,7 @@ inline int signalState(int node, int axis, float t) {
     return c < 13.5f ? 2 : c < 23.5f ? 0 : c < 26.f - 0.5f ? 1 : 2;
 }
 struct Spot { const char* name; Vector3 pos; float yaw; };
+struct Seat { Vector3 pos; float yaw; bool grass; };   // where someone can sit: the seat surface (or lawn) and the way they face
 struct MapLabel { const char* name; float x, z; int size; };
 struct Pond { float x0, z0, x1, z1; };
 
@@ -95,7 +97,19 @@ struct Pond { float x0, z0, x1, z1; };
 enum : int { LAYER_MAIN, LAYER_DETAIL, LAYER_FAR, LAYER_INTERIOR };
 constexpr int LAYER_STRIDE = 10000000;
 constexpr float DETAIL_DIST = 650.f, INTERIOR_DIST = 110.f;
-struct Chunk { unsigned vao = 0, vaoFar = 0, vboA = 0, vboB = 0; int count = 0; Vector3 mn{}, mx{}; int layer = 0; Vector2 c0{}, c1{}; };
+// house rooms are meshed one house at a time once the camera comes within INTERIOR_LOAD, and freed past INTERIOR_DROP
+constexpr float INTERIOR_LOAD = 200.f, INTERIOR_DROP = 225.f;
+// count is the index count; packed chunks store 1/1024 m steps from org (w = 1), see the city shader
+constexpr int PACKED_LOC = 10;
+struct Chunk {
+    unsigned vao = 0, vaoFar = 0, vboA = 0, vboB = 0, ebo = 0;
+    int count = 0;
+    bool packed = false, idx32 = false;
+    Vector4 org{0, 0, 0, 0};
+    Vector3 mn{}, mx{};
+    int layer = 0;
+    Vector2 c0{}, c1{};
+};
 
 // A house you can walk into: its ground floor is a real room behind an open door.
 struct House {
@@ -110,18 +124,26 @@ struct House {
     int nRoute = 0;
 };
 
+// What it takes to build a house's room again: the house, its shell heights, the door and its generator then.
+struct InteriorSrc { House h; float base, top, doorU; RNG hr; };
+struct InteriorStats { double ms = 0; int built = 0, cached = 0, missingNear = 0; };   // missingNear: within 30 m, not yet built
+
 struct World {
     // ---- generation ----
     void generate(void (*progress)(const char*, float));
-    void upload();
+    void upload(const std::function<void()>& meanwhile = {});   // runs meanwhile() on this thread during the bake
     // slim: position and color only (the far pass)
     void drawPass(const Camera3D& cam, float nearD, float farD, const Shader& sh, bool slim);
     void drawWater(const Shader& sh, bool slim);
     // shadow maps: draw every chunk inside the light's box (lightView space: |x|,|y| < half, -zFar < z < 0)
     int drawCasters(Matrix lightView, float half, float zFar, const Shader& sh);
+    // build the rooms near the camera (nearest first, for about budget seconds) and free the far ones
+    InteriorStats updateInteriors(Vector3 cam, double budget);
+    void freeInteriors();
 
     // ---- queries ----
-    float terrain(float x, float z) const;                    // bare ground height
+    float terrain(float x, float z) const;                    // bare ground height, exactly as the ground mesh draws it
+    float terrainRaw(float x, float z) const;                 // the 4 m heightfield itself (what the mesh is built from)
     float ground(float x, float z, float yRef) const;         // highest walkable surface <= yRef+STEP_UP
     bool collide(Vector3& p, float r, float feetY, float height, Vector2* nrm) const; // push out of walls
     bool solidAt(Vector3 p) const;                             // for camera collision
@@ -140,6 +162,9 @@ struct World {
     // ---- data ----
     std::vector<float> hf; int hfW = 0, hfH = 0;
     std::vector<float> hf2; int hf2W = 0, hf2H = 0;  // detailed terrain around Menlo Park
+    // trees counted per 25 m cell (for the rustle of leaves and the birdsong around you)
+    std::unordered_map<int, int> treeCells;
+    float treesNear(float x, float z) const;   // trees within about 35 m, weighted toward the closest
     // Caltrain: route polyline, stations (distance along the line), track geometry helpers
     struct Station { const char* name; float s; };
     std::vector<Station> stations;
@@ -168,12 +193,15 @@ struct World {
     std::vector<Spot> spots;
     std::vector<MapLabel> labels;
     std::vector<Vector3> tourists;   // idle people at viewpoints
+    std::vector<Seat> seats;         // benches and park lawns where people sit (often with a laptop)
     std::vector<uint8_t> signals;    // per SF grid node (j * ni + i): 1 where the intersection has traffic lights
     std::vector<SignalHead> signalHeads;
     std::vector<Vector3> steamVents; // manholes letting off steam
     Image mapImg{};
     std::vector<Chunk> chunks;
     Chunk water{};
+    std::vector<InteriorSrc> interiorSrc;
+    std::unordered_map<int, Chunk> interiorMesh;   // index into interiorSrc -> its room
 
     // generation scratch
     std::unordered_map<int, MeshBuilder> builders;
@@ -197,6 +225,7 @@ private:
     void buildLandmarks();
     void buildWaterfront();
     void buildParks();
+    void buildAlcatraz();
     void buildSkateSpots();
     void buildMap();
     void buildMapImage(Image& img, float X0, float Z0, float X1, float Z1, float RES);
@@ -213,7 +242,8 @@ private:
                 Color side, Color topC, float ao = 0.8f);
     void addBuilding(float x0, float z0, float x1, float z1, float height, Color side, Color roof, int style, int facing, RNG& r);
     void addTower(float x0, float z0, float x1, float z1, float H, RNG& r);
-    void addHouseInterior(const House& h, float base, float top, float doorU, RNG& hr);
+    // geo null: collision only (the city build); otherwise the mesh only, into geo
+    void addHouseInterior(const House& h, float base, float top, float doorU, RNG& hr, MeshBuilder* geo);
     void addTree(float x, float z, int type, float scale, RNG& r, bool solid = true);
     void addShrub(float x, float z, float scale, RNG& r, bool flowering = false);
     void addFlowerBed(float x0, float z0, float x1, float z1, int count, RNG& r);

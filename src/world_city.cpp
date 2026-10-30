@@ -243,6 +243,7 @@ struct FrontInfo {
     // a front stair that runs along the facade (houses well above a steep street): ramp and landing rectangles
     bool side = false;
     float uA = 0, uL = 0, yStart = 0, lu0 = 0, lu1 = 0;
+    float doorY = 0;   // floor level at the front door (below the entry floor for a garden-level door)
 };
 
 // A house body with a doorway cut through its street wall (the other three sides and the roof as a plain box).
@@ -349,59 +350,72 @@ static void victorianFront(const World& w, MeshBuilder& m, float x0, float z0, f
     else if (canEnter && H > 2.3f && fw < 7.4f) w_stat[2]++;
     else if (canEnter && H > 2.3f) w_stat[3]++;
     info.enter = canEnter && H <= 2.3f && inMargin;
-    if (!info.enter && canEnter && inMargin && H > 2.3f && H <= 6.5f && fw >= 7.4f) {
-        // well above the street: a flight of stairs running along the front of the house up to a landing at the door
+    // a flight of stairs running along the front of the house up to a landing at the door, for doors well above
+    // the street; it runs toward the far end of the facade and must not be steeper than about 36 degrees
+    auto trySide = [&]() {
         bool doorLow = cDoor < (fu0 + fu1) * 0.5f;
         float uA = doorLow ? fu1 - 0.5f : fu0 + 0.5f;
         float uL = doorLow ? cDoor + 1.15f : cDoor - 1.15f;
         Vector3 sP = F.P(uA, 0, 0.7f), sQ = F.P(uA, 0, 2.2f);
         float yS = std::min(L0 - 0.1f, std::min(w.terrain(sP.x, sP.z), w.terrain(sQ.x, sQ.z)) + 0.3f);
         float run = fabsf(uA - uL);
-        if (run >= 3.5f && (L0 - yS) / run <= 0.72f) {
-            info.enter = info.side = true;
-            info.uA = uA; info.uL = uL; info.yStart = yS;
-            info.lu0 = std::max(fu0 + 0.3f, cDoor - 1.15f);
-            info.lu1 = std::min(fu1 - 0.3f, cDoor + 1.15f);
+        if (run < 3.5f || (L0 - yS) / run > 0.72f) return false;
+        info.side = true;
+        info.uA = uA; info.uL = uL; info.yStart = yS;
+        info.lu0 = std::max(fu0 + 0.3f, cDoor - 1.15f);
+        info.lu1 = std::min(fu1 - 0.3f, cDoor + 1.15f);
+        return true;
+    };
+    if (!info.enter && canEnter && inMargin && H > 2.3f && H <= 6.5f && fw >= 7.4f && trySide()) info.enter = true;
+    // houses you can't go into still get believable steps: a stoop when the door is low, a flight along the
+    // front when it is high, and when neither fits, a garden-level door in the raised basement instead
+    float doorY = L0;
+    const float STOOP_MAX = 2.6f;
+    if (!info.enter && H > STOOP_MAX && (sunset || turret || !trySide())) {
+        doorY = std::max(ground(cDoor - 0.7f), ground(cDoor + 0.7f)) + 0.17f;
+        H = doorY - gd;
+    }
+    info.doorY = doorY;
+    Color conc = col(188, 184, 176), concSide = col(158, 154, 146), rail = col(40, 44, 48);
+    if (info.side) {
+        // individual steps (~19 cm risers) whose front edges sit on the collision ramp's line; the last riser
+        // steps up onto the landing
+        float rise = L0 - info.yStart, run = info.uL - info.uA;
+        int ns = std::clamp((int)ceilf(rise / 0.19f), 2, 40);
+        for (int i = 0; i < ns; i++) {
+            float ua = info.uA + run * i / ns, ub = info.uA + run * (i + 1) / ns;
+            float yTop = info.yStart + rise * i / ns;
+            Vector3 a = F.P(std::min(ua, ub), gLow - 1.5f, 0), b = F.P(std::max(ua, ub), yTop, 1.4f);
+            m.box({std::min(a.x, b.x), a.y, std::min(a.z, b.z)}, {std::max(a.x, b.x), b.y, std::max(a.z, b.z)}, concSide, conc, 1.f);
         }
+        F.box(info.lu0, info.lu1, gLow - 1.5f, L0, 0, 1.4f, concSide);
+        F.panel(info.lu0, info.lu1, L0 - 0.001f, L0 + 0.001f, 0.7f, conc);
+        // handrail along the open side of the flight and the landing, on posts
+        m.beam(F.P(info.uA, info.yStart + 0.95f, 1.3f), F.P(info.uL, L0 + 0.95f, 1.3f), 0.06f, 0.06f, rail);
+        m.beam(F.P(info.uL, L0 + 0.95f, 1.3f), F.P(info.uL > cDoor ? info.lu1 : info.lu0, L0 + 0.95f, 1.3f), 0.06f, 0.06f, rail);
+        for (int k = 0; k <= 5; k++) {
+            float u = lerpf(info.uA, info.uL, k / 5.f), yy = lerpf(info.yStart, L0, k / 5.f);
+            m.beam(F.P(u, yy, 1.3f), F.P(u, yy + 0.95f, 1.3f), 0.06f, 0.06f, rail);
+        }
+    } else if (H > 0.1f) {
+        // a stoop straight out to the sidewalk: risers of at most ~22 cm, no deeper than 3 m
+        info.ns = std::max(1, (int)ceilf(H / 0.22f));
+        info.tread = std::min(0.32f, 3.0f / info.ns);
+        for (int i = 1; i <= info.ns; i++)
+            F.box(cDoor - 0.9f, cDoor + 0.9f, gd - 0.4f, gd + H * i / info.ns, 0, info.tread * (info.ns - i + 1), col(176, 172, 164));
     }
     if (info.enter) {
-        // an open doorway into a real room: wide steps (or a side stair), a framed opening, the door swung open inside
-        if (info.side) {
-            Color conc = col(188, 184, 176), concSide = col(158, 154, 146), rail = col(40, 44, 48);
-            float ulo = std::min(info.uA, info.uL), uhi = std::max(info.uA, info.uL);
-            Vector3 a = F.P(ulo, 0, 0), b = F.P(uhi, 0, 1.4f);
-            float h0 = info.uA < info.uL ? info.yStart : L0, h1 = info.uA < info.uL ? L0 : info.yStart;
-            m.slab(std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), h0, h1, facing < 2 ? 0 : 1,
-                   gLow - 1.5f, conc, concSide);
-            F.box(info.lu0, info.lu1, gLow - 1.5f, L0, 0, 1.4f, concSide);
-            F.panel(info.lu0, info.lu1, L0 - 0.001f, L0 + 0.001f, 0.7f, conc);
-            // handrail along the open side of the flight and the landing, on posts
-            m.beam(F.P(info.uA, info.yStart + 0.95f, 1.3f), F.P(info.uL, L0 + 0.95f, 1.3f), 0.06f, 0.06f, rail);
-            m.beam(F.P(info.uL, L0 + 0.95f, 1.3f), F.P(info.uL > cDoor ? info.lu1 : info.lu0, L0 + 0.95f, 1.3f), 0.06f, 0.06f, rail);
-            for (int k = 0; k <= 5; k++) {
-                float u = lerpf(info.uA, info.uL, k / 5.f), yy = lerpf(info.yStart, L0, k / 5.f);
-                m.beam(F.P(u, yy, 1.3f), F.P(u, yy + 0.95f, 1.3f), 0.06f, 0.06f, rail);
-            }
-        } else {
-        info.ns = H > 0.1f ? std::clamp((int)ceilf(H / 0.38f), 1, 6) : 0;
-        info.tread = info.ns > 3 ? 0.5f : 0.55f;
-        Color step = col(176, 172, 164);
-        for (int i = 1; i <= info.ns; i++)
-            F.box(cDoor - 0.9f, cDoor + 0.9f, gd - 0.4f, gd + H * i / info.ns, 0, info.tread * (info.ns - i + 1), step);
-        }
+        // an open doorway into a real room: a framed opening, the door swung open inside
         F.panel(cDoor - DOOR_HW - 0.18f, cDoor - DOOR_HW, L0, L0 + OPEN_H + 0.35f, 0.07f, trim);
         F.panel(cDoor + DOOR_HW, cDoor + DOOR_HW + 0.18f, L0, L0 + OPEN_H + 0.35f, 0.07f, trim);
         F.panel(cDoor - DOOR_HW - 0.18f, cDoor + DOOR_HW + 0.18f, L0 + OPEN_H, L0 + OPEN_H + 0.35f, 0.07f, trim);
         F.panel(cDoor - DOOR_HW - 0.1f, cDoor + DOOR_HW + 0.1f, L0 + OPEN_H + 0.05f, L0 + OPEN_H + 0.3f, 0.09f, glassC); // transom
     } else {
-        if (H > 0.1f) {
-            int ns = std::clamp((int)ceilf(H / 0.38f), 1, 3);
-            Color step = col(176, 172, 164);
-            for (int i = 1; i <= ns; i++) F.box(cDoor - 0.8f, cDoor + 0.8f, gd - 0.4f, gd + H * i / ns, 0, 0.3f * (ns - i + 1), step);
-        }
-        F.panel(cDoor - 0.62f, cDoor + 0.62f, L0, L0 + 2.95f, 0.07f, trim);
-        F.panel(cDoor - 0.46f, cDoor + 0.46f, L0, L0 + 2.5f, 0.1f, doorC);
-        F.panel(cDoor - 0.46f, cDoor + 0.46f, L0 + 2.58f, L0 + 2.85f, 0.1f, glassC);
+        // a garden-level door is a little shorter when the main floor sits just above it
+        float dh = doorY < L0 ? std::clamp(L0 - 0.6f - doorY, 2.1f, 2.5f) : 2.5f;
+        F.panel(cDoor - 0.62f, cDoor + 0.62f, doorY, doorY + dh + 0.45f, 0.07f, trim);
+        F.panel(cDoor - 0.46f, cDoor + 0.46f, doorY, doorY + dh, 0.1f, doorC);
+        F.panel(cDoor - 0.46f, cDoor + 0.46f, doorY + dh + 0.08f, doorY + dh + 0.35f, 0.1f, glassC);
     }
 
     if (sunset) {
@@ -531,18 +545,40 @@ static void shopfront(World& w, MeshBuilder& m, float x0, float z0, float x1, fl
     static const Color LETTER[] = {col(246, 240, 224), col(236, 200, 80), col(250, 250, 250), col(210, 230, 210)};
     Color stone = col(176, 168, 156), dark = col(36, 38, 44);
     int nb = std::max(1, (int)(len / sr.range(5.5f, 8.5f)));
+    // sidewalk height along the front, lowest and highest under a stretch of it
+    auto groundSpan = [&](float a, float b, float& lo, float& hi) {
+        lo = 1e9f; hi = -1e9f;
+        int n = std::max(2, (int)((b - a) / 0.75f));
+        for (int q = 0; q <= n; q++) {
+            Vector3 p = F.P(lerpf(a, b, q / (float)n), 0, 0.6f);
+            float g = w.terrain(p.x, p.z);
+            lo = std::min(lo, g); hi = std::max(hi, g);
+        }
+    };
+    // on a steep street, narrower shops, so no bay climbs more than about a metre from end to end
+    while (len / (nb + 1) >= 3.4f) {
+        float worst = 0;
+        for (int i = 0; i < nb; i++) { float lo, hi; groundSpan(u0 + i * len / nb, u0 + (i + 1) * len / nb, lo, hi); worst = std::max(worst, hi - lo); }
+        if (worst <= 1.0f) break;
+        nb++;
+    }
     float bw = len / nb;
     for (int i = 0; i < nb; i++) {
         float a = u0 + i * bw, b = a + bw;
-        // each bay sits on the ground in front of it, so a shop row steps down a hill like real ones do
-        Vector3 pa = F.P(a, 0, 0.6f), pb = F.P(b, 0, 0.6f), pm = F.P((a + b) * 0.5f, 0, 0.6f);
-        float y0 = std::min(std::min(w.terrain(pa.x, pa.z), w.terrain(pb.x, pb.z)), w.terrain(pm.x, pm.z)) - 0.1f;
+        // each bay is level with the sidewalk at its uphill end, so a shop row steps down a hill like real ones do:
+        // the sidewalk never climbs over the windows, and the base and piers reach down to the low end
+        float gLo, gHi;
+        groundSpan(a, b, gLo, gHi);
+        float y0 = gHi - 0.05f, yLow = gLo - 1.6f;
+        Vector3 pa = F.P(a, 0, 0.6f), pb = F.P(b, 0, 0.6f);
+        float ga = w.terrain(pa.x, pa.z), gb = w.terrain(pb.x, pb.z);
         Color acc = ACC[sr.irange(0, 7)], glow = GLOW[sr.irange(0, 3)], let = LETTER[sr.irange(0, 3)];
         bool bank = acc.r == 24 && acc.g == 24;   // the dark ones are banks and bars: tinted glass, no awning
-        F.box(a, a + 0.45f, y0 - 1.6f, y0 + 4.5f, 0, 0.2f, stone);                       // pier between shops
-        F.box(a + 0.45f, b, y0 - 1.6f, y0 + 0.65f, 0, 0.14f, scaleC(acc, 0.7f));          // bulkhead under the window
+        F.box(a, a + 0.45f, yLow, y0 + 4.5f, 0, 0.2f, stone);                       // pier between shops
+        F.box(a + 0.45f, b, yLow, y0 + 0.65f, 0, 0.14f, scaleC(acc, 0.7f));          // bulkhead under the window
         // door at one end of the bay, the display window across the rest
         bool doorLeft = sr.chance(0.5f);
+        if (fabsf(ga - gb) > 0.25f) doorLeft = ga > gb;   // on a slope the door is at the top, where it meets the sidewalk
         float dw = 1.5f, du0 = doorLeft ? a + 0.7f : b - 0.7f - dw, du1 = du0 + dw;
         float wa = doorLeft ? du1 + 0.2f : a + 0.65f, wb = doorLeft ? b - 0.1f : du0 - 0.2f;
         F.box(wa, wb, y0 + 0.65f, y0 + 3.0f, 0, 0.06f, glow);                      // lit interior seen through the glass
@@ -555,6 +591,7 @@ static void shopfront(World& w, MeshBuilder& m, float x0, float z0, float x1, fl
             F.box(gu, gu + 0.45f, y0 + 0.65f, y0 + 0.65f + sr.range(0.5f, 1.2f), 0.07f, 0.4f, gc);
         }
         F.box(du0, du1, y0, y0 + 2.4f, 0, 0.16f, dark);                            // door frame
+        if (gHi - gLo > 0.2f) F.box(du0 - 0.1f, du1 + 0.1f, yLow, y0, 0, 0.35f, stone);   // stone sill under it, down to the falling sidewalk
         F.box(du0 + 0.15f, du1 - 0.15f, y0 + 0.3f, y0 + 2.3f, 0.16f, 0.2f, glow);  // glazed door
         // sign board with lettering
         F.box(a + 0.45f, b, y0 + 3.2f, y0 + 4.15f, 0, 0.3f, acc);
@@ -659,6 +696,54 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
         rowhouseCount++;
         if (canEnter && !fi.enter) houseTooHigh++;
     }
+    // collision for the front steps and a clear way to them (no trees, lamps or parked cars in front)
+    auto frontStairs = [&]() {
+        Facade F{m, x0, z0, x1, z1, facing};
+        Vector3 po = F.P(fi.cDoor, 0, fi.side ? 0.8f : fi.ns * fi.tread + 0.7f), pi = F.P(fi.cDoor, 0, -1.6f), pf = F.P(fi.uA, 0, 0.7f);
+        Vector2 doorOut = {po.x, po.z}, doorIn = {pi.x, pi.z}, foot = {pf.x, pf.z};
+        if (fi.side) {   // collision for the flight along the front and its landing
+            float ulo = std::min(fi.uA, fi.uL), uhi = std::max(fi.uA, fi.uL);
+            Vector3 a = F.P(ulo, 0, 0), b = F.P(uhi, 0, 1.4f);
+            float h0 = fi.uA < fi.uL ? fi.yStart : fi.doorY, h1 = fi.uA < fi.uL ? fi.doorY : fi.yStart;
+            addPlat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), h0, h1, fi.yStart - 2.f, (uint8_t)(facing < 2 ? 0 : 1), PK_PROP});
+            Vector3 la = F.P(fi.lu0, 0, 0), lb = F.P(fi.lu1, 0, 1.4f);
+            addPlat({std::min(la.x, lb.x), std::max(la.x, lb.x), std::min(la.z, lb.z), std::max(la.z, lb.z), fi.doorY, fi.doorY, fi.gd - 2.f, 0, PK_PROP});
+        } else {   // collision for the front steps: a flat top step, then a smooth ramp down to the street so you roll up
+            // instead of bouncing off each tread (it follows the front edges of the drawn steps)
+            float W2 = fi.ns * fi.tread;
+            // the far end of the ramp meets the street wherever the street actually is there, a short step up from it
+            Vector3 farP = F.P(fi.cDoor, 0, W2 + 0.4f), farQ = F.P(fi.cDoor, 0, W2);
+            float yFar = std::min(fi.doorY - 0.05f, std::min(terrain(farP.x, farP.z), terrain(farQ.x, farQ.z)) + 0.36f);
+            auto stepPlat = [&](float dep0, float dep1, float yNear, float yFar2, bool slope) {
+                Vector3 a = F.P(fi.cDoor - 0.9f, 0, dep0), b = F.P(fi.cDoor + 0.9f, 0, dep1);
+                float x0s = std::min(a.x, b.x), x1s = std::max(a.x, b.x), z0s = std::min(a.z, b.z), z1s = std::max(a.z, b.z);
+                float base2 = fi.gd - 0.4f;
+                switch (facing) { // wall side is the near end
+                case 0: addPlat({x0s, x1s, z0s, z1s, yFar2, yNear, base2, 1, PK_PROP}); break;
+                case 1: addPlat({x0s, x1s, z0s, z1s, yNear, yFar2, base2, 1, PK_PROP}); break;
+                case 2: addPlat({x0s, x1s, z0s, z1s, yFar2, yNear, base2, 0, PK_PROP}); break;
+                default: addPlat({x0s, x1s, z0s, z1s, yNear, yFar2, base2, 0, PK_PROP}); break;
+                }
+                (void)slope;
+            };
+            if (fi.ns >= 1) stepPlat(0, std::min(fi.tread, W2), fi.doorY, fi.doorY, false);
+            if (fi.ns >= 2) stepPlat(fi.tread, W2, fi.doorY, yFar, true);
+        }
+        if (fi.ns >= 1 || fi.side) {   // keep trees, lamps and parked cars off the way to the door
+            Vector2 out = Vector2Normalize({doorOut.x - doorIn.x, doorOut.y - doorIn.y});
+            auto addSeg = [&](Vector2 p0, Vector2 p1) {
+                Vector4 seg = {p0.x, p0.y, p1.x, p1.y};
+                int n = std::max(2, (int)(Vector2Distance(p0, p1) / 4.f) + 1);
+                for (int k = 0; k <= n; k++) {
+                    float px = lerpf(seg.x, seg.z, (float)k / n), pz = lerpf(seg.y, seg.w, (float)k / n);
+                    doorWays.emplace((int)floorf(px / 16.f) * 4096 + (int)floorf(pz / 16.f), seg);
+                }
+            };
+            Vector2 from = fi.side ? foot : doorOut;
+            addSeg({from.x - out.x * 3.6f, from.y - out.y * 3.6f}, {from.x + out.x * 8.f, from.y + out.y * 8.f}); // steps and the way to them
+            if (fi.side) addSeg(foot, doorOut); // along the flight to the landing
+        }
+    };
     if (fi.enter) {
         shellMesh(m, x0, z0, x1, z1, base, top, facing, fi.cDoor, L0, side, roof, 0.72f, fi.trim, col(150, 108, 70, M_INTERIOR));
         House h{x0, z0, x1, z1, L0, facing, {}, {}};
@@ -679,57 +764,18 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
             h.route[1] = h.doorIn;
             h.nRoute = 2;
         }
-        addHouseInterior(h, base, top, fi.cDoor, hr);
-        if (fi.side) {   // collision for the flight along the front and its landing
-            float ulo = std::min(fi.uA, fi.uL), uhi = std::max(fi.uA, fi.uL);
-            Vector3 a = F.P(ulo, 0, 0), b = F.P(uhi, 0, 1.4f);
-            float h0 = fi.uA < fi.uL ? fi.yStart : L0, h1 = fi.uA < fi.uL ? L0 : fi.yStart;
-            addPlat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), h0, h1, fi.yStart - 2.f, (uint8_t)(facing < 2 ? 0 : 1), PK_PROP});
-            Vector3 la = F.P(fi.lu0, 0, 0), lb = F.P(fi.lu1, 0, 1.4f);
-            addPlat({std::min(la.x, lb.x), std::max(la.x, lb.x), std::min(la.z, lb.z), std::max(la.z, lb.z), L0, L0, fi.gd - 2.f, 0, PK_PROP});
-        } else {   // collision for the front steps: a flat top step, then a smooth ramp down to the street so you roll up
-            // instead of bouncing off each tread (it follows the front edges of the drawn steps)
-            float W2 = fi.ns * fi.tread;
-            // the far end of the ramp meets the street wherever the street actually is there, a short step up from it
-            Vector3 farP = F.P(fi.cDoor, 0, W2 + 0.4f), farQ = F.P(fi.cDoor, 0, W2);
-            float yFar = std::min(L0 - 0.05f, std::min(terrain(farP.x, farP.z), terrain(farQ.x, farQ.z)) + 0.36f);
-            auto stepPlat = [&](float dep0, float dep1, float yNear, float yFar2, bool slope) {
-                Vector3 a = F.P(fi.cDoor - 0.9f, 0, dep0), b = F.P(fi.cDoor + 0.9f, 0, dep1);
-                float x0s = std::min(a.x, b.x), x1s = std::max(a.x, b.x), z0s = std::min(a.z, b.z), z1s = std::max(a.z, b.z);
-                float base2 = fi.gd - 0.4f;
-                switch (facing) { // wall side is the near end
-                case 0: addPlat({x0s, x1s, z0s, z1s, yFar2, yNear, base2, 1, PK_PROP}); break;
-                case 1: addPlat({x0s, x1s, z0s, z1s, yNear, yFar2, base2, 1, PK_PROP}); break;
-                case 2: addPlat({x0s, x1s, z0s, z1s, yFar2, yNear, base2, 0, PK_PROP}); break;
-                default: addPlat({x0s, x1s, z0s, z1s, yNear, yFar2, base2, 0, PK_PROP}); break;
-                }
-                (void)slope;
-            };
-            if (fi.ns >= 1) stepPlat(0, std::min(fi.tread, W2), L0, L0, false);
-            if (fi.ns >= 2) stepPlat(fi.tread, W2, L0, yFar, true);
-        }
+        interiorSrc.push_back({h, base, top, fi.cDoor, hr});   // the room's mesh is built later, near the camera
+        addHouseInterior(h, base, top, fi.cDoor, hr, nullptr);
+        frontStairs();
         // open door leaf swung back against the wall inside
         Vector3 la = F.P(fi.cDoor - DOOR_HW + 0.03f, L0, -WALL_T - 0.02f), lb = F.P(fi.cDoor - DOOR_HW + 0.03f, L0 + 2.5f, -WALL_T - 1.3f);
         m.quad(la, F.P(fi.cDoor - DOOR_HW + 0.03f, L0, -WALL_T - 1.3f), lb, F.P(fi.cDoor - DOOR_HW + 0.03f, L0 + 2.5f, -WALL_T - 0.02f),
                withMat(fi.doorC, M_INTERIOR));
         houses.push_back(h);
-        {   // keep trees, lamps and parked cars off the way to the door (the approach runs from the curb side to the steps)
-            Vector2 out = Vector2Normalize({h.doorOut.x - h.doorIn.x, h.doorOut.y - h.doorIn.y});
-            auto addSeg = [&](Vector2 p0, Vector2 p1) {
-                Vector4 seg = {p0.x, p0.y, p1.x, p1.y};
-                int n = std::max(2, (int)(Vector2Distance(p0, p1) / 4.f) + 1);
-                for (int k = 0; k <= n; k++) {
-                    float px = lerpf(seg.x, seg.z, (float)k / n), pz = lerpf(seg.y, seg.w, (float)k / n);
-                    doorWays.emplace((int)floorf(px / 16.f) * 4096 + (int)floorf(pz / 16.f), seg);
-                }
-            };
-            Vector2 from = h.sideStair ? h.route[1] : h.doorOut;
-            addSeg({from.x - out.x * 3.6f, from.y - out.y * 3.6f}, {from.x + out.x * 8.f, from.y + out.y * 8.f}); // steps and the way to them
-            if (h.sideStair) addSeg(h.route[1], h.doorOut); // along the flight to the landing
-        }
     } else {
         m.box({x0, base, z0}, {x1, top, z1}, side, roof, 0.72f);
         addPlat({x0, x1, z0, z1, top, top, base, 0, PK_BUILDING});
+        if (victorian) frontStairs();
     }
     if (facing < 0) return;
 
@@ -808,10 +854,12 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
 
 // The ground floor of an enterable house: wall linings, floor, ceiling, a hall partition, furniture and the
 // collision for all of it. The door is at facade coordinate doorU; "depth" runs from the street wall inward.
-void World::addHouseInterior(const House& h, float base, float top, float doorU, RNG& hr) {
-    struct LayerScope { int& l; int was; ~LayerScope() { l = was; } } layerScope_{layer, layer};
-    layer = LAYER_INTERIOR;   // rooms are only drawn near the camera
-    MeshBuilder& m = mb((h.x0 + h.x1) / 2, (h.z0 + h.z1) / 2);
+// With geo null only the collision is kept (the mesh goes to a scratch builder); otherwise only the mesh, into geo.
+void World::addHouseInterior(const House& h, float base, float top, float doorU, RNG& hr, MeshBuilder* geo) {
+    static MeshBuilder scratch;
+    scratch.v.clear(); scratch.c.clear(); scratch.n.clear();
+    MeshBuilder& m = geo ? *geo : scratch;
+    auto plat = [&](const Platform& p) { if (!geo) this->addPlat(p); };
     Facade F{m, h.x0, h.z0, h.x1, h.z1, h.facing};
     const float t = WALL_T, Y = h.floorY;
     float fu0 = h.facing < 2 ? h.x0 : h.z0, fu1 = h.facing < 2 ? h.x1 : h.z1;
@@ -822,7 +870,7 @@ void World::addHouseInterior(const House& h, float base, float top, float doorU,
         Vector3 a = I(u0, y0, dd0), b = I(u1, y1, dd1);
         Vector3 mn = {std::min(a.x, b.x), y0, std::min(a.z, b.z)}, mx = {std::max(a.x, b.x), y1, std::max(a.z, b.z)};
         m.box(mn, mx, c.a == M_EMISSIVE ? c : withMat(c, M_INTERIOR), 1.f);
-        if (solid) addPlat({mn.x, mx.x, mn.z, mx.z, y1, y1, y0, 0, kind});
+        if (solid) plat({mn.x, mx.x, mn.z, mx.z, y1, y1, y0, 0, kind});
     };
 
     // palette
@@ -838,7 +886,7 @@ void World::addHouseInterior(const House& h, float base, float top, float doorU,
     float du0 = doorU - DOOR_HW, du1 = doorU + DOOR_HW;
     auto wallPlat = [&](float u0, float u1, float dd0, float dd1) {
         Vector3 a = I(u0, 0, dd0), b = I(u1, 0, dd1);
-        addPlat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), top, top, base, 0, PK_BUILDING});
+        plat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), top, top, base, 0, PK_BUILDING});
     };
     wallPlat(fu0, fu1, D - t, D);            // back
     wallPlat(fu0, fu0 + t, 0, D);            // sides
@@ -847,10 +895,10 @@ void World::addHouseInterior(const House& h, float base, float top, float doorU,
     wallPlat(du1, fu1, 0, t);
     {   // header above the doorway, then everything above the ground floor
         Vector3 a = I(du0, 0, 0), b = I(du1, 0, t);
-        addPlat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), top, top, Y + OPEN_H, 0, PK_BUILDING});
+        plat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), top, top, Y + OPEN_H, 0, PK_BUILDING});
         a = I(fu0, 0, 0); b = I(fu1, 0, D);
-        addPlat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), top, top, Yc, 0, PK_BUILDING});
-        addPlat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), Y, Y, Y - 0.4f, 0, PK_DECK}); // floor
+        plat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), top, top, Yc, 0, PK_BUILDING});
+        plat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), Y, Y, Y - 0.4f, 0, PK_DECK}); // floor
     }
 
     // surfaces: floor, ceiling, wall linings with a skirting board
@@ -1089,10 +1137,22 @@ void World::buildBlocks(const Grid& g, bool oakland) {
 }
 
 // ---------------------------------------------------------------- trees, lamps
+float World::treesNear(float x, float z) const {
+    int cx = (int)floorf(x / 25.f), cz = (int)floorf(z / 25.f);
+    float n = 0;
+    for (int dz = -1; dz <= 1; dz++)
+        for (int dx = -1; dx <= 1; dx++) {
+            auto it = treeCells.find((cz + dz) * 100000 + cx + dx);
+            if (it != treeCells.end()) n += it->second * (dx == 0 && dz == 0 ? 1.f : 0.5f);
+        }
+    return n;
+}
+
 void World::addTree(float x, float z, int type, float s, RNG& r, bool solid) {
     if (solid && doorBlocked(x, z, 2.6f)) return; // never plant a trunk in front of a front door
     float y = terrain(x, z);
     if (y < 0.8f) return;
+    treeCells[(int)floorf(z / 25.f) * 100000 + (int)floorf(x / 25.f)]++;
     MeshBuilder& m = mb(x, z);
     Color bark = jitterC(col(96, 72, 52), r, 0.15f);
     Color leaf = jitterC(type == 1 ? col(56, 104, 62) : type == 3 ? col(112, 134, 96) : col(88, 150, 62), r, 0.1f);
@@ -1339,6 +1399,7 @@ void World::addClutter(Vector2 p, Vector2 f, Vector2 o, int kind, uint32_t h) {
         m.obox(at(-L, 1.25f, 0), {0.03f, 0.9f, 0.55f}, yaw, 0, glass);
         m.obox(at(L, 1.25f, 0), {0.06f, 0.95f, 0.55f}, yaw, 0, col(250, 236, 200, M_EMISSIVE));   // backlit ad
         m.obox(at(0, 0.45f, 0.32f), {1.3f, 0.04f, 0.2f}, yaw, 0, col(150, 120, 90));               // bench
+        for (int a = -1; a <= 1; a += 2) seats.push_back({at(a * 0.45f, 0.49f, 0.42f), atan2f(-o.y, -o.x), false});
         m.beam(at(-L - 0.4f, -0.05f, 0.75f), at(-L - 0.4f, 2.9f, 0.75f), 0.06f, 0.06f, frame);      // stop sign pole
         m.obox(at(-L - 0.4f, 2.75f, 0.75f), {0.25f, 0.18f, 0.02f}, yaw, 0, col(200, 40, 40));
         Vector3 q0 = at(-L, 0, 0.5f), q1 = at(L, 0, 0.62f);

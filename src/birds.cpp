@@ -34,6 +34,20 @@ void Birds::init(const World& w) {
             b.t = r.range(0, 5);
             birds.push_back(b);
         }
+    // gulls wheeling round Alcatraz, which is famous for them (their own stream, so the flocks above stay put)
+    RNG ar(1859);
+    for (Vector3 g : {Vector3{300, 0, -1900}, Vector3{420, 0, -1890}, Vector3{220, 0, -1910}})
+        for (int k = 0; k < 7; k++) {
+            Bird b;
+            b.gull = true;
+            b.home = {g.x + ar.range(-40, 40), 0, g.z + ar.range(-30, 30)};
+            b.radius = ar.range(14, 45);
+            b.alt = ar.range(40, 70);   // high enough to clear the cellhouse and the water tower
+            b.speed = ar.range(0.18f, 0.32f) * (ar.chance(0.5f) ? 1.f : -1.f);
+            b.phase = ar.range(0, TAU_F);
+            b.t = ar.range(0, 100);
+            birds.push_back(b);
+        }
 }
 
 void Birds::update(float dt, const World& w, Vector3 sk, float skSpeed) {

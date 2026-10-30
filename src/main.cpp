@@ -12,6 +12,7 @@
 #include "render.h"
 #include "weather.h"
 #include "birds.h"
+#include "instance.h"
 #include <cstdio>
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
@@ -63,48 +64,48 @@ static const Color C_COP = {255, 70, 60, 255};
 
 // An officer on foot: running, arms out to grab, or flat on the ground after being knocked down.
 static void drawCop(const Cop& c, float now, bool grabbing) {
-    rlPushMatrix();
-    rlTranslatef(c.pos.x, c.pos.y, c.pos.z);
-    rlRotatef(-c.yaw * RAD2DEG, 0, 1, 0);
+    inst::push();
+    inst::translate(c.pos.x, c.pos.y, c.pos.z);
+    inst::rotate(-c.yaw * RAD2DEG, 0, 1, 0);
     bool down = c.stun > 0;
     if (down) {
-        rlTranslatef(0, 0.15f, 0);
-        rlRotatef(-85.f * clampf((3.2f - (c.stun > 3.2f ? 3.2f : c.stun)) / 3.2f * 6.f + 0.f, 0.f, 1.f), 0, 0, 1);
+        inst::translate(0, 0.15f, 0);
+        inst::rotate(-85.f * clampf((3.2f - (c.stun > 3.2f ? 3.2f : c.stun)) / 3.2f * 6.f + 0.f, 0.f, 1.f), 0, 0, 1);
     }
-    if (grabbing) rlTranslatef(0, 0, sinf(now * 40.f) * 0.03f);
+    if (grabbing) inst::translate(0, 0, sinf(now * 40.f) * 0.03f);
     Color shirt = {28, 44, 96, M_PLAIN}, pants = {22, 26, 44, M_PLAIN}, skin = {224, 180, 142, M_PLAIN};
     float sw = (down || grabbing) ? 0.f : sinf(c.phase) * 0.7f;
     for (int side = -1; side <= 1; side += 2) {
-        rlPushMatrix();
-        rlTranslatef(0, 0.9f, side * 0.11f);
-        rlRotatef(sw * side * RAD2DEG, 0, 0, 1);
-        DrawCube({0, -0.44f, 0}, 0.16f, 0.88f, 0.16f, pants);
-        DrawCube({0.05f, -0.86f, 0}, 0.26f, 0.08f, 0.14f, {20, 20, 20, M_PLAIN});
-        rlPopMatrix();
-        rlPushMatrix();
-        rlTranslatef(0, 1.43f, side * 0.27f);
-        rlRotatef((grabbing ? -75.f : -sw * side * 0.9f * RAD2DEG), 0, 0, 1);
-        DrawCube({0, -0.28f, 0}, 0.12f, 0.58f, 0.12f, shirt);
-        DrawCube({0, -0.6f, 0}, 0.11f, 0.11f, 0.11f, skin);
-        rlPopMatrix();
+        inst::push();
+        inst::translate(0, 0.9f, side * 0.11f);
+        inst::rotate(sw * side * RAD2DEG, 0, 0, 1);
+        inst::cube({0, -0.44f, 0}, 0.16f, 0.88f, 0.16f, pants);
+        inst::cube({0.05f, -0.86f, 0}, 0.26f, 0.08f, 0.14f, {20, 20, 20, M_PLAIN});
+        inst::pop();
+        inst::push();
+        inst::translate(0, 1.43f, side * 0.27f);
+        inst::rotate((grabbing ? -75.f : -sw * side * 0.9f * RAD2DEG), 0, 0, 1);
+        inst::cube({0, -0.28f, 0}, 0.12f, 0.58f, 0.12f, shirt);
+        inst::cube({0, -0.6f, 0}, 0.11f, 0.11f, 0.11f, skin);
+        inst::pop();
     }
-    DrawCube({0, 1.18f, 0}, 0.26f, 0.6f, 0.42f, shirt);
-    DrawCube({0, 0.92f, 0}, 0.28f, 0.08f, 0.44f, {30, 30, 34, M_PLAIN});        // belt
-    DrawCube({0.14f, 1.35f, -0.12f}, 0.04f, 0.12f, 0.1f, {240, 200, 60, M_PLAIN}); // badge
-    DrawCube({0, 1.6f, 0}, 0.21f, 0.25f, 0.21f, skin);
-    DrawCube({0, 1.76f, 0}, 0.25f, 0.1f, 0.25f, {20, 28, 60, M_PLAIN});          // cap
-    DrawCube({0.14f, 1.71f, 0}, 0.1f, 0.03f, 0.24f, {16, 20, 40, M_PLAIN});     // brim
-    rlPopMatrix();
+    inst::cube({0, 1.18f, 0}, 0.26f, 0.6f, 0.42f, shirt);
+    inst::cube({0, 0.92f, 0}, 0.28f, 0.08f, 0.44f, {30, 30, 34, M_PLAIN});        // belt
+    inst::cube({0.14f, 1.35f, -0.12f}, 0.04f, 0.12f, 0.1f, {240, 200, 60, M_PLAIN}); // badge
+    inst::cube({0, 1.6f, 0}, 0.21f, 0.25f, 0.21f, skin);
+    inst::cube({0, 1.76f, 0}, 0.25f, 0.1f, 0.25f, {20, 28, 60, M_PLAIN});          // cap
+    inst::cube({0.14f, 1.71f, 0}, 0.1f, 0.03f, 0.24f, {16, 20, 40, M_PLAIN});     // brim
+    inst::pop();
 }
 
 static void drawCruiser(Vector3 pos, float yaw, float now) {
     bool flip = (int)(now * 8) % 2;
     drawCarModel(CT_SEDAN, {235, 235, 240, 255}, pos, yaw, 0, false);
-    DrawCube(Vector3Add(pos, rotY({-0.1f, 1.62f, 0}, yaw)), 0.35f, 0.18f, 1.2f, {25, 25, 30, M_PLAIN});
+    inst::cube(Vector3Add(pos, rotY({-0.1f, 1.62f, 0}, yaw)), 0.35f, 0.18f, 1.2f, {25, 25, 30, M_PLAIN});
     Color red = flip ? Color{255, 40, 40, M_EMISSIVE} : Color{110, 10, 10, M_EMISSIVE};
     Color blue = flip ? Color{20, 40, 120, M_EMISSIVE} : Color{60, 110, 255, M_EMISSIVE};
-    DrawCube(Vector3Add(pos, rotY({-0.1f, 1.78f, -0.38f}, yaw)), 0.3f, 0.16f, 0.42f, red);
-    DrawCube(Vector3Add(pos, rotY({-0.1f, 1.78f, 0.38f}, yaw)), 0.3f, 0.16f, 0.42f, blue);
+    inst::cube(Vector3Add(pos, rotY({-0.1f, 1.78f, -0.38f}, yaw)), 0.3f, 0.16f, 0.42f, red);
+    inst::cube(Vector3Add(pos, rotY({-0.1f, 1.78f, 0.38f}, yaw)), 0.3f, 0.16f, 0.42f, blue);
 }
 
 static void drawStar(float cx, float cy, float r, Color c) {
@@ -265,6 +266,7 @@ int main() {
     // no MSAA on the window itself: the 3D scene is drawn multisampled into its own target (see render.cpp)
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow(1600, 900, "SF Skate");
+    SetWindowFocused();   // take the keyboard from the terminal that launched us (see the first-frame note below)
     SetTargetFPS(60);
     S.init();
 
@@ -272,7 +274,20 @@ int main() {
     double genT0 = GetTime();
     W.generate(loadingScreen);
     TraceLog(LOG_INFO, "SFSKATE: generated in %.2fs", GetTime() - genT0);
-    W.upload();
+    W.upload([] {   // shaders and render targets don't need the world: set them up while its meshes bake
+        if (getenv("SFSKATE_QUALITY")) R.quality = clampf((float)atoi(getenv("SFSKATE_QUALITY")), 0, 2); // test hook
+        double rT0 = GetTime();
+        R.init();
+        inst::init();
+        TraceLog(LOG_INFO, "SFSKATE: renderer init in %.3fs", GetTime() - rT0);
+        WX.init();
+    });
+    // raylib's default render batch has a single vertex buffer, so the HUD's first draw after the 3D scene waited
+    // ~11 ms a frame for the GPU to finish reading it. With 8 buffers in rotation the CPU fills one while the GPU
+    // still reads the others. (Made after inst::init, whose mesh capture switches batches; see inst::setFrameBatch.)
+    rlRenderBatch frameBatch = rlLoadRenderBatch(8, 8192);   // 8192 quads per buffer, as in raylib's default
+    rlSetRenderBatchActive(&frameBatch);
+    inst::setFrameBatch(&frameBatch);
     gMaps[0] = {LoadTextureFromImage(W.mapImg), -1700, -3300, 4};
     gMaps[1] = {LoadTextureFromImage(W.mapImg2), 1000, 8500, 4};
     for (auto& m : gMaps) SetTextureFilter(m.tex, TEXTURE_FILTER_BILINEAR);
@@ -288,9 +303,6 @@ int main() {
     TraceLog(LOG_INFO, "SFSKATE: %d jet skis moored along the shore", (int)JS.skis.size());
     if (getenv("SFSKATE_SKI")) for (auto& s : JS.skis) TraceLog(LOG_INFO, "SFSKATE: ski at %.0f,%.0f yaw %.2f", s.pos.x, s.pos.z, s.yaw); // test hook
 
-    if (getenv("SFSKATE_QUALITY")) R.quality = clampf((float)atoi(getenv("SFSKATE_QUALITY")), 0, 2); // test hook
-    R.init();
-    WX.init();
     BI.init(W);
     if (getenv("SFSKATE_RAIN")) WX.raining = true, WX.rain = WX.wet = 1; // test hook: start in the rain
     const Shader& sh = R.city;
@@ -517,6 +529,7 @@ int main() {
         in.push = IsKeyDown(KEY_W) || IsKeyDown(KEY_UP);
         in.brake = IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN);
         in.tuck = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        if (autotest && getenv("SFSKATE_PUSH")) in.push = true;   // test hook: keep pushing (e.g. up a steep hill)
         if (autotest && getenv("SFSKATE_SKIRIDE")) { in.push = true; in.steer = (atFrame % 200) > 120 ? 0.6f : 0.f; in.tuck = atFrame > 160; }
         in.ollie = IsKeyPressed(KEY_SPACE) && !justStarted;
         in.ollieHeld = IsKeyDown(KEY_SPACE);
@@ -697,9 +710,10 @@ int main() {
         // hilltops, music from a pedal bus rolling by, rain
         {
             Vector3 ear = ride.on ? cam.target : P.pos;
-            static float waterK = 0, waterT = 0;
-            if ((waterT -= dt) <= 0) {   // how much open water is around (sampled a few times a second)
+            static float waterK = 0, waterT = 0, treeK = 0;
+            if ((waterT -= dt) <= 0) {   // how much open water and how many trees are around (sampled a few times a second)
                 waterT = 0.25f;
+                treeK = smooth01(0.5f, 8.f, W.treesNear(ear.x, ear.z));
                 float wsum = 0;
                 for (int k = 0; k < 12; k++) {
                     float a = k * TAU_F / 12, r = (k % 3 + 1) * 28.f;
@@ -707,13 +721,28 @@ int main() {
                 }
                 waterK = clampf(wsum / 7.f, 0, 1);
             }
-            float traffic = 0, music = 0;
+            float traffic = 0, music = 0, talk = 0, bellD = 1e9f;
             for (auto& c : T.cars) {
                 float d2 = sq(c.pos.x - ear.x) + sq(c.pos.z - ear.z);
                 if (d2 > 160 * 160) continue;
-                if (c.type == CT_PEDALBUS) music = std::max(music, 1.f - smooth01(10.f, 75.f, sqrtf(d2)));
+                float d = sqrtf(d2);
+                if (c.type == CT_PEDALBUS) {   // a party on wheels: music and a crowd of riders talking over it
+                    music = std::max(music, 1.f - smooth01(10.f, 75.f, d));
+                    talk += 2.5f * (1.f - smooth01(5.f, 45.f, d));
+                }
+                if (c.type == CT_CABLECAR || c.type == CT_STREETCAR || c.type == CT_LRV) talk += 1.2f * (1.f - smooth01(4.f, 28.f, d));
+                if (c.type == CT_CABLECAR) bellD = std::min(bellD, d);
                 traffic += (0.3f + c.speed / 15.f) / (1.f + d2 / 900.f);
             }
+            // people on the sidewalks: those standing around chatting or on the phone talk the most
+            for (auto& p : T.peds) {
+                float d2 = sq(p.pos.x - ear.x) + sq(p.pos.z - ear.z);
+                if (d2 > 30 * 30 || fabsf(p.pos.y - ear.y) > 12) continue;
+                float k = 1.f - sqrtf(d2) / 30.f;
+                float chatty = p.carry == CARRY_LAPTOP ? 0.1f : p.mode == 3 ? 0.3f : p.mode != 2 ? 0.35f : p.idle == IDLE_CHAT ? 1.6f : p.idle == IDLE_CALL ? 1.f : 0.5f;
+                talk += k * k * chatty;
+            }
+            if (ride.on) talk += 0.8f;   // other passengers on the train
             float above = ear.y - W.terrain(ear.x, ear.z);
             float high = std::max(W.onBridge(ear.x, ear.z) ? 0.75f : 0.f, smooth01(70.f, 200.f, ear.y));
             if (SP.riding) high = std::max(high, smooth01(5.f, 60.f, above) * 0.9f);
@@ -721,8 +750,20 @@ int main() {
             bool inside = W.houseAt(ear.x, ear.z, ear.y) >= 0;
             float muffle = inside ? 0.35f : 1.f;
             float quiet = title ? 0.f : 1.f;
-            S.setAmbience(clampf(traffic / 3.5f, 0, 0.8f) * muffle * quiet, waterK * 0.9f * muffle * quiet, seal * quiet, high * 0.8f * quiet,
-                          music * 0.8f * muffle * quiet, WX.rain * (inside ? 0.4f : 0.85f) * quiet);
+            float dark = smooth01(0.3f, 0.8f, sky.night), dry = 1.f - smooth01(0.1f, 0.6f, WX.rain);
+            Sfx::Ambience am;
+            am.traffic = clampf(traffic / 3.5f, 0, 0.8f) * muffle * quiet;
+            am.waves = waterK * 0.9f * muffle * quiet;
+            am.sealions = seal * quiet;
+            am.windHigh = high * 0.8f * quiet;
+            am.music = music * 0.8f * muffle * quiet;
+            am.rain = WX.rain * (inside ? 0.4f : 0.85f) * quiet;
+            am.chatter = clampf(talk / 2.5f, 0, 0.9f) * muffle * quiet;
+            am.voices = clampf(talk / 5.f, 0, 1);
+            am.leaves = treeK * (0.55f + 0.45f * std::max(high, WX.rain)) * muffle * quiet;
+            am.birds = treeK * (1.f - dark) * dry * 0.8f * muffle * quiet;
+            am.crickets = treeK * dark * dry * 0.7f * muffle * quiet;
+            S.setAmbience(am);
             // now and then a gull cries somewhere overhead
             static float gullT = 3;
             if ((gullT -= dt) <= 0) {
@@ -732,6 +773,22 @@ int main() {
                         S.play(S.gull, clampf(1.1f - Vector3Distance(b.pos, ear) / 90.f, 0.15f, 0.7f) * quiet, 0.9f + GetRandomValue(0, 25) / 100.f);
                         break;
                     }
+            }
+            // pigeons pecking around a plaza coo now and then
+            static float cooT = 2;
+            if ((cooT -= dt) <= 0) {
+                cooT = 1.5f + GetRandomValue(0, 40) / 10.f;
+                for (auto& b : BI.birds)
+                    if (!b.gull && b.state == 0 && Vector3Distance(b.pos, ear) < 25) {
+                        S.play(S.coo, clampf(1.f - Vector3Distance(b.pos, ear) / 25.f, 0.1f, 0.6f) * muffle * quiet, 0.92f + GetRandomValue(0, 16) / 100.f);
+                        break;
+                    }
+            }
+            // a cable car coming up the hill rings its bell
+            static float bellT = 3;
+            if ((bellT -= dt) <= 0) {
+                bellT = 4.f + GetRandomValue(0, 50) / 10.f;
+                if (bellD < 80) S.play(S.bell, clampf(1.f - bellD / 80.f, 0.1f, 0.7f) * muffle * quiet, 0.97f + GetRandomValue(0, 6) / 100.f);
             }
         }
 
@@ -845,21 +902,36 @@ int main() {
                 float lift = std::min(1.7f, 0.9f + (0.6f - best) * 1.6f);
                 desired.y = std::max(desired.y, std::min(P.pos.y + lift, cl - 0.25f));
             }
-            float gy = W.terrain(desired.x, desired.z) + 0.4f;
+            // keep the hill out of the shot: lift the camera until its sightline to the skater clears the ground
+            // (climbing a slope that steepens, the hill otherwise rises between the two and swallows the skater)
+            for (int i = 1; i <= 16; i++) {
+                float t = i / 16.f;
+                float gx = lerpf(target.x, desired.x, t), gz = lerpf(target.z, desired.z, t);
+                float need = W.terrain(gx, gz) + 0.5f;
+                float lineY = lerpf(target.y, desired.y, t);
+                if (lineY < need) desired.y = target.y + (need - target.y) / t;
+            }
+            float gy = W.terrain(desired.x, desired.z) + 0.6f;
             if (desired.y < gy) desired.y = gy;
             camPos = Vector3Lerp(camPos, desired, 1 - expf(-dt * 12));
             if (best < 0.99f) camPos = Vector3Lerp(camPos, desired, 0.5f);
+            // the smoothing lags behind a rising hill: never let the camera itself end up inside it
+            camPos.y = std::max(camPos.y, W.terrain(camPos.x, camPos.z) + 0.6f);
             // a hard landing dips the camera and punches the field of view, then it settles
             if (P.landShake > 0) { landKick = std::max(landKick, P.landShake); P.landShake = 0; }
             landKick *= expf(-dt * 6.5f);
             cam.position = camPos;
-            cam.position.y -= landKick * 0.45f;
+            cam.position.y = std::max(cam.position.y - landKick * 0.45f, W.terrain(camPos.x, camPos.z) + 0.4f);
             cam.target = target;
             cam.fovy = lerpf(cam.fovy, 62 + clampf(spd, 0, 30) * 0.6f, 1 - expf(-dt * 3)) + landKick * 5.f;
         }
         if (autotest && getenv("SFSKATE_CAM")) { // test hook: free camera "x,y,z,tx,ty,tz"
             float v[6];
             if (sscanf(getenv("SFSKATE_CAM"), "%f,%f,%f,%f,%f,%f", v, v + 1, v + 2, v + 3, v + 4, v + 5) == 6) { cam.position = {v[0], v[1], v[2]}; cam.target = {v[3], v[4], v[5]}; }
+        }
+        if (autotest && getenv("SFSKATE_SIDE")) { // test hook: watch the skater side-on, close up (e.g. how the board sits on a slope)
+            cam.position = {P.pos.x - sinf(P.yaw) * 3.2f, P.pos.y + 0.9f, P.pos.z + cosf(P.yaw) * 3.2f};
+            cam.target = {P.pos.x, P.pos.y + 0.7f, P.pos.z};
         }
         if (autotest && getenv("SFSKATE_PET")) { // test hook: look at the first dog walker in the city ("cat": the first cat)
             bool cat = getenv("SFSKATE_PET")[0] == 'c';
@@ -869,6 +941,44 @@ int main() {
             float dd = cat ? 2.6f : 4.5f;
             cam.position = {at.x + cosf(yw + 1.1f) * dd, at.y + (cat ? 1.3f : 2.0f), at.z + sinf(yw + 1.1f) * dd};
             cam.target = {at.x + cosf(yw) * (cat ? 0 : 0.5f), at.y + (cat ? 0.2f : 0.6f), at.z + sinf(yw) * (cat ? 0 : 0.5f)};
+        }
+        if (autotest && getenv("SFSKATE_DODGE")) { // test hook: a walker near the skater hops ("h"), dives ("d") or backs off ("b"); shots along the way
+            static int di = -1;
+            static Vector3 camAt{};
+            static Vector2 away{};
+            char kc = getenv("SFSKATE_DODGE")[0];
+            if (atFrame == 100) {
+                float bd = 1e9f;
+                for (int i = 0; i < (int)T.peds.size(); i++) {
+                    const Ped& p = T.peds[i];
+                    float d = Vector3Distance(p.pos, P.pos);
+                    if (p.mode == 0 && p.knock <= 0 && d < bd) { bd = d; di = i; }
+                }
+                if (di >= 0) {
+                    Ped& p = T.peds[di];
+                    away = {-sinf(p.yaw), cosf(p.yaw)};   // off to their left
+                    Traffic::startEvade(p, kc == 'd' ? EV_DIVE : kc == 'b' ? EV_BACK : EV_HOP, away, kc == 'd' ? 2.6f : 1.8f);
+                    camAt = p.pos;
+                }
+            }
+            if (di >= 0 && atFrame >= 100) {
+                Vector2 fw = {cosf(atan2f(away.y, away.x) - PI / 2), sinf(atan2f(away.y, away.x) - PI / 2)};
+                cam.position = {camAt.x + away.x * 1.3f + fw.x * 5.5f, camAt.y + 1.6f, camAt.z + away.y * 1.3f + fw.y * 5.5f};
+                cam.target = {camAt.x + away.x * 1.3f, camAt.y + 0.7f, camAt.z + away.y * 1.3f};
+                cam.fovy = 55;
+                int f = atFrame - 100;
+                if (f == 8 || f == 18 || f == 30 || f == 70 || f == 140 || f == 165) TakeScreenshot(TextFormat("dodge_%c_%03d.png", kc, f));
+            }
+        }
+        if (autotest && getenv("SFSKATE_SIT")) { // test hook: someone on a laptop or sitting; k%3: 0 bench, 1 lawn, 2 walking with a laptop
+            int k = atoi(getenv("SFSKATE_SIT")), seen = 0;
+            for (auto& p : T.peds) {
+                bool ok = k % 3 == 0 ? p.mode == 3 && !p.grass : k % 3 == 1 ? p.mode == 3 && p.grass : p.mode == 0 && p.carry == CARRY_LAPTOP;
+                if (!ok || seen++ < k / 3) continue;
+                cam.position = {p.pos.x + cosf(p.yaw + 0.6f) * 2.6f, p.pos.y + 1.6f, p.pos.z + sinf(p.yaw + 0.6f) * 2.6f};
+                cam.target = {p.pos.x, p.pos.y + (p.mode == 3 ? 0.4f : 1.0f), p.pos.z};
+                break;
+            }
         }
         if (autotest && getenv("SFSKATE_PED")) { // test hook: look at a pedestrian up close, "k" picks which (odd: one standing still)
             int k = atoi(getenv("SFSKATE_PED")), seen = 0;
@@ -895,6 +1005,7 @@ int main() {
                     break;
                 }
         Vector3 camFwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
+        T.view = cam.position;   // people near the camera get the full update next frame, even far from the skater
         gMapFocus = ride.on ? cam.target : P.pos;
 
         // ---------------- shader uniforms
@@ -902,6 +1013,24 @@ int main() {
         look.fogH = heavyFog ? 70.f : 300.f - 120.f * rainK;
         look.wet = WX.wet;
         R.setLook(look);
+
+        // house rooms near the camera: a millisecond or two of meshing a frame, nearest first
+        {
+            InteriorStats is = W.updateInteriors(cam.position, 1.5e-3);
+            static int built = 0, frames = 0, sinceTp = -1;
+            static double sum = 0, mx = 0;
+            if (is.built) { built += is.built; frames++; sum += is.ms; mx = std::max(mx, is.ms); }
+            if (autotest) {
+                if (atFrame > 61 && (atFrame - 62) % 150 == 0) sinceTp = 0;   // just teleported
+                if (sinceTp >= 0 && is.missingNear == 0) {
+                    TraceLog(LOG_INFO, "SFSKATE: rooms within 30 m built %d frames after the teleport", sinceTp);
+                    sinceTp = -1;
+                } else if (sinceTp >= 0) sinceTp++;
+                if (atFrame > 61 && (atFrame - 62) % 150 == 140)
+                    TraceLog(LOG_INFO, "SFSKATE: rooms cached %d, built %d in %d frames: %.2f ms a frame on average, %.2f max",
+                             is.cached, built, frames, frames ? sum / frames : 0.0, mx);
+            }
+        }
 
         // ---------------- draw
         BeginDrawing();
@@ -931,6 +1060,7 @@ int main() {
                 if (CH.on && !ride.on)
                     for (auto& pc : CH.parked)
                         if (Vector3Distance(pc.pos, cam.position) < 230) drawCruiser(pc.pos, pc.yaw, now);
+                inst::flush(R.depth);   // people, cars and cops are queued as instances: draw them now
                 EndShaderMode();
                 R.endCascade();
             }
@@ -1017,8 +1147,11 @@ int main() {
         rlSetClipPlanes(250.0, 40000.0);
         BeginMode3D(cam);
         W.drawPass(cam, 250, 40000, R.cityFar, true);
+        R.opaque(false);   // the bay is see-through: blended over the floor beneath it
         W.drawWater(R.cityFar, true);
+        R.opaque(true);
         drawMovers(false);
+        inst::flush(R.cityFar);
         EndShaderMode();
         EndMode3D();
         rlDrawRenderBatchActive();
@@ -1028,7 +1161,9 @@ int main() {
         BeginMode3D(cam);
         R.staticNormals(true);
         W.drawPass(cam, 0, 270, sh, false);
+        R.opaque(false);   // the bay is see-through: blended over the floor beneath it
         W.drawWater(sh, false);
+        R.opaque(true);
         R.staticNormals(false);
         drawMovers(true);
         if (!title && !ride.on && !JS.riding && !SP.riding) P.draw();
@@ -1055,6 +1190,7 @@ int main() {
                 else drawCruiser(cp.pos, cp.yaw, now);
             }
         }
+        inst::flush(sh);
         EndShaderMode();
         // translucent bits, drawn with the default shader so they blend (and leave the bloom mask alone)
         R.opaque(false);
@@ -1295,9 +1431,21 @@ int main() {
             DrawFPS(sw - 100, sh2 - 30);
         }
         EndDrawing();
+        static bool firstFrame = true;
+        if (firstFrame) {
+            firstFrame = false;
+            TraceLog(LOG_INFO, "SFSKATE: first frame done %.2fs after InitWindow", GetTime());
+            // launched from a terminal, macOS leaves the keyboard with the terminal: the first arrow press
+            // on the start menu went there instead of the game. Take the keyboard once the window is up.
+            if (!autotest) SetWindowFocused();
+        }
     }
     if (autotest) TraceLog(LOG_INFO, "SFSKATE: average fps %.1f", atFpsN ? atFpsSum / atFpsN : 0.0);
     S.shutdown();
+    W.freeInteriors();
+    inst::setFrameBatch(nullptr);
+    rlSetRenderBatchActive(nullptr);   // back to raylib's own batch, which CloseWindow frees
+    rlUnloadRenderBatch(frameBatch);
     CloseWindow();
     return 0;
 }

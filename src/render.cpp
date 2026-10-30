@@ -5,15 +5,37 @@
 
 const char* Renderer::QUALITY_NAMES[3] = {"Low", "Medium", "High"};
 
+// Static chunks (chunkOrg.w = 1) bring their position packed: whole 1/1024 m steps from chunkOrg, x and z in the
+// low 21 bits of each word, y split over the top 11 bits of both (see bakeChunk). Instanced movers (instOn = 1, see
+// instance.cpp) bring a unit mesh plus the rows of a per-instance world matrix and a color. Everything else: vertexPosition.
+#define PACKED_POS R"(
+in vec3 vertexPosition;
+layout(location = 10) in uvec2 vertexPacked;
+layout(location = 11) in vec4 instRow0;
+layout(location = 12) in vec4 instRow1;
+layout(location = 13) in vec4 instRow2;
+uniform vec4 chunkOrg = vec4(0.0);
+uniform int instOn = 0;
+vec3 chunkPos() {
+    if (instOn == 1) {
+        vec4 p = vec4(vertexPosition, 1.0);
+        return vec3(dot(instRow0, p), dot(instRow1, p), dot(instRow2, p));
+    }
+    if (chunkOrg.w < 0.5) return vertexPosition;
+    uvec3 q = uvec3(vertexPacked.x & 0x1fffffu, (vertexPacked.x >> 21) | ((vertexPacked.y >> 21) << 11), vertexPacked.y & 0x1fffffu);
+    return chunkOrg.xyz + vec3(q) * (1.0 / 1024.0);
+}
+)"
+
 // ---------------------------------------------------------------- city shader
-// Static meshes bring a normal (w = 1: given explicitly, use as is), the bare ground height under the vertex
-// (in vertexTexCoord.x) and the material code in the color alpha. Immediate-mode models only bring position and
-// color, so they shade with flat face normals from screen-space derivatives (useVN = 0).
+// Static meshes bring a normal (w = 1: given explicitly, use as is), the height above the bare ground under the
+// vertex (in vertexTexCoord.x) and the material code in the color alpha. Immediate-mode and instanced models only bring
+// position and color, so they shade with flat face normals from screen-space derivatives (useVN = 0).
 // Built twice: FAR 0 for the near pass, FAR 1 for everything past 250 m, which is most of the vertices on screen
 // and needs neither normals, shadows nor fine surface detail (fewer vertex outputs is what matters on a tiled GPU).
-static const char* CITY_VS = R"(
-in vec3 vertexPosition;
+static const char* CITY_VS = PACKED_POS R"(
 in vec4 vertexColor;
+layout(location = 14) in vec4 instCol;
 uniform mat4 mvp;
 out vec3 wPos;
 out vec4 vCol;
@@ -23,12 +45,12 @@ in vec4 vertexNormal;
 out vec4 vNH;   // normal (length 2 when given explicitly), height above the bare ground
 #endif
 void main() {
-    wPos = vertexPosition;
-    vCol = vertexColor;
+    wPos = chunkPos();
+    vCol = instOn == 1 ? instCol : vertexColor;
 #if !FAR
-    vNH = vec4(vertexNormal.xyz * (vertexNormal.w > 0.5 ? 2.0 : 1.0), vertexPosition.y - vertexTexCoord.x);
+    vNH = vec4(vertexNormal.xyz * (vertexNormal.w > 0.5 ? 2.0 : 1.0), vertexTexCoord.x);
 #endif
-    gl_Position = mvp * vec4(vertexPosition, 1.0);
+    gl_Position = mvp * vec4(wPos, 1.0);
 })";
 
 static const char* CITY_FS = R"(
@@ -243,33 +265,58 @@ void main() {
                 specK *= detail;
             }
         }
-    } else if (m == 3) {                 // water
+    } else if (m == 3) {                 // water: see-through in the shallows, a mirror for the sky at a low angle
         vec2 p = wPos.xz;
         float t = time;
-        float fade = clamp(1.0 - dist / 1800.0, 0.15, 1.0);
-        float a = p.x * 0.11 + t * 1.1, b = p.x * 0.23 + p.y * 0.17 - t * 1.6, c = p.y * 0.13 + t * 0.9, d = p.x * 0.6 - p.y * 0.5 + t * 2.5;
-        float dx = 0.35 * 0.11 * cos(a) + 0.18 * 0.23 * cos(b) + 0.08 * 0.6 * cos(d);
-        float dz = 0.18 * 0.17 * cos(b) + 0.25 * 0.13 * cos(c) - 0.08 * 0.5 * cos(d);
-        if (wet > 0.0) {                 // rain rings on the surface
-            dx += wet * 0.05 * (vnoise(p * 3.0 + t * 7.0) - 0.5);
-            dz += wet * 0.05 * (vnoise(p * 3.0 - t * 7.0 + 5.0) - 0.5);
+        float fw = length(fwidth(p));   // metres per pixel: drop the waves too small to show, instead of letting them sparkle
+        // swell rolling in through the Golden Gate, wind chop across it, and small ripples on top
+        const vec4 W[6] = vec4[6](vec4(0.94, 0.34, 0.045, 0.9), vec4(0.70, -0.71, 0.09, 0.55), vec4(0.98, -0.2, 0.16, 0.38),
+                                  vec4(-0.45, 0.89, 0.23, 0.26), vec4(0.31, 0.95, 0.41, 0.17), vec4(-0.87, -0.5, 0.67, 0.11));
+        vec2 g = vec2(0.0);
+        float crest = 0.0;
+        for (int i = 0; i < 6; i++) {
+            vec2 d = W[i].xy;
+            float k = W[i].z, ph = dot(d, p) * k + t * sqrt(9.8 * k) * 0.55 + float(i) * 1.7;
+            float vis = clamp(1.6 - fw * k * 2.5, 0.0, 1.0);
+            g += d * (W[i].w * k * cos(ph)) * vis;
+            crest += W[i].w * sin(ph) * vis;
         }
-        N = normalize(vec3(-dx * fade * 3.0, 1.0, -dz * fade * 3.0));
-        float fres = 0.04 + 0.96 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
-        vec3 deep = base * (ambCol * 1.2 + sunCol * 0.35);
-        vec3 refl = mix(fogCol, skyCol, 0.4);
-        vec3 col = mix(deep, refl, clamp(fres * 0.9, 0.0, 0.85));
-        vec3 H = normalize(sunDir + V);
+        float near = clamp(1.0 - fw * 3.0, 0.0, 1.0);
+        vec2 q = p * 1.6 + vec2(t * 0.9, t * 0.35);
+        g += vec2(vnoise(q + vec2(0.05, 0.0)) - vnoise(q - vec2(0.05, 0.0)), vnoise(q + vec2(0.0, 0.05)) - vnoise(q - vec2(0.0, 0.05))) * 1.6 * near;
+        if (wet > 0.0) {                 // rain rings on the surface
+            g.x += wet * 0.05 * (vnoise(p * 3.0 + t * 7.0) - 0.5);
+            g.y += wet * 0.05 * (vnoise(p * 3.0 - t * 7.0 + 5.0) - 0.5);
+        }
+        // glassy slicks where the wind drops, and gustier patches that are rougher
+        float slick = smoothstep(0.55, 0.78, vnoise(p * 0.0035 + vec2(t * 0.004, 0.0)));
+        float gust = smoothstep(0.4, 0.8, vnoise(p * 0.0021 + vec2(-t * 0.006, 3.0)));
+        g *= (1.0 - 0.65 * slick) * (0.85 + 0.35 * gust);
+        N = normalize(vec3(-g.x, 1.0, -g.y));
+        float fres = 0.02 + 0.98 * pow(1.0 - max(dot(N, V), 0.0), 5.0);
+        vec3 R = reflect(-V, N);
+        R.y = abs(R.y);
+        vec3 env = mix(fogColor(V), skyCol, smoothstep(0.02, 0.45, R.y));   // the sky, hazy at the horizon
+        vec3 deep = base * 0.62 * (ambCol * 1.2 + sunCol * 0.35);
+        vec3 col = mix(deep, env, clamp(fres, 0.0, 0.9));
 #if FAR
         float sh = 1.0;
 #else
         float sh = dist < 260.0 ? sunShadow(wPos, vec3(0.0, 1.0, 0.0), dist) : 1.0;
 #endif
-        vec3 spec = sunCol * pow(max(dot(N, H), 0.0), 220.0) * 2.2 * sh * (1.0 - wet * 0.7);
+        // sun (or moon) on the water: a tight glint up close that spreads into a glitter path further out
+        float sp = mix(900.0, 120.0, smoothstep(30.0, 1500.0, dist)) * (1.0 + slick);
+        vec3 spec = sunCol * (pow(max(dot(R, sunDir), 0.0), sp) * 3.0 + pow(max(dot(R, sunDir), 0.0), 12.0) * 0.05) * sh * (1.0 - wet * 0.7);
         col += spec;
+        // whitecaps: the bay is windy, so the odd crest breaks white
+        float cap = smoothstep(1.0, 1.5, crest + gust * 0.4) * smoothstep(0.55, 0.85, vnoise(p * 0.3 + vec2(t * 0.5, t * 0.2))) * (1.0 - slick);
+        cap *= clamp(1.0 - dist / 900.0, 0.0, 1.0) * (1.0 - wet * 0.3);
+        col = mix(col, vec3(0.9, 0.93, 0.94) * (ambCol * 1.1 + sunCol * 0.75 * sh), cap * 0.8);
         float f = fogAmount(dist);
-        float bl = clamp(dot(spec, vec3(0.33)) * 0.5, 0.0, 1.0) * (1.0 - f);
-        finalColor = vec4(mix(col, fogColor(V), f), 1.0 - bl);
+        // how much you see through: most looking straight down in the shallows, a mirror at a low angle, opaque far off
+        float a = mix(0.42 + 0.58 * fres, 1.0, smoothstep(220.0, 650.0, dist));
+        a = max(a, cap * 0.9);
+        finalColor = vec4(mix(col, fogColor(V), f), a);
         return;
     } else if (m == 4) {                 // lights
         emis = base * night * 1.3;
@@ -323,6 +370,23 @@ void main() {
     }
     col += emis;
     bloom += clamp(dot(emis, vec3(0.33)) * 0.8, 0.0, 0.8);
+    // the bay floor, seen through the water: sunlight rippling over the shallows, foam washing up and down the
+    // beach, and the water's own green-grey closing in with depth
+    if (m == 5 && wPos.y < 0.35) {
+        float depth = max(-wPos.y, 0.0);
+        vec2 p = wPos.xz;
+        float fade = clamp(1.0 - dist / 700.0, 0.0, 1.0);
+        float c1 = vnoise(p * 0.7 + vec2(time * 0.35, time * 0.2)), c2 = vnoise(p * 0.9 - vec2(time * 0.25, -time * 0.3) + 7.0);
+        float caustic = pow(1.0 - abs(c1 - c2), 10.0);
+        col += sunCol * caustic * 0.45 * smoothstep(0.05, 0.4, depth) * exp(-depth * 0.55) * sh * fade;
+        float surge = -0.12 + 0.2 * sin(time * 0.8 + vnoise(p * 0.04) * 9.0);   // the edge of the water running up and back
+        float lace = smoothstep(0.35, 0.65, vnoise(p * 1.3 + vec2(time * 0.3, 0.0)));
+        float foam = (1.0 - smoothstep(0.0, 0.08 + 0.12 * lace, abs(wPos.y - surge))) * (0.55 + 0.45 * lace) * clamp(1.0 - dist / 900.0, 0.0, 1.0);
+        if (wPos.y > surge && wPos.y < surge + 0.35) col *= 0.82;             // wet sand the wash just left
+        col = mix(col, vec3(0.92, 0.95, 0.95) * light, foam * 0.8);
+        vec3 deepLit = vec3(0.075, 0.2, 0.21) * (ambCol * 1.2 + sunCol * 0.35);
+        col = mix(col, deepLit, 1.0 - exp(-depth * 0.42));
+    }
     float f = fogAmount(dist);
     if (length(emis) > 0.05) f *= 0.75;   // lights shine through the fog a bit
     col = mix(col, fogColor(V), f);
@@ -330,10 +394,9 @@ void main() {
 })";
 
 // shadow casters only need depth
-static const char* DEPTH_VS = R"(#version 330
-in vec3 vertexPosition;
+static const char* DEPTH_VS = "#version 330\n" PACKED_POS R"(
 uniform mat4 mvp;
-void main() { gl_Position = mvp * vec4(vertexPosition, 1.0); })";
+void main() { gl_Position = mvp * vec4(chunkPos(), 1.0); })";
 static const char* DEPTH_FS = R"(#version 330
 out vec4 finalColor;
 void main() { finalColor = vec4(1.0); })";

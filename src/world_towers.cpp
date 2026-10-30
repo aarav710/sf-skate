@@ -62,6 +62,8 @@ void World::addTower(float x0, float z0, float x1, float z1, float Hmax, RNG& r)
             m.box({xa, ya, za}, {xb, yb, zb}, c, 1.f);
         }
     };
+    // a belt spans the whole floor plan, so one that tops out at a roof must stop just short of it (0.1 m),
+    // or the two coplanar tops z-fight and the roof flickers between colors when seen from afar
     auto belt = [&](float ax0, float az0, float ax1, float az1, float y, float h, float over, Color c) {
         m.box({ax0 - over, y, az0 - over}, {ax1 + over, y + h, az1 + over}, c, 1.f);
     };
@@ -104,7 +106,7 @@ void World::addTower(float x0, float z0, float x1, float z1, float Hmax, RNG& r)
         m.box({x1, baseY - 0.2f, z0 + 0.5f}, {x1 + 0.12f, baseY + 4.2f, z1 - 0.5f}, glassBand, 1.f);
         belt(x0, z0, x1, z1, baseY + 4.2f, 0.4f, 0.2f, scaleC(podC, 0.8f));
         glowBand(x0 + 0.5f, z0 + 0.5f, x1 - 0.5f, z1 - 0.5f, baseY + 4.0f, col(255, 226, 170)); // warm lobby glow along the street
-        belt(x0, z0, x1, z1, y0 - 0.9f, 0.9f, 0.55f, scaleC(podC, 0.88f));
+        belt(x0, z0, x1, z1, y0 - 0.9f, 0.8f, 0.55f, scaleC(podC, 0.88f));
         piers(x0, z0, x1, z1, baseY + 4.6f, y0 - 0.9f, scaleC(podC, 1.07f), 3.f, 0.2f, 0.25f);
         // an entrance canopy on the long side
         bool alongX = W >= D;
@@ -205,7 +207,7 @@ void World::addTower(float x0, float z0, float x1, float z1, float Hmax, RNG& r)
         Color s = tr.chance(0.5f) ? col(218, 218, 212) : col(196, 200, 204);
         float sx0 = tx0, sx1 = tx1, sz0 = tz0, sz1 = tz1;
         box(sx0, sz0, sx1, sz1, y0, top, mat(s, M_OFFICE), col(120, 122, 124), true);
-        belt(sx0, sz0, sx1, sz1, top - 1.2f, 1.2f, 0.3f, scaleC(s, 0.82f));
+        belt(sx0, sz0, sx1, sz1, top - 1.2f, 1.1f, 0.3f, scaleC(s, 0.82f));
         glowBand(sx0, sz0, sx1, sz1, top - 1.35f, col(255, 255, 240));
         // vertical louver fins on the two short sides
         piers(sx0, sz0, sx1, sz1, y0 + 4.f, top - 1.2f, scaleC(s, 0.9f), 6.f, 0.14f, 0.35f);
@@ -248,7 +250,7 @@ void World::addTower(float x0, float z0, float x1, float z1, float Hmax, RNG& r)
         corners(bx0, bz0, bx1, bz1, y0, yt, trim, 1.1f);
         for (float yy = y0 + (yt - y0) * 0.33f; yy < yt - 6.f; yy += (yt - y0) * 0.33f) belt(bx0, bz0, bx1, bz1, yy, 0.7f, 0.25f, trim);
         belt(bx0, bz0, bx1, bz1, yt - 2.4f, 1.0f, 0.5f, trim);
-        belt(bx0, bz0, bx1, bz1, yt - 1.0f, 1.0f, 1.0f, scaleC(trim, 0.88f));
+        belt(bx0, bz0, bx1, bz1, yt - 1.0f, 0.9f, 1.0f, scaleC(trim, 0.88f));
         for (float u = ceilf((bx0 + 1.f) / 3.f) * 3.f; u < bx1 - 1.f; u += 3.f) { // cornice brackets
             m.box({u - 0.18f, yt - 2.4f, bz0 - 0.9f}, {u + 0.18f, yt - 1.0f, bz0 - 0.1f}, trim, 1.f);
             m.box({u - 0.18f, yt - 2.4f, bz1 + 0.1f}, {u + 0.18f, yt - 1.0f, bz1 + 0.9f}, trim, 1.f);

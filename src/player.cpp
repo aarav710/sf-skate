@@ -7,7 +7,7 @@ static const Color C_RED = {255, 80, 70, 255};
 void Player::spawn(Vector3 p, float y) {
     pos = p; yaw = y; speed = 0; vel = {0, 0, 0}; vy = 0; rideVy = 0;
     state = RIDE; flipT = shoveT = -1; flipAngle = shoveAngle = 0; combo.clear(); comboPts = 0;
-    rail = -1; splashed = false; bailT = 0;
+    rail = -1; splashed = false; bailT = 0; pitch = 0;
     safePos = p; safeYaw = y;
 }
 
@@ -111,6 +111,7 @@ void Player::ride(float dt, const Input& in, World& w) {
     float hF = w.ground(pos.x + f.x * 0.7f, pos.z + f.z * 0.7f, pos.y + 0.2f);
     float hB = w.ground(pos.x - f.x * 0.7f, pos.z - f.z * 0.7f, pos.y + 0.2f);
     float slope = clampf((hF - hB) / 1.4f, -1.5f, 1.5f);
+    pitch = lerpf(pitch, atanf(slope), 1 - expf(-dt * 14));
     float acc = -9.8f * slope / sqrtf(1 + slope * slope);
     bool pushing = in.push && speed < 17.f && speed > -1.f;
     if (pushing) acc += 8.0f;
@@ -174,11 +175,15 @@ void Player::ride(float dt, const Input& in, World& w) {
     if (in.ollie && fabsf(speed) < 40) {
         if (speed < 0) { yaw = wrapPi(yaw + PI); speed = -speed; } // pop out of fakie rolling
         ollie(7.4f + clampf(fabsf(speed) * 0.03f, 0, 0.6f));
+        // going uphill, pop off the slope rather than off flat ground: keep the climb the board already had,
+        // or a fast ollie up a steep hill leaves the skater inside the rising hillside
+        vy += std::max(rideVy, 0.f);
     }
 }
 
 void Player::air(float dt, const Input& in, World& w) {
     airTime += dt;
+    pitch = lerpf(pitch, 0.f, 1 - expf(-dt * 3));
     float prevY = pos.y;
     vy -= GRAVITY * dt;
     pos.x += vel.x * dt;
@@ -266,6 +271,7 @@ void Player::air(float dt, const Input& in, World& w) {
     // landing
     float g = w.ground(pos.x, pos.z, std::max(prevY, pos.y));
     if (pos.y <= g && vy <= 0) land(w, g);
+    else if (pos.y < g) pos.y = g;   // still rising into a steeper hillside: skim along it rather than through it
 }
 
 void Player::land(World& w, float g) {
@@ -330,6 +336,7 @@ void Player::grind(float dt, const Input& in, World& w) {
     float Lxz = sqrtf(d.x * d.x + d.z * d.z);
     Vector2 dir = {d.x / Lxz, d.z / Lxz};
     float slope = d.y / Lxz * railDir;
+    pitch = lerpf(pitch, atanf(slope), 1 - expf(-dt * 14));
     speed += (-9.8f * slope * 0.8f - 0.7f) * dt;
     comboPts += 300 * dt;
     crouch = lerpf(crouch, 0.5f, 1 - expf(-dt * 8));
@@ -459,6 +466,7 @@ void Player::draw() const {
     float lift = (flipT >= 0 || shoveT >= 0) ? 0.25f * sinf(PI * clampf((flipT >= 0 ? flipT / flipDur : shoveT / shoveDur), 0, 1)) : 0.f;
     // board (with flip / shove-it rotation)
     rlPushMatrix();
+    rlRotatef(pitch * RAD2DEG, 0, 0, 1);   // the board lies along the slope; the rider stays upright over it
     rlTranslatef(0, 0.1f + lift * 0.4f, 0);
     rlRotatef(shoveAngle, 0, 1, 0);
     rlRotatef(flipAngle, 1, 0, 0);
@@ -477,8 +485,25 @@ void Player::draw() const {
         float ph = sinf(pushPhase);
         footB = {lerpf(-0.22f, -0.35f + ph * 0.35f, pushAmt), lerpf(footY, 0.02f + std::max(0.f, -ph) * 0.12f, pushAmt), lerpf(0.f, 0.18f, pushAmt)};
     }
-    Vector3 kneeF = {(hipF.x + footF.x) / 2 + 0.02f, (hipY + footF.y) / 2 + 0.03f, 0.1f + 0.18f * c};
-    Vector3 kneeB = {(hipB.x + footB.x) / 2 - 0.02f, (hipY + footB.y) / 2 + 0.03f, 0.1f + 0.18f * c};
+    // on a slope the feet ride up or down with the board (and the pushing foot with the ground)
+    float tp = tanf(pitch);
+    footF.y += footF.x * tp;
+    footB.y += footB.x * tp;
+    // legs keep their length: a foot that would land out of reach (the pushing foot on a steep climb reached a
+    // metre below the hip) stops at full stretch, and the knee bends forward by however much the leg is folded
+    auto legIK = [](Vector3 hip, Vector3& foot, float side) {
+        const float SEG = 0.43f;   // thigh and shin
+        Vector3 d = Vector3Subtract(foot, hip);
+        float dist = Vector3Length(d);
+        if (dist > 2 * SEG - 0.005f) { d = Vector3Scale(d, (2 * SEG - 0.005f) / dist); dist = 2 * SEG - 0.005f; foot = Vector3Add(hip, d); }
+        Vector3 axis = Vector3Scale(d, 1.f / std::max(dist, 1e-4f));
+        Vector3 hint = {0.08f * side, 0.f, 1.f};   // knees point out the front of the rider
+        Vector3 bend = Vector3Normalize(Vector3Subtract(hint, Vector3Scale(axis, Vector3DotProduct(hint, axis))));
+        float h = sqrtf(std::max(0.f, SEG * SEG - dist * dist * 0.25f));
+        return Vector3Add(Vector3Add(hip, Vector3Scale(d, 0.5f)), Vector3Scale(bend, h));
+    };
+    Vector3 kneeF = legIK(hipF, footF, 1.f);
+    Vector3 kneeB = legIK(hipB, footB, -1.f);
     limb(footF, kneeF, 0.065f, pants); limb(kneeF, hipF, 0.075f, pants);
     limb(footB, kneeB, 0.065f, pants); limb(kneeB, hipB, 0.075f, pants);
     DrawCube({footF.x, footF.y + 0.02f, footF.z}, 0.12f, 0.06f, 0.26f, shoe);

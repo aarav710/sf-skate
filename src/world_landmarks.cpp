@@ -204,7 +204,10 @@ void World::buildGoldenGate() {
             addCarToMesh(v, CT_SEDAN, c, {px, terrain(px, pz) + 0.06f, pz}, PI / 2, 0);
             addPlat({px - 0.92f, px + 0.92f, pz - 2.25f, pz + 2.25f, terrain(px, pz) + 1.4f, terrain(px, pz) + 1.4f, y - 1, 0, PK_CAR});
         }
-        addRailObj({X - 40, y + 1.0f, -2377}, {X + 10, y + 1.0f, -2377}, "Vista Point Rail");
+        // the overlook rail along the plaza's south edge, in two pieces either side of the bridge road and its
+        // sidewalks (X +- 14), so cars, walkers and skaters coming off the bridge pass between them
+        addRailObj({X - 42, y + 1.0f, -2377}, {X - 17, y + 1.0f, -2377}, "Vista Point Rail");
+        addRailObj({X + 17, y + 1.0f, -2377}, {X + 42, y + 1.0f, -2377}, "Vista Point Rail");
     }
     Path P;
     P.p = {{X, gz(4)}, {X, -2410}};
@@ -475,17 +478,7 @@ void World::buildLandmarks() {
             m.box({t.x - 0.7f, y, t.y - 0.7f}, {t.x + 0.7f, y + 40, t.y + 0.7f}, col(80, 80, 85)),
             m.box({t.x - 3, y + 38, t.y - 3}, {t.x + 3, y + 42, t.y + 3}, col(255, 250, 220, M_EMISSIVE));
     }
-    // --- Alcatraz
-    {
-        float cx = 300, cz = -1905, y = terrain(cx, cz);
-        MeshBuilder& m = mb(cx, cz);
-        m.box({cx - 40, y - 2, cz - 12}, {cx + 40, y + 13, cz + 12}, col(200, 195, 184, M_HOUSE), col(150, 145, 138), 0.8f);
-        m.prism({cx + 50, y - 1, cz + 20}, 8, 2.6f, 2.2f, 26, col(240, 238, 230), col(240, 238, 230));
-        m.box({cx + 48.5f, y + 25, cz + 18.5f}, {cx + 51.5f, y + 28, cz + 21.5f}, col(255, 240, 200, M_EMISSIVE));
-        m.prism({cx - 55, y + 12, cz - 10}, 10, 5, 5, 8, col(150, 140, 120), col(150, 140, 120));
-        for (int k = 0; k < 4; k++) m.beam({cx - 55 + (k & 1 ? 4.f : -4.f), y - 1, cz - 10 + (k & 2 ? 4.f : -4.f)}, {cx - 55, y + 12, cz - 10}, 0.5f, 0.5f, col(120, 110, 100));
-        m.box({cx - 70, terrain(cx - 60, cz + 50) - 1, cz + 40}, {cx - 30, terrain(cx - 60, cz + 50) + 8, cz + 58}, col(210, 200, 180, M_HOUSE), col(120, 110, 100));
-    }
+    buildAlcatraz();
     // --- Treasure Island hangars
     for (int k = 0; k < 3; k++) {
         float cx = 2550 + k * 100, cz = -480, y = terrain(cx, cz);
@@ -757,6 +750,252 @@ void World::buildSkateSpots() {
         if (z > -300 && z < -100) continue;
         if (z > 300 && z < 370) continue;
         addLedge(1281, z, 1284.5f, z + 0.8f, 0.5f, col(120, 90, 60));
+        float y = terrain(1282.75f, z + 0.4f) + 0.5f;
+        if (y < 1.3f) continue;   // the north end of the row runs out past the seawall, under the bay
+        bool north = ((int)(z / 45.f)) & 1;   // alternate benches face up and down the promenade
+        for (float x : {1282.f, 1283.6f}) seats.push_back({{x, y, north ? z + 0.32f : z + 0.48f}, north ? -PI / 2 : PI / 2, false});
+    }
+}
+
+// ---------------------------------------------------------------- Alcatraz
+// The rock in the middle of the bay, worth the jet ski ride: a road winding up from the dock past Building 64 to
+// the cellhouse on top, which you can skate straight through (in the front door, down Broadway between the cell
+// blocks, out into the recreation yard), plus the lighthouse, the burned-out Warden's House, the water tower and
+// the smokestack.
+void World::buildAlcatraz() {
+    const float Y = AZ_TOP;
+    Color wall = col(206, 200, 186, M_HOUSE), plain = col(206, 200, 186), roofC = col(122, 120, 114);
+    Color inside = col(188, 182, 168, M_INTERIOR), cellDark = col(40, 40, 44, M_INTERIOR), steel = col(78, 82, 86, M_INTERIOR);
+    auto solid = [&](float x0, float z0, float x1, float z1, float base, float top, Color side, Color topC) {
+        addBox(x0, z0, x1, z1, base, top, PK_BUILDING, side, topC, 0.85f);
+    };
+    auto lowest = [&](float x0, float z0, float x1, float z1) {
+        return std::min(std::min(terrain(x0, z0), terrain(x1, z0)), std::min(terrain(x0, z1), terrain(x1, z1)));
+    };
+    auto pole = [&](float x, float z, float r, float top) { addPlat({x - r, x + r, z - r, z + r, top, top, terrain(x, z) - 1, 0, PK_POLE}); };
+
+    // ---- the road up from the dock: asphalt on its shelf, lamps on the uphill side, handrails along the drops
+    for (int k = 0; k + 1 < AZ_ROAD_N; k++) {
+        Vector2 a = {AZ_ROAD[k].x, AZ_ROAD[k].z}, b = {AZ_ROAD[k + 1].x, AZ_ROAD[k + 1].z};
+        roadStrip(*this, a, b, 3.5f, 3.5f, 2.f, 0.06f, col(70, 70, 74, M_GROUND), 3.f);
+        Vector2 d = Vector2Normalize(Vector2Subtract(b, a)), n = {-d.y, d.x};
+        Vector2 mid = Vector2Scale(Vector2Add(a, b), 0.5f);
+        if (Vector2DotProduct(n, {mid.x - AZ_X, mid.y - AZ_Z}) < 0) n = Vector2Scale(n, -1);   // n points out, toward the water
+        float L = Vector2Distance(a, b);
+        if (k == 1 || k == 2 || k == 5 || k == 6) {
+            Vector2 p0 = Vector2Add(Vector2Add(a, Vector2Scale(d, 3)), Vector2Scale(n, 4.4f)), p1 = Vector2Add(Vector2Add(b, Vector2Scale(d, -3)), Vector2Scale(n, 4.4f));
+            float y0 = lerpf(AZ_ROAD[k].y, AZ_ROAD[k + 1].y, 3 / L), y1 = lerpf(AZ_ROAD[k].y, AZ_ROAD[k + 1].y, 1 - 3 / L);
+            addRailObj({p0.x, y0 + 1.0f, p0.y}, {p1.x, y1 + 1.0f, p1.y}, "Alcatraz Rail");
+        }
+        for (float s = 12; s < L - 6; s += 38) {
+            Vector2 q = Vector2Add(Vector2Add(a, Vector2Scale(d, s)), Vector2Scale(n, -5.6f));
+            addLamp(q.x, q.y, atan2f(n.y, n.x));
+        }
+    }
+
+    // ---- the cellhouse: 68 x 24 m and three storeys, doors at both ends lined up with Broadway
+    const float CX0 = 280, CX1 = 348, CZ0 = -1913, CZ1 = -1889, CH = 14, T = 0.6f;
+    const float DZ0 = -1903.5f, DZ1 = -1898.5f, DH = 4.f;
+    MeshBuilder& m = mb((CX0 + CX1) / 2, (CZ0 + CZ1) / 2);
+    solid(CX0, CZ0, CX1, CZ0 + T, Y - 1, Y + CH, wall, roofC);
+    solid(CX0, CZ1 - T, CX1, CZ1, Y - 1, Y + CH, wall, roofC);
+    for (float wx : {CX0, CX1 - T}) {
+        solid(wx, CZ0 + T, wx + T, DZ0, Y - 1, Y + CH, wall, roofC);
+        solid(wx, DZ1, wx + T, CZ1 - T, Y - 1, Y + CH, wall, roofC);
+        solid(wx, DZ0, wx + T, DZ1, Y + DH, Y + CH, wall, roofC);
+        m.box({wx, Y + DH - 0.02f, DZ0}, {wx + T, Y + DH, DZ1}, inside, inside, 1.f, true);   // underside of the lintel
+    }
+    solid(CX0, CZ0, CX1, CZ1, Y + CH - 0.5f, Y + CH, plain, roofC);   // roof
+    m.box({CX0 + 4, Y + CH, DZ0 - 1}, {CX1 - 4, Y + CH + 2.2f, DZ1 + 1}, col(150, 160, 166), roofC, 0.9f);   // clerestory
+    for (float x = CX0 + 4.5f; x < CX1 - 4.5f; x += 3)   // its window strip, both sides
+        for (float z : {DZ0 - 1.02f, DZ1 + 1.0f}) m.box({x, Y + CH + 0.5f, z}, {x + 2.2f, Y + CH + 1.7f, z + 0.02f}, col(60, 70, 78));
+    // inside: walls and ceiling lined so the sun-lit outside faces don't show through
+    m.box({CX0 + T, Y + CH - 0.52f, CZ0 + T}, {CX1 - T, Y + CH - 0.5f, CZ1 - T}, inside, inside, 1.f, true);
+    m.box({CX0 + T, Y, CZ0 + T}, {CX1 - T, Y + CH - 0.5f, CZ0 + T + 0.03f}, inside);
+    m.box({CX0 + T, Y, CZ1 - T - 0.03f}, {CX1 - T, Y + CH - 0.5f, CZ1 - T}, inside);
+    for (float wx : {CX0 + T, CX1 - T - 0.03f}) {
+        m.box({wx, Y, CZ0 + T}, {wx + 0.03f, Y + CH - 0.5f, DZ0}, inside);
+        m.box({wx, Y, DZ1}, {wx + 0.03f, Y + CH - 0.5f, CZ1 - T}, inside);
+        m.box({wx, Y + DH, DZ0}, {wx + 0.03f, Y + CH - 0.5f, DZ1}, inside);
+    }
+    // B and C blocks: three tiers of barred cells on each face, galleries along the upper tiers, lamps down Broadway
+    layer = LAYER_INTERIOR;
+    for (int blk = 0; blk < 2; blk++) {
+        float z0 = blk ? DZ1 : -1909.f, z1 = blk ? -1893.f : DZ0;
+        addBox(290, z0, 338, z1, Y - 0.5f, Y + 8.2f, PK_BUILDING, inside, col(150, 146, 138, M_INTERIOR), 0.8f);
+        MeshBuilder& c = mb(314, (z0 + z1) / 2);
+        for (int face = 0; face < 2; face++) {
+            float fz = face ? z1 : z0, o = face ? 1.f : -1.f;
+            auto Z = [&](float a, float b) { return std::pair<float, float>{std::min(fz + o * a, fz + o * b), std::max(fz + o * a, fz + o * b)}; };
+            for (int tier = 0; tier < 3; tier++) {
+                float y0 = Y + tier * 2.65f;
+                for (float x = 290.3f; x + 1.5f <= 337.9f; x += 1.6f) {
+                    auto [ra, rb] = Z(0.f, 0.02f);
+                    c.box({x + 0.1f, y0 + 0.1f, ra}, {x + 1.4f, y0 + 2.3f, rb}, cellDark);
+                    auto [ba, bb] = Z(0.02f, 0.09f);
+                    for (int b = 0; b < 3; b++) { float bx = x + 0.35f + b * 0.3f; c.box({bx - 0.025f, y0 + 0.1f, ba}, {bx + 0.025f, y0 + 2.3f, bb}, steel); }
+                    c.box({x + 0.1f, y0 + 1.15f, ba}, {x + 1.4f, y0 + 1.22f, bb}, steel);
+                }
+                if (tier > 0) {   // the gallery outside the upper cells, with its railing
+                    auto [ga, gb] = Z(0.f, 1.f);
+                    c.box({290, y0 - 0.15f, ga}, {338, y0, gb}, steel, steel, 1.f, true);
+                    float rz = fz + o * 0.97f;
+                    c.box({290, y0 + 0.95f, rz - 0.03f}, {338, y0 + 1.0f, rz + 0.03f}, steel);
+                    for (float px = 290; px <= 338; px += 2) c.box({px - 0.03f, y0, rz - 0.03f}, {px + 0.03f, y0 + 0.95f, rz + 0.03f}, steel);
+                }
+            }
+        }
+    }
+    for (float x = 292; x < 338; x += 8) {   // lamps hanging over Broadway
+        MeshBuilder& c = mb(x, -1901);
+        c.beam({x, Y + 9.5f, -1901}, {x, Y + CH - 0.5f, -1901}, 0.04f, 0.04f, steel);
+        c.box({x - 0.25f, Y + 9.2f, -1901.25f}, {x + 0.25f, Y + 9.5f, -1900.75f}, col(255, 236, 190, M_EMISSIVE));
+    }
+    layer = LAYER_MAIN;
+    // the administration wing across the east end, with the way in tunneling through it, and a plaque over the door
+    solid(CX1, -1910, CX1 + 9, DZ0, Y - 1, Y + 10, wall, roofC);
+    solid(CX1, DZ1, CX1 + 9, -1892, Y - 1, Y + 10, wall, roofC);
+    solid(CX1, DZ0, CX1 + 9, DZ1, Y + DH, Y + 10, wall, roofC);
+    m.box({CX1, Y + DH - 0.02f, DZ0}, {CX1 + 9, Y + DH, DZ1}, inside, inside, 1.f, true);
+    for (float z : {DZ0, DZ1 - 0.03f}) m.box({CX1, Y, z}, {CX1 + 9, Y + DH, z + 0.03f}, inside);
+    m.box({CX1 + 9, Y + 4.6f, DZ0 - 1.5f}, {CX1 + 9.12f, Y + 6.f, DZ1 + 1.5f}, col(64, 60, 54));
+    for (float z = DZ0 - 1.1f; z < DZ1 + 1.1f; z += 0.42f) m.box({CX1 + 9.12f, Y + 5.05f, z}, {CX1 + 9.15f, Y + 5.55f, z + 0.26f}, col(220, 214, 196));   // the lettering
+    {   // flagpole on the plaza
+        float fx = 362, fz = -1890, fy = terrain(fx, fz);
+        m.beam({fx, fy, fz}, {fx, fy + 14, fz}, 0.12f, 0.12f, col(200, 200, 205));
+        pole(fx, fz, 0.15f, fy + 14);
+        for (int s = 0; s < 7; s++) m.box({fx + 0.1f, fy + 12.6f - s * 0.2f, fz - 0.02f}, {fx + 3.2f, fy + 12.8f - s * 0.2f, fz + 0.02f}, s & 1 ? col(240, 240, 240) : col(190, 40, 46));
+        m.box({fx + 0.1f, fy + 12.0f, fz - 0.03f}, {fx + 1.4f, fy + 12.8f, fz + 0.03f}, col(40, 54, 120));
+    }
+
+    // ---- the recreation yard off the west end: high walls, and concrete bleachers stepping up the north wall
+    solid(245, -1916, CX0, -1915, Y - 1, Y + 6, plain, roofC);
+    solid(245, -1885, CX0, -1884, Y - 1, Y + 6, plain, roofC);
+    solid(245, -1916, 246, -1884, Y - 1, Y + 6, plain, roofC);
+    for (int s = 0; s < 4; s++) solid(251, -1915, 275, -1915 + (4 - s) * 0.9f, Y - 1, Y + (s + 1) * 0.45f, col(196, 190, 178), col(184, 178, 166));
+    for (float x : {255.f, 268.f}) m.box({x - 0.1f, Y, -1886}, {x + 0.1f, Y + 3.2f, -1885.8f}, col(90, 92, 96)),   // a pair of backboards
+                                    m.box({x - 0.9f, Y + 3.0f, -1886.1f}, {x + 0.9f, Y + 4.1f, -1885.95f}, col(236, 236, 230));
+    {   // guard tower at the yard's corner
+        MeshBuilder& g = mb(246, -1915);
+        for (int k = 0; k < 4; k++) g.beam({245.f + (k & 1) * 2.4f, Y, -1917.f + (k >> 1) * 2.4f}, {245.f + (k & 1) * 2.4f, Y + 9, -1917.f + (k >> 1) * 2.4f}, 0.2f, 0.2f, col(90, 92, 96));
+        g.box({244.6f, Y + 9, -1917.4f}, {247.8f, Y + 11.4f, -1914.2f}, col(180, 176, 166), roofC, 0.9f);
+        g.box({244.5f, Y + 10.0f, -1917.5f}, {247.9f, Y + 11.0f, -1914.1f}, col(50, 60, 66));   // windows all round
+        g.box({244.3f, Y + 11.4f, -1917.7f}, {248.1f, Y + 11.6f, -1913.9f}, roofC);
+        pole(246.2f, -1915.8f, 1.3f, Y + 11.6f);
+    }
+
+    // ---- the lighthouse, and the burned shell of the Warden's House beside it
+    {
+        float lx = 366, lz = -1884, ly = terrain(lx, lz) - 0.5f, top = Y + 22;
+        MeshBuilder& l = mb(lx, lz);
+        l.prism({lx, ly, lz}, 8, 1.9f, 1.5f, top - ly, col(242, 240, 232), col(242, 240, 232), 0.39f);
+        l.prism({lx, top, lz}, 8, 2.5f, 2.5f, 0.3f, col(60, 62, 64), col(60, 62, 64), 0.39f);   // gallery
+        l.prism({lx, top + 0.3f, lz}, 8, 1.3f, 1.3f, 2.2f, col(255, 244, 205, M_EMISSIVE), col(255, 244, 205, M_EMISSIVE), 0.39f);
+        l.prism({lx, top + 2.5f, lz}, 8, 1.6f, 0.2f, 1.3f, col(52, 54, 56), col(52, 54, 56), 0.39f);
+        pole(lx, lz, 1.9f, top + 3.8f);
+    }
+    {
+        RNG wr(1963);
+        Color brick = col(158, 104, 84), burnt = col(70, 62, 58);
+        const float X0 = 330, X1 = 350, Z0 = -1886.5f, Z1 = -1874;
+        float base = lowest(X0, Z0, X1, Z1) - 1;
+        auto wallRun = [&](float x0, float z0, float x1, float z1) {   // in 2.5 m bays, alternately a window gap and a jagged pier
+            bool alongX = fabsf(x1 - x0) > fabsf(z1 - z0);
+            float L = alongX ? x1 - x0 : z1 - z0;
+            for (float u = 0; u < L - 0.01f; u += 2.5f) {
+                float u1 = std::min(u + 2.5f, L), h = (int)(u / 2.5f) % 2 ? wr.range(1.2f, 3.f) : wr.range(4.5f, 8.5f);
+                float ya = terrain(alongX ? x0 + u : x0, alongX ? z0 : z0 + u);
+                float bx0 = alongX ? x0 + u : x0, bx1 = alongX ? x0 + u1 : x1, bz0 = alongX ? z0 : z0 + u, bz1 = alongX ? z1 : z0 + u1;
+                solid(bx0, bz0, bx1, bz1, base, ya + h, brick, burnt);
+            }
+        };
+        wallRun(X0, Z0, X1, Z0 + 0.5f);
+        wallRun(X0, Z1 - 0.5f, X1, Z1);
+        wallRun(X0, Z0 + 0.5f, X0 + 0.5f, Z1 - 0.5f);
+        wallRun(X1 - 0.5f, Z0 + 0.5f, X1, Z1 - 0.5f);
+        mb(340, -1880).prism({344, terrain(344, -1880) - 0.5f, -1880}, 4, 0.9f, 0.8f, 10.5f, brick, burnt, 0.79f);   // the chimney still standing
+        pole(344, -1880, 0.9f, terrain(344, -1880) + 10);
+    }
+
+    // ---- the water tower on its stilts, and the smokestack
+    {
+        float wx = 380, wz = -1928, wy = terrain(wx, wz), ty = wy + 15;
+        MeshBuilder& w = mb(wx, wz);
+        Color legC = col(150, 146, 138), tank = col(214, 206, 190);
+        for (int k = 0; k < 4; k++) {
+            float lx = wx + (k & 1 ? 3.5f : -3.5f), lz = wz + (k & 2 ? 3.5f : -3.5f);
+            w.beam({lx, terrain(lx, lz) - 0.5f, lz}, {lx, ty, lz}, 0.35f, 0.35f, legC);
+            pole(lx, lz, 0.3f, ty);
+        }
+        for (float y : {wy + 5.f, wy + 10.f}) {   // cross braces
+            w.beam({wx - 3.5f, y, wz - 3.5f}, {wx + 3.5f, y + 4, wz - 3.5f}, 0.12f, 0.12f, legC);
+            w.beam({wx - 3.5f, y, wz + 3.5f}, {wx + 3.5f, y + 4, wz + 3.5f}, 0.12f, 0.12f, legC);
+            w.beam({wx - 3.5f, y, wz - 3.5f}, {wx - 3.5f, y + 4, wz + 3.5f}, 0.12f, 0.12f, legC);
+            w.beam({wx + 3.5f, y, wz - 3.5f}, {wx + 3.5f, y + 4, wz + 3.5f}, 0.12f, 0.12f, legC);
+        }
+        w.prism({wx, ty, wz}, 14, 4.4f, 4.4f, 6.5f, tank, tank, 0.f, true, 0.9f);
+        w.prism({wx, ty + 2.2f, wz}, 14, 4.45f, 4.45f, 1.1f, col(176, 70, 56), col(176, 70, 56), 0.f, false);   // faded red lettering band
+        w.prism({wx, ty + 6.5f, wz}, 14, 4.6f, 0.4f, 2.f, col(150, 140, 128), col(150, 140, 128), 0.f, true);
+        addPlat({wx - 4.4f, wx + 4.4f, wz - 4.4f, wz + 4.4f, ty + 6.5f, ty + 6.5f, ty, 0, PK_BUILDING});
+    }
+    {
+        float sx = 262, sz = -1925, sy = terrain(sx, sz) - 0.5f;
+        mb(sx, sz).prism({sx, sy, sz}, 10, 1.7f, 1.2f, Y + 26 - sy, col(176, 164, 150), col(60, 56, 52), 0.f, true, 0.9f);
+        pole(sx, sz, 1.6f, Y + 26);
+    }
+
+    // ---- down at the dock: Building 64 (the old barracks) with its sign, a pier, a guard tower and the ferry
+    {
+        const float X0 = 403, X1 = 424, Z0 = -1927, Z1 = -1905;
+        float base = lowest(X0, Z0, X1, Z1), top = base + 14;
+        solid(X0, Z0, X1, Z1, base - 1, top, col(214, 200, 166, M_HOUSE), roofC);
+        MeshBuilder& b = mb(X1, (Z0 + Z1) / 2);
+        b.box({X1 - 0.5f, top, Z0 + 3}, {X1, top + 2.4f, Z1 - 3}, col(236, 232, 220));   // the sign on the roof
+        for (float z = Z0 + 3.6f; z < Z1 - 3.6f; z += 0.55f)
+            if (hashu((int)(z * 10), 64, 1) % 5) b.box({X1 + 0.0f, top + 0.7f, z}, {X1 + 0.04f, top + 1.6f, z + 0.35f}, col(36, 36, 40));
+        float px0 = 426, px1 = 455, pz0 = -1892, pz1 = -1880, py = 3.f;
+        b.box({px0, py - 0.4f, pz0}, {px1, py, pz1}, col(122, 104, 84), col(134, 116, 94), 0.9f, true);
+        addPlat({px0, px1, pz0, pz1, py, py, py - 0.4f, 0, PK_PIER});
+        for (float x = px0 + 2; x < px1; x += 4)
+            for (float z : {pz0 + 0.4f, pz1 - 0.4f}) b.beam({x, -4, z}, {x, py - 0.4f, z}, 0.4f, 0.4f, col(84, 70, 58));
+        for (float x = px0 + 4; x < px1; x += 8) b.prism({x, py, pz1 - 0.5f}, 6, 0.25f, 0.22f, 0.6f, col(40, 40, 42), col(40, 40, 42));   // bollards
+        MeshBuilder& g = mb(450, -1897);   // guard tower standing in the water off the pier
+        for (int k = 0; k < 4; k++) g.beam({448.f + (k & 1) * 3, -3, -1899.f + (k >> 1) * 3}, {448.f + (k & 1) * 3, 9, -1899.f + (k >> 1) * 3}, 0.3f, 0.3f, col(110, 108, 104));
+        g.box({447.6f, 9, -1899.4f}, {451.4f, 11.6f, -1895.6f}, col(196, 190, 176), roofC, 0.9f);
+        g.box({447.5f, 10.2f, -1899.5f}, {451.5f, 11.2f, -1895.5f}, col(50, 60, 66));
+        g.box({447.2f, 11.6f, -1899.8f}, {451.8f, 11.8f, -1895.2f}, roofC);
+        // the ferry tied up along the pier's south side
+        MeshBuilder& f = mb(440, -1874);
+        f.box({429, -1.f, -1878.8f}, {452, 2.2f, -1870.4f}, col(232, 234, 236), col(160, 120, 90), 0.85f);
+        f.box({429, 0.2f, -1878.85f}, {452, 0.6f, -1870.35f}, col(40, 70, 130));   // stripe at the waterline
+        f.box({433, 2.2f, -1878.f}, {447, 4.8f, -1871.2f}, col(240, 240, 240), col(210, 210, 214), 0.9f);
+        f.box({432.9f, 3.2f, -1878.1f}, {447.1f, 4.2f, -1871.1f}, col(50, 64, 76));   // cabin windows
+        f.box({443, 4.8f, -1876.5f}, {446.5f, 6.6f, -1872.7f}, col(240, 240, 240), col(200, 200, 204), 0.9f);   // wheelhouse
+        addPlat({429, 452, -1878.8f, -1870.4f, 2.2f, 2.2f, -1.f, 0, PK_BUILDING});
+    }
+
+    // ---- the gardens gone wild on the slopes: cypress, eucalyptus and flowering shrubs, kept off the road and buildings
+    {
+        RNG gr(1934);
+        const Rectangle keep[] = {{240, -1920, 125, 40}, {326, -1890, 46, 20}, {370, -1938, 20, 20}, {398, -1932, 32, 32}, {255, -1932, 14, 14}};
+        auto clear = [&](float x, float z) {
+            float ry;
+            if (alcatrazRoad(x, z, &ry) < 12.5f || terrain(x, z) < 4.f) return false;
+            for (auto& k : keep) if (x > k.x && x < k.x + k.width && z > k.y && z < k.y + k.height) return false;
+            return true;
+        };
+        for (int k = 0, tries = 0; k < 12 && tries < 400; tries++) {
+            float x = gr.range(185, 420), z = gr.range(-1970, -1830), d = alcatrazD(x, z);
+            if (d < 0.6f || d > 0.92f || !clear(x, z)) continue;
+            addTree(x, z, gr.chance(0.5f) ? 1 : 3, gr.range(0.9f, 1.25f), gr, true);
+            k++;
+        }
+        for (int k = 0, tries = 0; k < 45 && tries < 900; tries++) {
+            float x = gr.range(185, 420), z = gr.range(-1970, -1830), d = alcatrazD(x, z);
+            if (d < 0.55f || d > 0.95f || !clear(x, z)) continue;
+            addShrub(x, z, gr.range(0.7f, 1.3f), gr, gr.chance(0.6f));
+            k++;
+        }
     }
 }
 
@@ -801,6 +1040,7 @@ void World::buildMeta() {
     tok("Salesforce Tower", 1100, 210);
     tok("Embarcadero Plaza", 1230, -256);
     tok("SFO Runway 28R", 1560, 2262);
+    tok("Alcatraz", 263, -1893);   // out in the yard: skate in the front door and through the cellhouse to get it
     {
         Vector3 p = trackPoint(stations[0].s + 40, 6.2f, nullptr);
         tokens.push_back({{p.x, ground(p.x, p.z, 200) + 1.4f, p.z}, "4th & King"});
@@ -853,7 +1093,8 @@ void World::buildMeta() {
     struct TS { float x, z, rad; int n; };
     TS ts[] = {{-1150, -2415, 22, 14}, {-285, 885, 20, 12}, {-330, 175, 30, 14}, {1250, -224, 6, 8},
                {880, -862, 12, 8},     {-830, -1040, 25, 10}, {1025, -1180, 15, 14}, {700, -1080, 40, 14},
-               {1290, -170, 10, 10},   {gx(19) + 55, gz(6) + 55, 25, 14}, {1815, 1880, 25, 16}, {2380, 9400, 14, 10}, {1900, 9418, 30, 10}};
+               {1290, -170, 10, 10},   {gx(19) + 55, gz(6) + 55, 25, 14}, {1815, 1880, 25, 16}, {2380, 9400, 14, 10}, {1900, 9418, 30, 10},
+               {360, -1900, 4, 6},     {263, -1900, 10, 8},    {438, -1886, 8, 5}};   // Alcatraz: by the front door, in the yard, on the pier
     for (auto& t : ts)
         for (int k = 0; k < t.n; k++) {
             float a = r.range(0, TAU_F), d = r.range(2, t.rad);
@@ -865,6 +1106,28 @@ void World::buildMeta() {
             if (collide(tmp, 0.5f, p.y, 1.8f, &n)) continue;
             tourists.push_back(p);
         }
+    // people out on the lawns of the parks on a blanket, many with a laptop (this is San Francisco)
+    {
+        RNG lr(4242);   // its own stream, so nothing else in the city moves
+        struct Lawn { float x0, z0, x1, z1; int n; };
+        const Lawn lawns[] = {{gx(12) + 6, gz(17) + 6, gx(13) - 6, gz(18) - 6, 22},   // Dolores Park
+                              {gx(9) + 8, gz(11) + 8, gx(10) - 8, gz(12) - 8, 7},     // Alamo Square
+                              {gx(20) + 8, gz(2) + 8, gx(21) - 8, gz(3) - 8, 6},      // Washington Square
+                              {gx(11) + 8, gz(5) + 8, gx(12) - 8, gz(6) - 8, 5}};     // Lafayette Park
+        for (auto& l : lawns)
+            for (int k = 0, tries = 0; k < l.n && tries < l.n * 12; tries++) {
+                float x = lr.range(l.x0, l.x1), z = lr.range(l.z0, l.z1);
+                Vector3 p = {x, G(x, z), z}, tmp = p;
+                Vector2 n;
+                if (collide(tmp, 0.9f, p.y, 1.2f, &n)) continue;
+                if (fabsf(terrain(x + 1, z) - terrain(x - 1, z)) > 0.6f || fabsf(terrain(x, z + 1) - terrain(x, z - 1)) > 0.6f) continue;   // too steep to sit
+                bool close = false;
+                for (auto& s : seats) if (s.grass && sq(s.pos.x - x) + sq(s.pos.z - z) < 9) close = true;
+                if (close) continue;
+                seats.push_back({p, lr.range(-PI, PI), true});
+                k++;
+            }
+    }
 }
 
 // ---------------------------------------------------------------- generation order

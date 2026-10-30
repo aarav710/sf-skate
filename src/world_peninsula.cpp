@@ -304,7 +304,11 @@ void World::buildMenlo() {
         m.box({x1, y + 3.1f, c.z - 16}, {x1 + 2.6f, y + 3.3f, c.z + 16}, brown); // trackside awning
         for (float z = c.z - 15; z <= c.z + 15; z += 5) m.box({x1 + 2.3f, y, z - 0.12f}, {x1 + 2.5f, y + 3.1f, z + 0.12f}, trim);
         for (int k = 0; k < 4; k++) addTree(c.x - 34, c.z - 36 + k * 24, 4, 1.15f, r, true);
-        for (float z = c.z - 30; z < c.z + 30; z += 12) addLedge(c.x - 31, z, c.x - 29.5f, z + 5, 0.48f, col(140, 110, 80)); // benches
+        for (float z = c.z - 30; z < c.z + 30; z += 12) {   // benches
+            addLedge(c.x - 31, z, c.x - 29.5f, z + 5, 0.48f, col(140, 110, 80));
+            float y = terrain(c.x - 30.25f, z + 2.5f) + 0.48f;
+            for (float u : {1.2f, 3.7f}) seats.push_back({{c.x - 30.45f, y, z + u}, 0.f, false});
+        }
     }
 
     // bayfront tech campus with a rooftop park, and the salt ponds beyond

@@ -332,7 +332,16 @@ void World::buildLandmarks() {
         }
         m.beam({cx, y + H - 5, cz}, {cx, y + H + 35, cz}, 0.8f, 0.8f, col(236, 233, 226));
         m.box({cx - 0.5f, y + H + 35, cz - 0.5f}, {cx + 0.5f, y + H + 37, cz + 0.5f}, col(255, 40, 30, M_EMISSIVE));
-        addPlat({cx - b + 3, cx + b - 3, cz - b + 3, cz + b - 3, y + 120, y + 120, y, 0, PK_BUILDING});
+        // collision steps up the taper: each box is as wide as the glass at its own top, so it sits just inside the
+        // walls all the way down (the old single +-15 box let the skater ride 2.4 m into the base, #65)
+        for (float t : {4.f, 20.f, 40.f, 60.f, 80.f, 100.f, 120.f, 140.f, 160.f}) {
+            float hw = b * (1 - t / H);
+            addPlat({cx - hw, cx + hw, cz - hw, cz + hw, y + t, y + t, y, 0, PK_BUILDING});
+        }
+        for (int sd = -1; sd <= 1; sd += 2) { // the wings stick out past the taper above 95 m
+            float off = b * (1 - 95 / H);
+            addPlat({cx + (sd > 0 ? off : -off - 5), cx + (sd > 0 ? off + 5 : -off), cz - 4, cz + 4, y + 178, y + 178, y + 95, 0, PK_BUILDING});
+        }
         for (int k = 0; k < 6; k++) addTree(cx - 40 + k * 4, cz + 30, 0, 0.9f, r, true);
     }
     // --- Salesforce Tower (rounded glass obelisk with a glowing crown)
@@ -342,7 +351,18 @@ void World::buildLandmarks() {
         Color g = col(178, 190, 198, M_GLASS);
         m.prism({cx, y, cz}, 16, 23, 18, 200, g, g, 0.2f, false);
         m.prism({cx, y + 200, cz}, 16, 18, 15, 20, col(220, 225, 235, M_EMISSIVE), col(90, 90, 95), 0.2f, true);
-        addPlat({cx - 18, cx + 18, cz - 18, cz + 18, y + 220, y + 220, y, 0, PK_BUILDING});
+        // collision for the round, tapering shaft: at each step a stack of centred boxes whose corners sit on the
+        // glass radius at that step's top, so the union follows the circle to within about a metre instead of the
+        // old +-18 square that left the skater 4.6 m inside the 23 m base (#65)
+        auto disc = [&](float top, float rad, int k) {
+            for (int i = 0; i < k; i++) {
+                float a = (i + 0.5f) * (PI / 2) / k, hx = rad * cosf(a), hz = rad * sinf(a);
+                addPlat({cx - hx, cx + hx, cz - hz, cz + hz, y + top, y + top, y, 0, PK_BUILDING});
+            }
+        };
+        disc(4, 23 - 5 * 4 / 200.f, 12);   // street level, where the skater rides: finest fit
+        for (float t : {50.f, 100.f, 150.f, 200.f}) disc(t, 23 - 5 * t / 200, 8);
+        disc(220, 15, 8);                  // the crown's roof
         m.box({cx - 40, y + 0.9f, cz + 25}, {cx + 40, y + 1.4f, cz + 40}, col(90, 140, 70)); // rooftop-park nod
     }
     // --- Coit Tower on Telegraph Hill

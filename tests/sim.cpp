@@ -516,6 +516,22 @@ int main() {
         snprintf(b, sizeof b, "splash=%d respawned at x=%.1f y=%.1f state=%d", splash, s.p.pos.x, s.p.pos.y, s.p.state);
         check(splash && s.p.pos.y > 0.5f && s.p.state == Player::RIDE, "splash + respawn", b);
     }
+    {   // piers name the shore they belong to, not the water under them; Alcatraz's dock end isn't the Wharf (#61)
+        struct { float x, z; const char* want; } spots[] = {
+            {1025, -1280, "Fisherman's Wharf"},   // Pier 39, where its token is
+            {1380, -800, "The Embarcadero"}, {1380, -660, "The Embarcadero"}, {1380, -520, "The Embarcadero"},
+            {1380, -380, "The Embarcadero"}, {1380, 50, "The Embarcadero"}, {1380, 180, "The Embarcadero"},
+            {1380, 480, "The Embarcadero"},
+            {469, -1200, "Fisherman's Wharf"},    // Hyde Street Pier
+            {440, -1886, "Alcatraz"},             // the Alcatraz dock
+            {423, -1916, "Alcatraz"},             // Building 64
+            {1600, -730, "San Francisco Bay"}};   // open water past the pier ends is still the bay
+        int bad = 0; b[0] = 0;
+        for (auto& sp : spots)
+            if (std::string(W.district(sp.x, sp.z)) != sp.want && !bad++)
+                snprintf(b, sizeof b, "(%.0f,%.0f) says %s, want %s", sp.x, sp.z, W.district(sp.x, sp.z), sp.want);
+        check(bad == 0, "piers and Alcatraz dock have the right district", b);
+    }
     {   // the splash message names the water: ocean, bay, fountain, lake, lagoon, pool, salt pond (rolling in and dropping in)
         float sea = -1440;   // the Pacific, west of the city
         while (!W.isWater(sea, 0, 0) && sea > -3000) sea -= 5;

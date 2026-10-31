@@ -160,6 +160,7 @@ struct World {
                (x >= MX0 && x <= MX1 && z >= MZ0 && z <= MZ1);
     }
     const char* district(float x, float z) const;
+    bool overPier(float x, float z) const;                  // is (x,z) on a pier deck (Embarcadero, Pier 39, Hyde St, Alcatraz)?
     int zoneFlags(float x, float z, bool strict) const;
 
     // ---- data ----

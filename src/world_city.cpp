@@ -136,7 +136,8 @@ void World::buildLombard() {
                 Vector2 p = Vector2Add(Vector2Add(a, Vector2Scale(d, s)), Vector2Scale(n, side * 3.4f));
                 if (fabsf(p.y - zc) > 9.5f) continue;
                 float gy = terrain(p.x, p.y);
-                addPlat({p.x - 0.6f, p.x + 0.6f, p.y - 0.6f, p.y + 0.6f, gy + 0.75f, gy + 0.75f, gy - 0.3f, 0, PK_PROP});
+                // collision fills the shrub drawn below: its main clump (0.79 m radius, crown ~1.1 m up), not just the soil bed
+                addPlat({p.x - 0.75f, p.x + 0.75f, p.y - 0.75f, p.y + 0.75f, gy + 1.1f, gy + 1.1f, gy - 0.3f, 0, PK_PROP});
                 mb(p.x, p.y).box({p.x - 0.7f, gy - 0.3f, p.y - 0.7f}, {p.x + 0.7f, gy + 0.12f, p.y + 0.7f}, col(112, 84, 62), 0.85f); // soil bed
                 addShrub(p.x, p.y, 1.05f, r, r.chance(0.6f));
                 addFlowerBed(p.x - 0.55f, p.y - 0.55f, p.x + 0.55f, p.y + 0.55f, 4, r);

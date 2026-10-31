@@ -11,6 +11,43 @@ static float groundRate(World& w, Vector3 p, Vector3 f, float speed) {
     return clampf(speed * (hF - hB), -30, 30);
 }
 
+// rise per metre of the ground under a board at p heading along f, as the ride physics feels it
+static float boardSlope(World& w, Vector3 p, Vector3 f) {
+    float hF = w.ground(p.x + f.x * 0.7f, p.z + f.z * 0.7f, p.y + 0.2f);
+    float hB = w.ground(p.x - f.x * 0.7f, p.z - f.z * 0.7f, p.y + 0.2f);
+    // a sample past a drop edge is not a slope (a flat deck near its edge would pull the skater over it):
+    // continue the surface under the board from the other sample instead
+    bool edgeF = hF < p.y - STEP_UP, edgeB = hB < p.y - STEP_UP;
+    if (edgeF && edgeB) hF = hB = p.y;
+    else if (edgeF) hF = 2 * p.y - hB;
+    else if (edgeB) hB = 2 * p.y - hF;
+    return clampf((hF - hB) / 1.4f, -1.5f, 1.5f);
+}
+
+// Is p a good place to put the skater back after a splash? It must be clear of water all around, and there
+// must be a heading (near `yaw`) the board stays at rest on with no input, or a respawn on a shore that
+// slopes toward the water just rolls straight back in. On success *restYaw gets that heading.
+static bool safeSpot(World& w, Vector3 p, float yaw, float* restYaw) {
+    const float REST = 0.01f;   // the ride's rolling drag (0.15 m/s^2) holds a board on slopes below ~0.015
+    float y = yaw;
+    if (fabsf(boardSlope(w, p, {cosf(y), 0, sinf(y)})) > REST) {
+        // turn across the fall line (along the contour), whichever way is nearer the current heading
+        float gx = w.ground(p.x + 0.7f, p.z, p.y + 0.2f) - w.ground(p.x - 0.7f, p.z, p.y + 0.2f);
+        float gz = w.ground(p.x, p.z + 0.7f, p.y + 0.2f) - w.ground(p.x, p.z - 0.7f, p.y + 0.2f);
+        if (gx * gx + gz * gz < 1e-8f) return false;
+        y = wrapPi(atan2f(gz, gx) + PI / 2);
+        if (fabsf(wrapPi(y - yaw)) > PI / 2) y = wrapPi(y + PI);
+        if (fabsf(boardSlope(w, p, {cosf(y), 0, sinf(y)})) > REST) return false;
+    }
+    for (int k = 0; k < 12; k++)   // no water (bay, lake, fountain, pool) within 6 m
+        for (float r = 2; r <= 6; r += 2) {
+            float x = p.x + cosf(k * PI / 6) * r, z = p.z + sinf(k * PI / 6) * r;
+            if (w.isWater(x, z, w.ground(x, z, p.y + 1.f))) return false;
+        }
+    *restYaw = y;
+    return true;
+}
+
 void Player::spawn(Vector3 p, float y) {
     pos = p; yaw = y; speed = 0; vel = {0, 0, 0}; vy = 0; rideVy = 0;
     state = RIDE; flipT = shoveT = -1; flipAngle = shoveAngle = 0; combo.clear(); comboPts = 0;
@@ -103,10 +140,12 @@ void Player::update(float dt, const Input& in, World& w) {
     }
     // remember the last safe spot for respawns after a splash
     safeT += dt;
-    if (state == RIDE && safeT > 0.5f && w.terrain(pos.x, pos.z) > 1.0f && fabsf(speed) < 20 && w.inPlay(pos.x, pos.z)) {
+    float restYaw;
+    if (state == RIDE && safeT > 0.5f && w.terrain(pos.x, pos.z) > 1.0f && fabsf(speed) < 20 && w.inPlay(pos.x, pos.z) &&
+        safeSpot(w, pos, yaw, &restYaw)) {
         safeT = 0;
         safePos = pos;
-        safeYaw = yaw;
+        safeYaw = restYaw;
     }
     if (state == RIDE && w.onBridge(pos.x, pos.z) && safeT > 0.5f && w.inPlay(pos.x, pos.z)) {
         safeT = 0;
@@ -122,15 +161,7 @@ void Player::ride(float dt, const Input& in, World& w) {
     lean = lerpf(lean, in.steer * clampf(spd / 6.f, 0, 1), 1 - expf(-dt * 8));
 
     Vector3 f = fwd();
-    float hF = w.ground(pos.x + f.x * 0.7f, pos.z + f.z * 0.7f, pos.y + 0.2f);
-    float hB = w.ground(pos.x - f.x * 0.7f, pos.z - f.z * 0.7f, pos.y + 0.2f);
-    // a sample past a drop edge is not a slope (a flat deck near its edge would pull the skater over it):
-    // continue the surface under the board from the other sample instead
-    bool edgeF = hF < pos.y - STEP_UP, edgeB = hB < pos.y - STEP_UP;
-    if (edgeF && edgeB) hF = hB = pos.y;
-    else if (edgeF) hF = 2 * pos.y - hB;
-    else if (edgeB) hB = 2 * pos.y - hF;
-    float slope = clampf((hF - hB) / 1.4f, -1.5f, 1.5f);
+    float slope = boardSlope(w, pos, f);
     pitch = lerpf(pitch, atanf(slope), 1 - expf(-dt * 14));
     float acc = -9.8f * slope / sqrtf(1 + slope * slope);
     bool pushing = in.push && speed < 17.f && speed > -1.f;

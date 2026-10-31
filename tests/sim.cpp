@@ -557,6 +557,42 @@ int main() {
         snprintf(b, sizeof b, "splash=%d respawned at x=%.1f y=%.1f state=%d", splash, s.p.pos.x, s.p.pos.y, s.p.state);
         check(splash && s.p.pos.y > 0.5f && s.p.state == Player::RIDE, "splash + respawn", b);
     }
+    {   // after a splash off a gentle shore, the respawn stays put: it doesn't roll back into the water (#90)
+        struct { float x, z; } starts[] = {{4007.8f, -2575.6f}, {2825.3f, -713.9f}, {-751.0f, -1073.1f}};
+        int bad = 0, tried = 0;
+        std::string worst;
+        for (auto& st : starts) {
+            float best = 1e9f, yaw = 0;   // head for the nearest water
+            for (int k = 0; k < 64; k++) {
+                float a = k * (2 * PI / 64);
+                for (float r = 1; r < 40 && r < best; r += 1)
+                    if (W.isWater(st.x + cosf(a) * r, st.z + sinf(a) * r, 0)) { best = r; yaw = a; }
+            }
+            if (best > 39) continue;
+            // from the start itself, and from 4 m short of the water: too close for any spot on the way to be
+            // saved, so the respawn is the (unchecked) start spot, on the shore slope facing the water
+            for (float back : {best, 4.f}) {
+                float sx = st.x + cosf(yaw) * (best - back), sz = st.z + sinf(yaw) * (best - back);
+                Sim s; s.spawn(sx, sz, yaw, 3);
+                Input in; in.push = true;
+                if (!s.run(60 * 20, in, [](Player& p) { return p.splashed; })) continue;
+                tried++;
+                int again = 0;
+                for (int f = 0; f < 60 * 15; f++) {
+                    s.p.update(1.f / 60, Input{}, W);
+                    if (s.p.evSplash) again++;
+                }
+                if (again || s.p.state != Player::RIDE) {
+                    bad++;
+                    char t[96];
+                    snprintf(t, sizeof t, " (%.0f,%.0f): %d more splashes", sx, sz, again);
+                    worst += t;
+                }
+            }
+        }
+        snprintf(b, sizeof b, "%d/%d shores re-splashed%s", bad, tried, worst.c_str());
+        check(tried > 0 && bad == 0, "splash respawn stays out of water", b);
+    }
     {   // the splash message names the water: ocean, bay, fountain, lake, lagoon, pool, salt pond (rolling in and dropping in)
         float sea = -1440;   // the Pacific, west of the city
         while (!W.isWater(sea, 0, 0) && sea > -3000) sea -= 5;

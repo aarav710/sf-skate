@@ -90,7 +90,7 @@ inline int signalState(int node, int axis, float t) {
 struct Spot { const char* name; Vector3 pos; float yaw; };
 struct Seat { Vector3 pos; float yaw; bool grass; };   // where someone can sit: the seat surface (or lawn) and the way they face
 struct MapLabel { const char* name; float x, z; int size; };
-struct Pond { float x0, z0, x1, z1; };
+struct Pond { float x0, z0, x1, z1; const char* kind = "pond"; };   // kind names it in the splash message
 
 // Static geometry is split into layers per 400 m cell: the main layer is always drawn; foliage detail (every leaf)
 // only up close, swapped for low-poly canopy blobs further out; house interiors only near the camera.
@@ -152,6 +152,7 @@ struct World {
     int houseAt(float x, float z, float y) const;              // index into houses if inside one, else -1
     bool doorBlocked(float x, float z, float pad) const;       // is (x,z) on the way from the sidewalk to a front door?
     bool isWater(float x, float z, float y) const;
+    const char* waterKind(float x, float z, float y) const;   // what isWater found there: "bay", or the pond's kind
     bool onBridge(float x, float z) const;
     bool inPlay(float x, float z) const {
         return (x >= PX0 && x <= PX1 && z >= PZ0 && z <= PZ1) || (x >= AX0 && x <= AX1 && z >= AZ0 && z <= AZ1) ||

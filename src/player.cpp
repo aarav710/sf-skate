@@ -57,7 +57,8 @@ void Player::bail(const char* why) {
     state = BAIL;
     bailT = 0;
     boardPos = pos;
-    boardVel = {f.x * 0.8f + 1.5f, 3.0f, f.z * 0.8f};
+    boardVel = Vector3Add(Vector3Scale(f, 0.8f), Vector3Scale(fwd(), 1.5f)); // kick along the heading, not world +x
+    boardVel.y = 3.0f;
     if (Vector3Length(boardVel) < 0.1f) boardVel = Vector3Scale(fwd(), 2);
     boardYaw = yaw;
     say("BAILED!", C_RED, why);
@@ -178,7 +179,7 @@ void Player::ride(float dt, const Input& in, World& w) {
     if (w.isWater(pos.x, pos.z, pos.y)) {
         splashed = true;
         evSplash = true;
-        bail("Splash! Into the bay");
+        bail(("Splash! Into the " + std::string(w.waterKind(pos.x, pos.z, pos.y))).c_str());
         return;
     }
     if (in.ollie && fabsf(speed) < 40) {
@@ -313,7 +314,7 @@ void Player::land(World& w, float g) {
     if (w.isWater(pos.x, pos.z, g)) {
         splashed = true;
         evSplash = true;
-        bail("Splash! Into the bay");
+        bail(("Splash! Into the " + std::string(w.waterKind(pos.x, pos.z, g))).c_str());
         return;
     }
     if (flipT >= 0 && flipT < flipDur * 0.8f) { bail("Didn't finish the flip"); return; }

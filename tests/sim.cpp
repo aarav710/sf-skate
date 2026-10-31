@@ -151,6 +151,23 @@ int main() {
         snprintf(b, sizeof b, "state=%d (3 = bail)", s.p.state);
         check(s.p.state == Player::BAIL, "late kickflip bails", b);
     }
+    {   // the board flies off along the skater's heading, not always east (issue #20)
+        float worst = 0, worstPos = 0;
+        for (float spd : {0.f, 8.f})
+            for (int d = 0; d < 4; d++) {
+                float yaw = d * PI / 2; // E, S, W, N
+                Sim s; s.spawn(1045 + 2.4f, -80, yaw, spd);
+                s.p.bail("test");
+                Vector3 bv = s.p.boardVel;
+                worst = std::max(worst, fabsf(wrapPi(atan2f(bv.z, bv.x) - yaw)));
+                Vector3 b0 = s.p.boardPos;
+                s.run(15, Input{});
+                Vector3 db = Vector3Subtract(s.p.boardPos, b0);
+                worstPos = std::max(worstPos, fabsf(wrapPi(atan2f(db.z, db.x) - yaw)));
+            }
+        snprintf(b, sizeof b, "worst heading error: velocity %.1f deg, travel %.1f deg", worst * RAD2DEG, worstPos * RAD2DEG);
+        check(worst < 0.02f && worstPos < 0.02f, "bail throws board along heading", b);
+    }
     {   // 360 spin
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
         Input in; in.ollie = true; s.run(1, in);
@@ -295,6 +312,23 @@ int main() {
         s.run(200, Input{});
         snprintf(b, sizeof b, "splash=%d respawned at x=%.1f y=%.1f state=%d", splash, s.p.pos.x, s.p.pos.y, s.p.state);
         check(splash && s.p.pos.y > 0.5f && s.p.state == Player::RIDE, "splash + respawn", b);
+    }
+    {   // the splash message names the water: bay, fountain, lake, pool (rolling in and dropping in)
+        float sea = -1440;
+        while (!W.isWater(sea, 0, 0) && sea > -3000) sea -= 5;
+        const Pond* pool = nullptr;   // a peninsula backyard pool, up on the hills
+        for (auto& pd : W.ponds) if (std::string(pd.kind) == "pool") { pool = &pd; break; }
+        struct { float x, z; const char* msg; } spots[] = {
+            {sea - 20, 0, "Splash! Into the bay"}, {1244.5f, -304, "Splash! Into the fountain"}, {-800, 387, "Splash! Into the lake"},
+            {pool ? (pool->x0 + pool->x1) / 2 : 0, pool ? (pool->z0 + pool->z1) / 2 : 0, "Splash! Into the pool"}};
+        for (auto& sp : spots)
+            for (int air = 0; air < 2; air++) {
+                Sim s; s.spawn(sp.x, sp.z, 0);
+                if (air) { s.p.state = Player::AIR; s.p.pos.y += 2; }
+                bool splash = s.run(120, Input{}, [](Player& p) { return p.splashed; });
+                snprintf(b, sizeof b, "%s: splash=%d \"%s\"", air ? "drop" : "roll", splash, s.p.subPopup.c_str());
+                check(splash && s.p.subPopup == sp.msg, "splash message names the water", b);
+            }
     }
     {   // the Golden Gate railing keeps you on the deck
         Sim s; s.spawn(-1100, -1500, 0, 8); // heading east toward the railing

@@ -25,6 +25,9 @@ constexpr int AZ_ROAD_N = sizeof(AZ_ROAD) / sizeof(AZ_ROAD[0]);
 float alcatrazRoad(float x, float z, float* roadY);
 inline float alcatrazD(float x, float z) { return sqrtf(sq((x - AZ_X) / 118.f) + sq((z - AZ_Z) / 60.f)); }   // 0 center, ~1 foot of the cliffs
 
+// The ground mesh (and so terrain()) at (x, z): squares of size S from (ox, oz), each split along its (0,0)-(1,1)
+// diagonal. False where terrain() reads the raw heightfield instead.
+bool groundMeshGrid(float x, float z, float* ox, float* oz, float* S);
 void groundPad(World& w, float x0, float z0, float x1, float z1, float off, Color c);
 void roadStrip(World& w, Vector2 a, Vector2 b, float halfL, float halfR, float ext, float off, Color c, float step = 5.f);
 extern const Color PASTEL[12];

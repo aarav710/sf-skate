@@ -1,5 +1,6 @@
 // Headless gameplay checks: drives the skater with scripted input and checks the outcome.
 #include "../src/world.h"
+#include "../src/world_internal.h"
 #include "../src/player.h"
 #include "../src/chase.h"
 #include "../src/traffic.h"
@@ -1476,6 +1477,46 @@ int main() {
         }
         snprintf(b, sizeof b, "%d of %d ledges grindable", grinds, ledges);
         check(ledges == 3 && grinds == ledges, "Union Square ledges grindable", b);
+    }
+    {   // Telegraph Hill: the asphalt lies on the ground mesh all over (no grass breaking up through it on the steep
+        // climb), and no street runs into Coit Tower's base
+        int tris = 0, under = 0;
+        float worst = 1e9f;
+        for (auto& kv : W.builders) {
+            const MeshBuilder& m = kv.second;
+            size_t r = 0;
+            for (size_t t = 0; t + 2 < m.count(); t += 3) {
+                while (r < m.c.size() && m.c[r].end <= t) r++;
+                if (r == m.c.size() || memcmp(m.c[r].d, &C_ASPHALT, 4)) continue;
+                Vector3 P[3];
+                for (int k = 0; k < 3; k++) P[k] = {m.v[3 * (t + k)], m.v[3 * (t + k) + 1], m.v[3 * (t + k) + 2]};
+                float cx = (P[0].x + P[1].x + P[2].x) / 3, cz = (P[0].z + P[1].z + P[2].z) / 3;
+                if (cx < 770 || cx > 990 || cz < -990 || cz > -760) continue;
+                tris++;
+                for (int a = 0; a <= 4; a++)
+                    for (int c = 0; a + c <= 4; c++) {   // points spread over the triangle
+                        float u = a / 4.f, v = c / 4.f, w0 = 1 - u - v;
+                        Vector3 q = {P[0].x * w0 + P[1].x * u + P[2].x * v, P[0].y * w0 + P[1].y * u + P[2].y * v,
+                                     P[0].z * w0 + P[1].z * u + P[2].z * v};
+                        float d = q.y - W.terrain(q.x, q.z);
+                        worst = std::min(worst, d);
+                        if (d < 0.03f) under++;
+                    }
+            }
+        }
+        int intoBase = 0;   // street centerline samples within a half street width of the base block (880, -880) +-14
+        for (int j = 0; j < W.sf.nj; j++)
+            for (int i = 0; i < W.sf.ni; i++)
+                for (int d = 0; d < 4; d += 2) {
+                    if (!W.sf.nodeOk(i, j) || !W.sf.edge(i, j, d)) continue;
+                    Vector2 a = W.sf.node(i, j), e = W.sf.node(i + DI[d], j + DJ[d]);
+                    for (int k = 0; k <= 20; k++) {
+                        float x = a.x + (e.x - a.x) * k / 20, z = a.y + (e.y - a.y) * k / 20;
+                        if (fabsf(x - 880) < 14 + W.sf.roadHalf && fabsf(z + 880) < 14 + W.sf.roadHalf) intoBase++;
+                    }
+                }
+        snprintf(b, sizeof b, "%d tris, %d samples under, lowest %.3f m; %d into Coit base", tris, under, worst, intoBase);
+        check(tris > 100 && under == 0 && intoBase == 0, "Telegraph Hill road on the ground", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

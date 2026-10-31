@@ -1236,6 +1236,7 @@ void World::generate(void (*progress)(const char*, float)) {
     buildGrid(sf);
     buildGrid(oak);
     sf.setEdge(16, 3, 0, false); // Lombard's crooked block replaces the straight street
+    sf.setEdge(20, 2, 0, false); // Coit Tower's base (880, -880) stands on this block of the street up Telegraph Hill
     progress("Laying the ground", 0.25f);
     buildTerrainMesh();
     buildBackdrop();

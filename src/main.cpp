@@ -660,7 +660,7 @@ int main() {
         if (SP.riding && !paused && !picker && !showMap && !title) {
             if (IsKeyPressed(KEY_E) && !justMounted) {
                 if (SP.dismount(P, W)) { camYaw = P.yaw; P.say("Back on land", WHITE); }
-                else P.say(SP.onWater ? "Slow down near the shore to climb out" : "Land on the water first", WHITE);
+                else P.say(SP.refusalMsg(), WHITE);
             }
             if (SP.riding) {
                 bool climb = IsKeyDown(KEY_SPACE), dive = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);

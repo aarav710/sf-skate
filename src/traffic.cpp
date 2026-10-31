@@ -371,6 +371,32 @@ void Traffic::farPedUpdate(Ped& p, float dt, World& w, RNG& r) {
     p.phase += dt * p.gait * 5.2f;
 }
 
+// Where a walker's dog goes: a little ahead and off to one side (beside them when they stop), standing on the
+// ground right there rather than at the walker's height, and never inside a wall or a pole. A blocked side sends
+// it round to the other; if both are blocked (a narrow gap, a doorway) it's pulled in close, and failing that it
+// takes the spot the wall pushes it out to. Usually one ground and one wall query per dog.
+static Vector3 dogSpot(Ped& p, const World& w) {
+    float s = p.petS, cy = cosf(p.yaw), sy = sinf(p.yaw), feet = p.pos.y - p.evY;
+    bool sit = p.mode == 2 || p.knock > 0;
+    float ax = sit ? 0.15f : 0.95f, az = sit ? 0.65f : 0.5f;
+    // the wall check is a circle round the middle of the body (it runs from the tail to the nose along x)
+    float r = 0.3f * s + 0.05f, mid = 0.15f * s, h = 0.8f * s;
+    const float tries[4][2] = {{ax, az * p.dogSide}, {ax, -az * p.dogSide}, {ax * 0.45f, 0.3f * p.dogSide}, {ax * 0.45f, -0.3f * p.dogSide}};
+    Vector3 pushed = {0, 0, 0};
+    for (int k = 0; k < 4; k++) {
+        float x = p.pos.x + tries[k][0] * cy - tries[k][1] * sy, z = p.pos.z + tries[k][0] * sy + tries[k][1] * cy;
+        float y = w.ground(x, z, std::max(w.terrain(x, z), feet));
+        Vector3 c = {x + mid * cy, y, z + mid * sy};
+        if (!w.collide(c, r, y, h, nullptr)) {
+            if (tries[k][1] * p.dogSide < 0) p.dogSide = -p.dogSide;   // stays on its new side until that's blocked too
+            return {x, y, z};
+        }
+        if (k == 0) pushed = {c.x - mid * cy, 0, c.z - mid * sy};
+    }
+    pushed.y = w.ground(pushed.x, pushed.z, std::max(w.terrain(pushed.x, pushed.z), feet));
+    return pushed;
+}
+
 void Traffic::update(float dt, World& w, const Player& pl) {
     RNG& r = gR;
     evHonk = false;
@@ -392,6 +418,39 @@ void Traffic::update(float dt, World& w, const Player& pl) {
         }
     }
     Vector3 pp = pl.pos;
+    // every car keeps its distance from the others, near the skater or not (or they'd merge out on the bridges and
+    // still be inside each other when you get there): bucket them into 40 m cells so each only looks at its neighbors
+    const float CELL = 40.f;
+    auto cellKey = [](int cx, int cz) { return (uint64_t)((uint32_t)(cx + 2048) << 12 | (uint32_t)(cz + 2048)); };
+    carCells.clear();
+    for (size_t k = 0; k < cars.size(); k++)
+        if (cars[k].placed)
+            carCells.push_back(cellKey((int)floorf(cars[k].pos.x / CELL), (int)floorf(cars[k].pos.z / CELL)) << 32 | k);
+    std::sort(carCells.begin(), carCells.end());
+    // is b in a's way: ahead of it and across its lane (counting where b will be in a moment), within stopping reach.
+    // gap: a is waiting to cross a whole road, so it wants b well clear of it, near lanes and far.
+    // fwd: count the road just ahead of b as well (the rest of its way across)
+    auto inWay = [](const Car& a, const Car& b, bool gap, float fwd) {
+        const CarModel &ma = carModel(a.type), &mb = carModel(b.type);
+        Vector2 f = {cosf(a.yaw), sinf(a.yaw)}, g = {cosf(b.yaw), sinf(b.yaw)};
+        float rx = b.pos.x + g.x * fwd * 0.5f - a.pos.x, rz = b.pos.z + g.y * fwd * 0.5f - a.pos.z;
+        float along = rx * f.x + rz * f.y, l = -rx * f.y + rz * f.x;
+        float ga = fabsf(Vector2DotProduct(g, f)), gl = -g.x * f.y + g.y * f.x;
+        float hl = mb.halfLen + fwd * 0.5f;
+        float extA = ga * hl + fabsf(gl) * mb.halfWid;                 // b's body, along a's heading and across it
+        float extL = fabsf(gl) * hl + ga * mb.halfWid;
+        float vl = b.speed * gl;                                        // b's speed across a's lane
+        if (vl * l < 0) extL += fabsf(vl) * (gap ? 2.5f : 0.8f);       // heading into it
+        return along + extA > 0 && along - extA < ma.halfLen + 3 + a.speed * 0.9f + (gap ? 20 : 0) && fabsf(l) < extL + ma.halfWid + 0.4f;
+    };
+    // a road car on a path drives a loop: out along its lane, U-turn, back on the other side, U-turn. Where it is
+    // around that loop, so cars sharing a lane can tell who's ahead even halfway round a U-turn
+    auto loopPos = [&](const Car& k, float* loop) {
+        float L = w.carPaths[k.path].len, Lu = PI * std::max(k.lane, 1.f);
+        *loop = 2 * (L + Lu);
+        float u = k.pdir > 0 ? (k.uturn >= 0 ? L + k.uturn : k.s) : (k.uturn >= 0 ? 2 * L + Lu + k.uturn : L + Lu + L - k.s);
+        return u;
+    };
     for (auto& c : cars) {
         float distP = sqrtf(sq(c.pos.x - pp.x) + sq(c.pos.z - pp.z));
         // target speed: stop for the skater and for cars ahead
@@ -408,18 +467,54 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             }
         }
         c.honkCD -= dt;
-        if (c.placed && distP < 350) {
-            for (auto& o : cars) {
-                if (&o == &c) continue;
-                float rx = o.pos.x - c.pos.x, rz = o.pos.z - c.pos.z;
-                if (fabsf(rx) > 20 || fabsf(rz) > 20) continue;
-                float along = rx * f.x + rz * f.y, lat = fabsf(-rx * f.y + rz * f.x);
-                float gap = carModel(c.type).halfLen + carModel(o.type).halfLen + 2.5f;
-                if (along > 0 && along < gap + c.speed * 0.6f && lat < 1.6f && fabsf(o.pos.y - c.pos.y) < 3) {
-                    float of = cosf(o.yaw) * f.x + sinf(o.yaw) * f.y;
-                    if (of > 0.3f) target = std::min(target, along < gap ? 0.f : o.speed);
+        float backOff = 0;   // how far this car's body is into the one ahead of it
+        if (c.placed) {
+            int cx = (int)floorf(c.pos.x / CELL), cz = (int)floorf(c.pos.z / CELL);
+            for (int zz = cz - 1; zz <= cz + 1; zz++)
+                for (int xx = cx - 1; xx <= cx + 1; xx++) {
+                    uint64_t key = cellKey(xx, zz) << 32;
+                    for (auto it = std::lower_bound(carCells.begin(), carCells.end(), key); it != carCells.end() && (*it >> 32) == (key >> 32); ++it) {
+                        Car& o = cars[(uint32_t)*it];
+                        if (&o == &c) continue;
+                        float rx = o.pos.x - c.pos.x, rz = o.pos.z - c.pos.z;
+                        bool sameLane = c.mode == 1 && o.mode == 1 && c.path == o.path && c.type != CT_STREETCAR && o.type != CT_STREETCAR;
+                        if (sameLane && c.lane != o.lane) continue;   // lanes of a road (and their U-turns) never meet
+                        // (the same lane is the same road, however steep the ramp between them)
+                        if (fabsf(rx) > CELL || fabsf(rz) > CELL || (!sameLane && fabsf(o.pos.y - c.pos.y) >= 3)) continue;
+                        float along = rx * f.x + rz * f.y, lat = fabsf(-rx * f.y + rz * f.x);
+                        float gap = carModel(c.type).halfLen + carModel(o.type).halfLen + 2.5f;
+                        float of = cosf(o.yaw) * f.x + sinf(o.yaw) * f.y;
+                        if (sameLane) {
+                            float loop, uc = loopPos(c, &loop);
+                            along = fmodf(loopPos(o, &loop) - uc + loop, loop);   // how far round the lane it is ahead
+                            lat = 0; of = 1;
+                        }
+                        // the car ahead in the lane (two cars level with each other: the later one in the list waits)
+                        bool ahead = along > 0 || (along == 0 && &o < &c);
+                        // brake in time to stop short of it, even coming up on a queue at bridge speeds
+                        bool cross = c.mode != o.mode && c.mode <= 1 && o.mode <= 1;   // main road against grid: see below
+                        if (!cross && of > 0.3f && ahead && along < gap + c.speed * 1.4f && lat < 1.6f) {
+                            float room = std::max(0.f, along - gap - c.speed * 0.4f);
+                            target = std::min(target, along < gap ? 0.f : sqrtf(sq(o.speed) + 24 * room));
+                            backOff = std::max(backOff, gap - 2.f - along);
+                        }
+                        // crossing paths (Market St and the Embarcadero against the street grid): the main road has
+                        // the right of way. A grid car waits back from it for a gap; a car on it stops short of a grid
+                        // car already out in the road and the rest of its way across, and that one, once it's held
+                        // someone up, just clears the road. (Cars stuck out there waiting on each other would leave
+                        // everyone waiting on everyone.)
+                        if (cross) {
+                            const float ACROSS = 12;
+                            if (c.mode == 1) {
+                                if (inWay(c, o, false, ACROSS)) { target = 0; o.acrossT = clock; }
+                            } else {
+                                bool cNow = inWay(c, o, false, 0), oNow = inWay(o, c, false, ACROSS);
+                                bool across = clock - c.acrossT < 0.25f;
+                                if ((cNow && (!oNow || o.stopT > 0)) || (!across && !oNow && inWay(c, o, true, 0))) target = 0;
+                            }
+                        }
+                    }
                 }
-            }
         }
         // slow down for corners and U-turns, braking gently on the way in
         {
@@ -458,6 +553,7 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             if (c.pd < 0) c.pd = c.d;
             if (c.nd < 0) c.nd = pickGridDir(g, c.i + DI[c.d], c.j + DJ[c.d], c.d, r);
             c.t += c.speed * dt / g.sp;
+            if (backOff > 0) c.t = std::max(0.f, c.t - std::min(backOff, 3 * dt) / g.sp);   // ease back out of the car ahead
             int guard = 0;
             while (c.t >= 1 && guard++ < 4) {
                 c.t -= 1;
@@ -482,9 +578,10 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             bool rail = c.mode >= 2 || c.type == CT_STREETCAR;
             float step = c.speed * dt, Lu = PI * std::max(c.lane, 1.f);
             if (c.uturn >= 0) {
-                c.uturn += step;
+                c.uturn = std::max(0.f, c.uturn + step - std::min(backOff, 3 * dt));
                 if (c.uturn >= Lu) { c.uturn = -1; c.pdir = -c.pdir; }
             } else {
+                if (backOff > 0) c.s = clampf(c.s - c.pdir * std::min(backOff, 3 * dt), 0, P.len);   // ease back out of the car ahead
                 float before = c.s;
                 c.s += c.pdir * step;
                 c.xover += step;
@@ -615,7 +712,8 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             if (p.evT >= p.evDur) { p.evade = EV_NONE; p.evTilt = 0; }
         } else if (Vector2Length(p.dodge) > 0.01f) {
             // back to their route at a walk once the skater has gone by (they turn and walk it, see the facing below)
-            bool clear = dP2 > 6 * 6 || skSp < 1.f;
+            // (a skater stopped right beside them is still in the way: they keep their step round until past)
+            bool clear = dP2 > 6 * 6 || (skSp < 1.f && dP2 > 2.5f * 2.5f);
             if (clear) {
                 float L = Vector2Length(p.dodge), step = std::min(L, 1.0f * dt);
                 p.dodge = Vector2Subtract(p.dodge, Vector2Scale(p.dodge, step / L));
@@ -645,7 +743,37 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             p.idleTurn -= dt;
             if (p.idleTurn < 0 && p.gait < 0.2f && !evading) { p.idleTurn = r.range(2, 7); p.yaw += r.range(-1.2f, 1.2f); }
         }
+        // a skater standing or rolling slowly (too slow to set off the dodges above) is walked round like
+        // anyone else on the sidewalk: drift sideways off the route while they're in the way ahead, to the
+        // side already favoured, or the other side if a wall or the water is there
+        bool slowSk = pl.hspeed() < 2.f && fabsf(pl.pos.y - p.pos.y) < 1.4f;
+        if (slowSk && !evading && dP2 < 4.f * 4.f && (routeDir.x != 0 || routeDir.y != 0)) {
+            const float R = 0.8f;   // how wide a berth they give the skater
+            Vector2 at = {base.x + p.dodge.x - pp.x, base.y + p.dodge.y - pp.z};   // skater to where they're headed
+            Vector2 side = {-routeDir.y, routeDir.x};
+            float ahead = -Vector2DotProduct(at, routeDir), lat = Vector2DotProduct(at, side);
+            if (ahead > -0.3f && ahead < 2.5f && fabsf(lat) < R) {
+                float sg = fabsf(lat) > 0.05f ? (lat > 0 ? 1.f : -1.f) : ((hashu((int)(p.phase * 1000.f), (int)pi, 43) & 1) ? 1.f : -1.f);
+                Vector2 to = {pp.x + side.x * sg * (R + 0.3f), pp.z + side.y * sg * (R + 0.3f)};
+                float g = w.terrain(to.x, to.y);
+                if (w.solidAt({to.x, std::max(prevGround, g) + 0.6f, to.y}) || w.isWater(to.x, to.y, g)) sg = -sg;
+                float need = sg * lat > 0 ? R - fabsf(lat) : R + fabsf(lat);
+                p.dodge = Vector2Add(p.dodge, Vector2Scale(side, sg * std::min(need, 1.4f * dt)));
+            }
+        }
         float x = base.x + p.dodge.x, z = base.y + p.dodge.y;
+        // and never in the same spot as a slow skater (anyone faster knocks them down, in interact):
+        // a soft push out, kept in the sidestep so it lasts and the walls below still win
+        if (slowSk && p.evade != EV_DIVE) {
+            const float BODY = 0.6f;
+            float ox = x - pp.x, oz = z - pp.z, d = sqrtf(ox * ox + oz * oz);
+            if (d < BODY) {
+                Vector2 n = d > 0.01f ? Vector2{ox / d, oz / d} : (routeDir.x != 0 || routeDir.y != 0) ? Vector2{-routeDir.y, routeDir.x} : Vector2{1, 0};
+                Vector2 push = Vector2Scale(n, BODY - d);
+                p.dodge = Vector2Add(p.dodge, push);
+                x += push.x; z += push.y;
+            }
+        }
         // climb steps one at a time from where they stood last frame, like the skater does,
         // instead of reading the ground from street level and walking through a stoop
         float yRef = std::max(w.terrain(x, z), prevGround);
@@ -703,6 +831,20 @@ void Traffic::update(float dt, World& w, const Player& pl) {
                 p.yaw = lerpAngle(p.yaw, atan2f(v.y, v.x), 1 - expf(-dt * (evading ? 12.f : 6.f)));
             p.phase += dt * vs * 5.2f;
         }
+    }
+    // dogs: worked out here, where the world is to hand, so drawDog can stand them on the ground clear of walls.
+    // Only the ones that can be drawn (within 150 m of the camera); they ease over when the spot changes
+    // (sitting down, switching sides) and jump straight there when far off (just come into range).
+    for (auto& p : peds) {
+        if (!p.pet) continue;
+        if (std::min(sq(p.pos.x - pp.x) + sq(p.pos.z - pp.z), sq(p.pos.x - view.x) + sq(p.pos.z - view.z)) > 160 * 160) continue;
+        Vector3 to = dogSpot(p, w);
+        Vector2 off = {to.x - p.pos.x, to.z - p.pos.z}, go = Vector2Subtract(off, p.dogOff);
+        if (sq(to.x - p.dog.x) + sq(to.z - p.dog.z) > 3 * 3 || Vector2LengthSqr(go) < 1e-4f) { p.dogOff = off; p.dog = to; continue; }
+        // ease the offset from the walker, not the position, so a walking dog keeps up instead of trailing
+        p.dogOff = Vector2Add(p.dogOff, Vector2Scale(go, 1 - expf(-dt * 10)));
+        float x = p.pos.x + p.dogOff.x, z = p.pos.z + p.dogOff.y;
+        p.dog = {x, w.ground(x, z, std::max(w.terrain(x, z), to.y)), z};
     }
     // Caltrain: accelerate, brake for the next station, dwell, reverse at the ends
     float lineEnd = w.railLen() - 25, lineStart = w.stations.empty() ? 0 : w.stations[0].s;
@@ -835,7 +977,7 @@ static void drawDog(const Ped& p, float now) {
     float s = p.petS, cy = cosf(p.yaw), sy = sinf(p.yaw);
     bool sit = p.mode == 2 || p.knock > 0;
     auto W = [&](float x, float y, float z) { return Vector3{p.pos.x + x * cy - z * sy, p.pos.y + y, p.pos.z + x * sy + z * cy}; };
-    Vector3 at = sit ? W(0.15f, 0, 0.65f) : W(0.95f, 0, 0.5f);
+    Vector3 at = p.dog;   // on the ground there and clear of walls: see dogSpot
     inst::push();
     inst::translate(at.x, at.y, at.z);
     inst::rotate(-p.yaw * RAD2DEG, 0, 1, 0);
@@ -863,7 +1005,7 @@ static void drawDog(const Ped& p, float now) {
     // the leash, from the walker's hand to the collar, sagging a little
     float ps = p.scale;
     Vector3 hand = W(0.12f * ps, 0.86f * ps, 0.27f * ps);
-    Vector3 collar = sit ? W(0.15f + 0.3f * s, 0.62f * s, 0.65f) : W(0.95f + 0.3f * s, 0.6f * s, 0.5f);
+    Vector3 collar = {at.x + 0.3f * s * cy, at.y + (sit ? 0.62f : 0.6f) * s, at.z + 0.3f * s * sy};
     Vector3 mid = Vector3Lerp(hand, collar, 0.5f);
     mid.y -= 0.12f;
     DrawLine3D(hand, mid, {150, 30, 40, 255});

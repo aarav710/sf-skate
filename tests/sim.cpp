@@ -2,6 +2,8 @@
 #include "../src/world.h"
 #include "../src/player.h"
 #include "../src/chase.h"
+#include "../src/traffic.h"
+#include "../src/models.h"
 #include <cstdio>
 #include <algorithm>
 
@@ -122,6 +124,19 @@ int main() {
         }
         snprintf(b, sizeof b, "deflected %d of 2, landed %d", deflected, ok);
         check(deflected == 2 && ok == 2, "mid-air pole clip lands", b);
+    }
+    {   // a stomped landing scales the spin and Big Air too, not just the tricks done before it
+        auto stomped = [](float spin, float air) {
+            Sim s; s.spawn(1045 + 2.4f, -80, PI / 2);
+            Player& p = s.p;
+            p.state = Player::AIR; p.pos.y += 0.05f; p.vel = Vector3Scale(p.fwd(), 8); p.vy = -6;
+            p.combo = {"Ollie"}; p.comboPts = 100; p.spinAccum = spin; p.airTime = air;
+            s.run(30, Input{}, [](Player& q) { return q.state != Player::AIR; });
+            return p.score;
+        };
+        long long spun = stomped(PI, 0.5f), big = stomped(0, 1.7f);
+        snprintf(b, sizeof b, "Ollie+FS 180 +%lld (want 920), Ollie+Big Air +%lld (want ~1160)", spun, big);
+        check(spun >= 915 && spun <= 925 && big >= 1140 && big <= 1180, "stomp bonus covers spin & Big Air", b);
     }
     {   // grind the flat bar at Embarcadero Plaza
         Sim s; s.spawn(1186, -238, 0, 7);
@@ -367,6 +382,55 @@ int main() {
         bool stayed = W.houseAt(s.p.pos.x, s.p.pos.z, s.p.pos.y) >= 0 && maxY - y0 < 2.0f;
         snprintf(b, sizeof b, "%d enterable houses, rolled in %d of %d, ollie inside peak %.2f m stayed=%d", n, enteredOk, tried, maxY - y0, stayed);
         check(n > 300 && enteredOk >= tried - 1 && stayed, "walk into houses", b);
+    }
+    {   // furniture indoors stops you (sofa back, floor lamp, potted plant, TV), and the TV leaves the way to the
+        // back room open. Positions follow the room layout in World::addHouseInterior (u along the facade, d inward).
+        int tried = 0, bad[5] = {0}, runs[5] = {0};
+        for (int k = 0; k < (int)W.houses.size() && tried < 16; k += 37) {
+            const House& h = W.houses[k];
+            const float t = 0.35f;
+            float fu0 = h.facing < 2 ? h.x0 : h.z0, fu1 = h.facing < 2 ? h.x1 : h.z1;
+            float D = h.facing < 2 ? h.z1 - h.z0 : h.x1 - h.x0, iu0 = fu0 + t, iu1 = fu1 - t;
+            if (iu1 - iu0 < 6.3f) continue;
+            tried++;
+            auto toW = [&](float u, float d) -> Vector2 {
+                switch (h.facing) { case 0: return {u, h.z0 + d}; case 1: return {u, h.z1 - d}; case 2: return {h.x0 + d, u}; default: return {h.x1 - d, u}; }
+            };
+            auto toU = [&](Vector3 p) { return h.facing < 2 ? p.x : p.z; };
+            auto toD = [&](Vector3 p) { switch (h.facing) { case 0: return p.z - h.z0; case 1: return h.z1 - p.z; case 2: return p.x - h.x0; default: return h.x1 - p.x; } };
+            // ride from (u, d) along (du, dd) for 3 s; returns how far it got along that direction
+            auto ride = [&](float u, float d, float du, float dd) {
+                Vector2 s0 = toW(u, d), s1 = toW(u + du, d + dd);
+                Sim s; s.p.spawn({s0.x, h.floorY, s0.y}, atan2f(s1.y - s0.y, s1.x - s0.x)); s.p.speed = 3;
+                float best = 0;
+                for (int f = 0; f < 180; f++) {
+                    Input in; in.push = s.p.speed < 3;
+                    s.p.update(1.f / 60, in, W);
+                    best = std::max(best, (toU(s.p.pos) - u) * du + (toD(s.p.pos) - d) * dd);
+                }
+                return best;
+            };
+            float doorU = h.facing < 2 ? h.doorIn.x : h.doorIn.y;
+            bool doorLeft = doorU < (fu0 + fu1) * 0.5f;
+            float dp = std::clamp(D * 0.42f, 5.5f, 9.f), sofaD = t + 3.2f, gapC = doorLeft ? iu0 + 1.5f : iu1 - 1.5f;
+            float farU0 = doorLeft ? iu1 - 2.4f : iu0, farU1 = doorLeft ? iu1 : iu0 + 2.4f, sgn = doorLeft ? 1.f : -1.f;
+            float plantU = farU0 + 0.45f;   // plant: ride at it from 2 m out, toward the side wall behind it
+            runs[0]++; if (ride(plantU - 2.f * sgn, sofaD - 0.75f, sgn, 0) > 1.5f) bad[0]++;
+            float span0 = doorLeft ? gapC + 0.7f : farU1, span1 = doorLeft ? farU0 : gapC - 0.7f;
+            if (span1 - span0 >= 1.7f) {   // TV: ride at it toward the partition; it stops you in front of the screen
+                runs[1]++; if (ride((span0 + span1) * 0.5f, dp - 2.2f, 0, 1) > 1.79f) bad[1]++;
+            }
+            runs[2]++; if (ride(gapC, dp - 2.2f, 0, 1) < 2.8f) bad[2]++;   // the doorway in the partition stays open
+            if (doorLeft) {
+                runs[3]++; if (ride(iu1 - 0.35f, sofaD - 1.5f, 0, 1) > 1.3f) bad[3]++;   // along the wall into the sofa back
+                float ld = sofaD + 2.625f;
+                if (fabsf(ld - (dp + 0.1f)) > 0.9f) { runs[4]++; if (ride(iu1 - 2.235f, ld, 1, 0) > 1.6f) bad[4]++; } // lamp
+            }
+        }
+        snprintf(b, sizeof b, "%d rooms; rode through plant %d/%d, TV %d/%d, sofa back %d/%d, lamp %d/%d; doorway blocked %d/%d",
+                 tried, bad[0], runs[0], bad[1], runs[1], bad[3], runs[3], bad[4], runs[4], bad[2], runs[2]);
+        check(tried >= 8 && runs[1] > 0 && runs[3] > 0 && runs[4] > 0 && !bad[0] && !bad[1] && !bad[2] && !bad[3] && !bad[4],
+              "Furniture indoors is solid", b);
     }
     {   // police chase: cops show up, stand still and you get busted, outrun them and you escape
         Chase c; Player p;
@@ -617,6 +681,79 @@ int main() {
         }
         snprintf(b, sizeof b, "%d of %d towers ridden through", through, towers);
         check(towers > 0 && through == towers, "Ride between gondola tower legs", b);
+    }
+    {   // Lombard planters: the collision box is the drawn shrub (same layout as World::buildLombard)
+        float x0 = gx(16) + 6, x1 = gx(17) - 6, zc = gz(3);
+        std::vector<Vector2> pts;
+        pts.push_back({gx(16) - 4, zc});
+        for (int k = 0; k <= 8; k++) pts.push_back({lerpf(x0, x1, k / 8.f), zc + ((k % 2) ? 6.5f : -6.5f)});
+        int tot = 0, tallOk = 0, wideOk = 0;
+        float worst = 99;
+        for (int k = 1; k <= 8; k++) {
+            Vector2 a = pts[k], b2 = pts[k + 1];
+            Vector2 d = Vector2Normalize(Vector2Subtract(b2, a)), n = {-d.y, d.x};
+            float L = Vector2Distance(a, b2);
+            for (int side = -1; side <= 1; side += 2)
+                for (float s0 = 2.5f; s0 < L - 2.0f; s0 += 1.6f) {
+                    Vector2 p = Vector2Add(Vector2Add(a, Vector2Scale(d, s0)), Vector2Scale(n, side * 3.4f));
+                    if (fabsf(p.y - zc) > 9.5f) continue;
+                    float gy = W.terrain(p.x, p.y);
+                    tot++;
+                    if (W.ground(p.x, p.y, gy + 2) > gy + 1.0f) tallOk++;   // standing on it puts the board at the shrub's crown
+                    // roll from the road straight into it: the skater stops outside the foliage
+                    Vector2 q = Vector2Subtract(p, Vector2Scale(n, side * 1.8f));
+                    Sim s;
+                    s.p.spawn({q.x, W.ground(q.x, q.y, W.terrain(q.x, q.y) + 0.5f), q.y}, atan2f(p.y - q.y, p.x - q.x));
+                    s.p.speed = 4;
+                    float minD = 99;
+                    s.run(90, Input{}, [&](Player& pl) { minD = std::min(minD, sqrtf(sq(pl.pos.x - p.x) + sq(pl.pos.z - p.y))); return false; });
+                    worst = std::min(worst, minD);
+                    if (minD > 1.05f) wideOk++;
+                }
+        }
+        snprintf(b, sizeof b, "%d planters, %d tall enough, %d stop outside (closest %.2f m)", tot, tallOk, wideOk, worst);
+        check(tot > 20 && tallOk == tot && wideOk == tot, "Lombard planters match the shrubs", b);
+    }
+    {   // traffic doesn't drive through itself: the queue behind a skater standing on the Golden Gate, and Market St and
+        // the Bay Bridge's Embarcadero end against the street grid; and nobody gets gridlocked at those crossings
+        auto overlap = [](const Car& a, const Car& b) {   // oriented boxes, a little inside the drawn bodies
+            const CarModel &ma = carModel(a.type), &mb = carModel(b.type);
+            if (fabsf(a.pos.y - b.pos.y) > 3) return false;
+            Vector2 ax[4] = {{cosf(a.yaw), sinf(a.yaw)}, {-sinf(a.yaw), cosf(a.yaw)}, {cosf(b.yaw), sinf(b.yaw)}, {-sinf(b.yaw), cosf(b.yaw)}};
+            Vector2 d = {b.pos.x - a.pos.x, b.pos.z - a.pos.z};
+            for (auto& n : ax) {
+                float ra = (ma.halfLen - 0.15f) * fabsf(Vector2DotProduct(ax[0], n)) + (ma.halfWid - 0.15f) * fabsf(Vector2DotProduct(ax[1], n));
+                float rb = (mb.halfLen - 0.15f) * fabsf(Vector2DotProduct(ax[2], n)) + (mb.halfWid - 0.15f) * fabsf(Vector2DotProduct(ax[3], n));
+                if (fabsf(Vector2DotProduct(d, n)) > ra + rb) return false;
+            }
+            return true;
+        };
+        struct { const char* n; float x, z; } spots[] = {{"Golden Gate", -1100, -2000}, {"Bay Bridge end", 1265, 335}, {"Market St", 1100, -80}};
+        float sameOv = 0, crossOv = 0, longestStop = 0;
+        for (auto& sp : spots) {
+            Traffic T; T.init(W);
+            Player pl; pl.spawn({sp.x, W.ground(sp.x, sp.z, 1000), sp.z}, 0);
+            bool onBridge = &sp == &spots[0];
+            if (!onBridge) pl.pos.y += 200;   // the skater out of everyone's way
+            std::vector<float> still(T.cars.size(), 0);
+            for (int f = 0; f < 60 * 70; f++) {
+                T.update(1.f / 60, W, pl);
+                for (size_t i = 0; i < T.cars.size(); i++) {
+                    const Car& a = T.cars[i];
+                    if (a.mode > 1 || sq(a.pos.x - sp.x) + sq(a.pos.z - sp.z) > 300 * 300) continue;
+                    still[i] = a.speed < 0.3f ? still[i] + 1.f / 60 : 0;
+                    if (!onBridge) longestStop = std::max(longestStop, still[i]);
+                    if (f < 60 * 10 || sq(a.pos.x - sp.x) + sq(a.pos.z - sp.z) > 150 * 150) continue;
+                    for (size_t j = i + 1; j < T.cars.size(); j++) {
+                        const Car& b = T.cars[j];
+                        if (b.mode > 1 || (a.mode == 0 && b.mode == 0) || fabsf(a.pos.x - b.pos.x) > 25 || fabsf(a.pos.z - b.pos.z) > 25) continue;
+                        if (overlap(a, b)) (a.mode == b.mode ? sameOv : crossOv) += 1.f / 60;
+                    }
+                }
+            }
+        }
+        snprintf(b, sizeof b, "overlapping: same road %.1f s, crossing %.1f s; longest stop %.0f s", sameOv, crossOv, longestStop);
+        check(sameOv == 0 && crossOv < 20 && longestStop < 60, "Traffic keeps out of itself", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

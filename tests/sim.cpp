@@ -275,6 +275,22 @@ int main() {
         check(s.p.state == Player::RIDE && s.p.speed > 0 && s.p.subPopup.find("180") != std::string::npos &&
               s.p.subPopup.find("Fakie") == std::string::npos, "fakie 180 lands forwards", b);
     }
+    {   // ...and a forwards 180 lands fakie: keeps the yaw it landed with and rolls on backwards, no snap round (issue #92)
+        Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
+        Input in; in.ollie = true; s.run(1, in);
+        Input sp; sp.steer = 1; s.run(63, sp, [](Player& p) { return fabsf(p.spinAccum) >= PI; });
+        float jump = 0, prev = s.p.yaw;
+        bool landed = false;
+        s.run(150, Input{}, [&](Player& p) {   // touchdown, landing bounce, then rolling on
+            jump = std::max(jump, fabsf(wrapPi(p.yaw - prev)));
+            prev = p.yaw;
+            landed |= p.evLand;
+            return false;
+        });
+        snprintf(b, sizeof b, "landed=%d max yaw step %.2f rad, state=%d speed=%.1f banked \"%s\"", landed, jump, s.p.state, s.p.speed, s.p.subPopup.c_str());
+        check(landed && jump < 0.05f && s.p.state == Player::RIDE && s.p.speed < -4.f &&
+              s.p.subPopup.find("FS 180 to Fakie") != std::string::npos, "forwards 180 rolls away fakie", b);
+    }
     {   // ...and ollieing fakie onto the Embarcadero Plaza Flat Bar grinds fakie, then rolls away fakie
         int ok = 0, tries = 6; float worst = 0; char last[200] = "";
         for (int t = 0; t < tries; t++) {

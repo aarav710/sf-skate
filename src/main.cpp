@@ -1414,17 +1414,28 @@ int main() {
                 }
             }
             if (showHelp) {
-                // 22 px rows keep the panel clear of the FPS counter in the corner below it
-                const int rowH = 22, nLines = 20;
-                int hx = sw - 330, hy = 270;
-                DrawRectangle(hx, hy, 314, 18 + nLines * rowH, {0, 0, 0, 140});
                 const char* lines[] = {"CONTROLS", "W / Up      push", "S / Down    brake", "A D         steer / spin in air",
                                        "Shift       tuck (go faster)", "Space       ollie / jump off rail", "J  K  L     kickflip, heelflip, shove-it",
                                        "I (hold)    grab", "Land on rails & ledges to grind", "B  free roam / cop chase   N  difficulty", "Right mouse  look around", "Wheel       zoom    C  camera",
                                        "Tab  choose landmark / time", "M  map  1-0  teleport  E  train/jetski", "T or F1-F3  time of day",
                                        "F fog  G rain  R reset  P pause", TextFormat("V  graphics: %s", Renderer::QUALITY_NAMES[R.quality]),
                                        TextFormat("Y  frame rate: %s", gCap60 ? "60" : "Max"), "Caught: mash SPACE A D / J K L", "H  hide this help"};
-                for (int i = 0; i < nLines; i++) DrawText(lines[i], hx + 14, hy + 10 + i * rowH, i == 0 ? 22 : 18, i == 0 ? Color{255, 210, 60, 255} : WHITE);
+                // size the panel from the measured text so no line is cut off; in small windows shrink the font
+                // until it fits below the minimap (y 270) and clear of the FPS counter below it, then slide it up if still too tall
+                const int n = sizeof(lines) / sizeof(lines[0]);
+                auto panelW = [&](int fs) {
+                    int w = 0;
+                    for (int i = 0; i < n; i++) w = std::max(w, MeasureText(lines[i], i == 0 ? fs + 4 : fs));
+                    return w + 28;
+                };
+                auto panelH = [&](int fs) { return 10 + n * (fs + 4) + 8; };   // 22 px rows at size 18
+                int fs = 18;
+                while (fs > 12 && (panelH(fs) > sh2 - 40 - 270 || panelW(fs) > sw - 32)) fs--;
+                while (fs > 10 && panelH(fs) > sh2 - 32) fs--;   // tiny windows: last resort, smallest legible size
+                int hw = panelW(fs), hh = panelH(fs);
+                int hx = std::max(16, sw - hw - 16), hy = std::max(16, std::min(270, sh2 - 40 - hh));
+                DrawRectangle(hx, hy, hw, hh, {0, 0, 0, 140});
+                for (int i = 0; i < n; i++) DrawText(lines[i], hx + 14, hy + 10 + i * (fs + 4), i == 0 ? fs + 4 : fs, i == 0 ? Color{255, 210, 60, 255} : WHITE);
             }
             }
             if (nearSki >= 0) {

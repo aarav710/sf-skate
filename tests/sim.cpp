@@ -1301,6 +1301,32 @@ int main() {
                  (int)grid.size(), gridOv, longest, longestIn, avg);
         check(gridOv < 15 && longest < 120 && longestIn < 30 && avg > 6.5f, "Grid traffic takes turns", b);
     }
+    {   // and where the main roads cross the grid, and at their ends, nobody waits on anybody for minutes (#47): the
+        // whole city for ten minutes (those lockups mostly started after three), every car on the main roads and the
+        // grid, near the main roads or not. (Over nine traffic seeds, 600 s: one car in all stood just over a minute,
+        // 62 s; longest stop on the main roads 42 s. Before, 25-209 cars a seed stood over a minute, the longest
+        // 4.5-9.5 minutes, main-road cars included.)
+        Traffic T; T.init(W);
+        Player pl; pl.spawn({0, W.ground(0, 0, 1000) + 200, 0}, 0);   // the skater out of everyone's way
+        std::vector<float> still(T.cars.size(), 0), most(T.cars.size(), 0);
+        float longGrid = 0, longMain = 0;
+        for (int f = 0; f < 60 * 600; f++) {
+            T.update(1.f / 60, W, pl);
+            if (f < 60 * 10) continue;
+            for (size_t i = 0; i < T.cars.size(); i++) {
+                const Car& a = T.cars[i];
+                if (a.mode > 1) continue;
+                still[i] = a.speed < 0.3f ? still[i] + 1.f / 60 : 0;
+                most[i] = std::max(most[i], still[i]);
+                (a.mode == 0 ? longGrid : longMain) = std::max(a.mode == 0 ? longGrid : longMain, still[i]);
+            }
+        }
+        int stuck = 0;
+        for (float m : most) stuck += m > 60;
+        snprintf(b, sizeof b, "%d cars stood over a minute; longest stop %.0f s on the grid, %.0f s on the main roads",
+                 stuck, longGrid, longMain);
+        check(std::max(longGrid, longMain) < 90 && longMain < 60, "Main-road crossings don't lock up", b);
+    }
     {   // a stopped vehicle is solid all the way to its ends: roll at 3 m/s into each end of each type, on the axis and
         // near a corner, on the runway (flat and open), and the skater stops at the body (or bails), not inside it
         int bad = 0, tot = 0;

@@ -707,9 +707,11 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
         Vector2 doorOut = {po.x, po.z}, doorIn = {pi.x, pi.z}, foot = {pf.x, pf.z};
         // remember each step box, so sidewalk walkers can go round the front of it instead of through it
         Vector2 toStreet = facing == 0 ? Vector2{0, -1} : facing == 1 ? Vector2{0, 1} : facing == 2 ? Vector2{-1, 0} : Vector2{1, 0};
+        // (in every cell its reach touches, the box grown by STOOP_REACH, so a lookup needs only the walker's cell)
         auto addStoop = [&](float sx0, float sx1, float sz0, float sz1) {
-            stoops.emplace((int)floorf((sx0 + sx1) * 0.5f / 16.f) * 4096 + (int)floorf((sz0 + sz1) * 0.5f / 16.f),
-                           Stoop{sx0, sx1, sz0, sz1, toStreet});
+            for (int ci = (int)floorf((sx0 - STOOP_REACH) / 16.f); ci <= (int)floorf((sx1 + STOOP_REACH) / 16.f); ci++)
+                for (int cj = (int)floorf((sz0 - STOOP_REACH) / 16.f); cj <= (int)floorf((sz1 + STOOP_REACH) / 16.f); cj++)
+                    stoops.emplace(ci * 4096 + cj, Stoop{sx0, sx1, sz0, sz1, toStreet});
         };
         if (fi.side) {   // collision for the flight along the front and its landing
             float ulo = std::min(fi.uA, fi.uL), uhi = std::max(fi.uA, fi.uL);

@@ -183,6 +183,7 @@ struct World {
     std::vector<House> houses;
     int rowhouseCount = 0, houseTooSteep = 0, houseTooHigh = 0;   // generation stats: street fronts built, and why some stay closed
     std::unordered_multimap<int, Vector4> doorWays; // coarse grid of door approach segments (ax, az, bx, bz)
+    static constexpr float STOOP_REACH = 3.f;   // how far round a stoop stoopDetour can move a walker (clearance + ease)
     struct Stoop { float x0, x1, z0, z1; Vector2 out; };   // a house's front-step collision box, and the way to the street
     std::unordered_multimap<int, Stoop> stoops;     // same coarse grid, by the box's centre
     std::vector<Platform> plats;

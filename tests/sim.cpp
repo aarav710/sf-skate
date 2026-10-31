@@ -447,6 +447,7 @@ int main() {
     }
     {   // rolling downhill from Twin Peaks gains speed without pushing
         Sim s; s.spawn(-282, 878, -0.6f, 0);
+        s.p.parked = false;   // past the spawn hold (#85): it rolls as if the rider had already set off
         s.run(240, Input{});
         snprintf(b, sizeof b, "speed after 4s = %.1f m/s (%s)", s.p.hspeed(), W.district(s.p.pos.x, s.p.pos.z));
         check(s.p.hspeed() > 6, "gravity on hills", b);
@@ -557,6 +558,35 @@ int main() {
         }
         snprintf(b, sizeof b, "%d bad of %d", bad, (int)W.spots.size());
         check(bad == 0, "teleport spots are safe", b);
+    }
+    {   // spots on steep hills (Twin Peaks, Union Square, Coit Tower...) hold the skater still until the first input (#85)
+        int bad = 0;
+        for (auto& sp : W.spots) {
+            Sim s; s.spawn(sp.pos.x, sp.pos.z, sp.yaw);
+            Vector3 p0 = s.p.pos;
+            Input aim; aim.steer = 0.3f;   // steering only lines the board up: it doesn't let go
+            s.run(60, aim);
+            s.run(60 * 19, Input{});
+            float moved = sqrtf(sq(s.p.pos.x - p0.x) + sq(s.p.pos.z - p0.z));
+            if (s.p.state != Player::RIDE || moved > 1.f || fabsf(s.p.speed) > 0.1f) {
+                bad++;
+                printf("      spot %s state %d moved %.1f m speed %.1f\n", sp.name, s.p.state, moved, s.p.speed);
+            }
+        }
+        // ...and a push or a tuck lets go: on the flat it pushes off, down Twin Peaks gravity takes over
+        Sim s; s.spawn(W.spots[0].pos.x, W.spots[0].pos.z, W.spots[0].yaw);
+        Input push; push.push = true;
+        s.run(60, push);
+        float pushed = s.p.speed, rolled = 0;
+        for (auto& sp : W.spots)
+            if (!strcmp(sp.name, "Twin Peaks")) {
+                Sim t; t.spawn(sp.pos.x, sp.pos.z, sp.yaw);
+                Input tuck; tuck.tuck = true;
+                t.run(60, tuck);
+                rolled = fabsf(t.p.speed);
+            }
+        snprintf(b, sizeof b, "%d of %d spots roll off; 1 s push %.1f m/s, 1 s tuck at Twin Peaks %.1f m/s", bad, (int)W.spots.size(), pushed, rolled);
+        check(bad == 0 && pushed > 4 && rolled > 1, "spawns hold still until the first input", b);
     }
     {   // every token is reachable-ish: above ground, not inside a wall
         int bad = 0;

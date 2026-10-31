@@ -47,6 +47,7 @@ void Player::bankCombo() {
 void Player::bail(const char* why) {
     if (state == BAIL) return;
     airClip = false;
+    if (state == GRIND && railFakie) yaw = wrapPi(yaw + PI); // fakie 50-50: fall along the rail travel, not back up it
     Vector3 f = state == AIR ? vel : Vector3Scale(fwd(), speed);
     if (state == AIR) {
         float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
@@ -277,7 +278,7 @@ void Player::air(float dt, const Input& in, World& w) {
             speed = std::max(3.5f, hv * fabsf(al));
             Vector2 bf = {cosf(yaw), sinf(yaw)};
             boardslide = fabsf(bf.x * rd.x + bf.y * rd.y) < 0.6f;
-            railFakie = bf.x * vel.x + bf.y * vel.z < 0; // came in backwards: grind fakie rather than snapping round
+            railFakie = !boardslide && bf.x * vel.x + bf.y * vel.z < 0; // came in backwards: grind fakie rather than snapping round
             balance = 0;
             balanceVel = (GetRandomValue(0, 1) ? 1 : -1) * 0.3f;
             state = GRIND;
@@ -324,7 +325,8 @@ void Player::land(World& w, float g) {
     if (shoveT >= 0 && shoveT < shoveDur * 0.75f) { bail("Didn't finish the shove-it"); return; }
     if (vy < -21.f) { bail("Way too much drop"); return; }
     float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
-    float diff = hv > 1.f ? wrapPi(yaw - atan2f(vel.z, vel.x)) : 0.f;
+    // barely moving: forgive the angle, but keep a backwards drift backwards
+    float diff = hv > 1.f ? wrapPi(yaw - atan2f(vel.z, vel.x)) : (vel.x * cosf(yaw) + vel.z * sinf(yaw) < 0 ? PI : 0.f);
     bool fakie = false;
     if (fabsf(diff) > 0.65f) {
         if (fabsf(fabsf(diff) - PI) < 0.65f) {

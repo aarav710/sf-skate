@@ -108,8 +108,11 @@ void World::buildMarket() {
             Vector2 p = Vector2Add(Vector2Add(a, Vector2Scale(d, s)), Vector2Scale(r, side * (MK_HALF + 0.8f)));
             addLamp(p.x, p.y, atan2f(-r.y * side, -r.x * side));
         }
+    // cars U-turn at the ends of their path in a loop as wide as their lane: start it 32 m up Market so the loop
+    // (7 m outer lane, plus the car) stays in Market's own roadway and clear of the Embarcadero, where turning
+    // across the cross traffic had them driving through each other
     Path P;
-    P.p = {a, b};
+    P.p = {Vector2Add(a, Vector2Scale(d, 32)), b};
     P.finish();
     carPaths.push_back(P);
     carPathLanes.push_back(2);

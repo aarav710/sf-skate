@@ -198,8 +198,11 @@ void World::buildAirport() {
                 addLamp(p.x, p.y, atan2f(-rr.y * side, -rr.x * side));
             }
     }
+    // cars U-turn at the city end 24 m along the highway, the loop (5.8 m outer lane) clear of the street they
+    // meet (x < 1272), rather than out across its cross traffic
     Path P;
     P.p = hw;
+    P.p[0] = Vector2Add(hw[0], Vector2Scale(Vector2Normalize(Vector2Subtract(hw[1], hw[0])), 24));
     P.finish();
     carPaths.push_back(P);
     carPathLanes.push_back(2);

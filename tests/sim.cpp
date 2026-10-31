@@ -604,37 +604,83 @@ int main() {
         snprintf(b, sizeof b, "%d of %d towers ridden through", through, towers);
         check(towers > 0 && through == towers, "Ride between gondola tower legs", b);
     }
-    {   // Muni bus shelters: the end panels stop you, the front stays open, the roof is a ceiling
-        // (the roof is a thin PK_DECK box about 4.1 m by 1.5 m, 2.44 m above the sidewalk)
-        int shelters = 0, blocked = 0, open = 0, capped = 0;
+    {   // Lombard planters: the collision box is the drawn shrub (same layout as World::buildLombard)
+        float x0 = gx(16) + 6, x1 = gx(17) - 6, zc = gz(3);
+        std::vector<Vector2> pts;
+        pts.push_back({gx(16) - 4, zc});
+        for (int k = 0; k <= 8; k++) pts.push_back({lerpf(x0, x1, k / 8.f), zc + ((k % 2) ? 6.5f : -6.5f)});
+        int tot = 0, tallOk = 0, wideOk = 0;
+        float worst = 99;
+        for (int k = 1; k <= 8; k++) {
+            Vector2 a = pts[k], b2 = pts[k + 1];
+            Vector2 d = Vector2Normalize(Vector2Subtract(b2, a)), n = {-d.y, d.x};
+            float L = Vector2Distance(a, b2);
+            for (int side = -1; side <= 1; side += 2)
+                for (float s0 = 2.5f; s0 < L - 2.0f; s0 += 1.6f) {
+                    Vector2 p = Vector2Add(Vector2Add(a, Vector2Scale(d, s0)), Vector2Scale(n, side * 3.4f));
+                    if (fabsf(p.y - zc) > 9.5f) continue;
+                    float gy = W.terrain(p.x, p.y);
+                    tot++;
+                    if (W.ground(p.x, p.y, gy + 2) > gy + 1.0f) tallOk++;   // standing on it puts the board at the shrub's crown
+                    // roll from the road straight into it: the skater stops outside the foliage
+                    Vector2 q = Vector2Subtract(p, Vector2Scale(n, side * 1.8f));
+                    Sim s;
+                    s.p.spawn({q.x, W.ground(q.x, q.y, W.terrain(q.x, q.y) + 0.5f), q.y}, atan2f(p.y - q.y, p.x - q.x));
+                    s.p.speed = 4;
+                    float minD = 99;
+                    s.run(90, Input{}, [&](Player& pl) { minD = std::min(minD, sqrtf(sq(pl.pos.x - p.x) + sq(pl.pos.z - p.y))); return false; });
+                    worst = std::min(worst, minD);
+                    if (minD > 1.05f) wideOk++;
+                }
+        }
+        snprintf(b, sizeof b, "%d planters, %d tall enough, %d stop outside (closest %.2f m)", tot, tallOk, wideOk, worst);
+        check(tot > 20 && tallOk == tot && wideOk == tot, "Lombard planters match the shrubs", b);
+    }
+    {   // Muni bus shelters: the end panels and the stop-sign pole stop you, the front stays open, the roof is a ceiling
+        // (the roof is a thin PK_DECK box about 4.1 m by 1.5 m, 2.44 m above the sidewalk; the curb-side back panel
+        // is a PK_POLE box 3.8 m long and 3.3 m tall, the sign pole a 0.12 m PK_POLE 3.9 m tall at the glass end)
+        auto near = [](const Platform& q, Vector2 m, float r) { return fabsf((q.x0 + q.x1) * 0.5f - m.x) < r && fabsf((q.z0 + q.z1) * 0.5f - m.y) < r; };
+        int shelters = 0, blocked = 0, poles = 0, open = 0, capped = 0;
+        float worstGap = 0;
         for (const Platform& r : W.plats) {
             float sx = r.x1 - r.x0, sz = r.z1 - r.z0;
             if (r.kind != PK_DECK || fabsf(r.h0 - r.base - 0.12f) > 0.01f || fabsf(std::max(sx, sz) - 4.1f) > 0.05f || fabsf(std::min(sx, sz) - 1.5f) > 0.05f) continue;
             if (shelters >= 20) break;
-            shelters++;
             Vector2 mid = {(r.x0 + r.x1) * 0.5f, (r.z0 + r.z1) * 0.5f}, d = sx > sz ? Vector2{1, 0} : Vector2{0, 1}, o = {-d.y, d.x};
+            const Platform *back = nullptr, *sign = nullptr;
+            for (const Platform& q : W.plats) {
+                if (q.kind != PK_POLE || !near(q, mid, 3.f)) continue;
+                float w = q.x1 - q.x0, h = q.z1 - q.z0, t = q.h0 - q.base;
+                if (fabsf(std::max(w, h) - 3.8f) < 0.05f && std::min(w, h) < 0.2f && fabsf(t - 3.3f) < 0.01f) back = &q;
+                if (w < 0.13f && h < 0.13f && fabsf(t - 3.9f) < 0.01f) sign = &q;
+            }
+            if (!back || !sign) continue;
+            shelters++;
+            // shelter space: +o toward the back panel (curb), -o the open front the bench faces; +d toward the sign pole
+            if (Vector2DotProduct({(back->x0 + back->x1) * 0.5f - mid.x, (back->z0 + back->z1) * 0.5f - mid.y}, o) < 0) o = Vector2Scale(o, -1);
+            Vector2 sp = {(sign->x0 + sign->x1) * 0.5f, (sign->z0 + sign->z1) * 0.5f};
+            if (Vector2DotProduct(Vector2Subtract(sp, mid), d) < 0) d = Vector2Scale(d, -1);
             float g = W.ground(mid.x, mid.y, r.base - 1.f);
-            // ride in lengthwise from 4.5 m outside each end, through the middle
-            int stopped = 0;
-            for (int e = -1; e <= 1; e += 2) {
-                Vector2 dir = Vector2Scale(d, (float)-e);
+            // ride from 4.5 m out toward a target `at` along d (offset `out` along o); the skater must stop short of it,
+            // within 0.5 m (the gap is measured from the skater's center to the target's center plane)
+            auto rideInto = [&](float at, float out, float sgn) {
+                Vector2 dir = Vector2Scale(d, -sgn), c = Vector2Add(mid, Vector2Scale(o, out));
+                float x = c.x + d.x * sgn * (fabsf(at) + 4.5f), z = c.y + d.y * sgn * (fabsf(at) + 4.5f);
                 Sim s;
-                float x = mid.x + d.x * e * 6.55f, z = mid.y + d.y * e * 6.55f;
                 s.p.spawn({x, W.ground(x, z, g + 0.5f), z}, atan2f(dir.y, dir.x));
                 s.p.speed = 6;
                 Input in; in.push = true;
-                bool passed = s.run(240, in, [&](Player& p) { return Vector2DotProduct({p.pos.x - mid.x, p.pos.z - mid.y}, dir) > 0.f; });
-                if (!passed) stopped++;
-            }
-            if (stopped == 2) blocked++;
-            // the open front: standing room inside, nothing in the gap between the front posts
-            Vector3 c = {mid.x, g, mid.y};
-            bool sideOpen = false;
-            for (int k = -1; k <= 1; k += 2) {   // one long side (the front) is open, the other is the back panel
-                Vector3 q = {mid.x + o.x * k * 0.8f, g, mid.y + o.y * k * 0.8f};
-                sideOpen |= !W.collide(q, 0.3f, g, 1.7f, nullptr);
-            }
-            if (!W.collide(c, 0.3f, g, 1.7f, nullptr) && sideOpen) open++;
+                float gap = 99;
+                s.run(240, in, [&](Player& p) { gap = std::min(gap, Vector2DotProduct({p.pos.x - c.x, p.pos.z - c.y}, Vector2Scale(dir, -1.f)) - fabsf(at)); return false; });
+                worstGap = std::max(worstGap, gap);
+                return gap > 0 && gap <= 0.5f;
+            };
+            if (rideInto(1.9f, -0.02f, -1) && rideInto(1.9f, -0.02f, 1)) blocked++;   // ad panel end, glass end
+            float pAt = Vector2DotProduct(Vector2Subtract(sp, mid), d), pOut = Vector2DotProduct(Vector2Subtract(sp, mid), o);
+            if (rideInto(pAt, pOut, 1)) poles++;
+            // the open front: standing room in the middle, nothing in the gap between the front posts
+            Vector3 c = {mid.x, g, mid.y}, f = {mid.x - o.x * 0.8f, g, mid.y - o.y * 0.8f};
+            if (!W.collide(c, 0.3f, g, 1.7f, nullptr) && !W.collide(f, 0.3f, g, 1.7f, nullptr)) open++;
             // an ollie underneath bumps the roof instead of poking through it
             Sim s;
             s.p.spawn({mid.x, g, mid.y}, atan2f(d.y, d.x));
@@ -643,8 +689,8 @@ int main() {
             s.run(90, in, [&](Player& p) { top = std::max(top, p.pos.y + 1.75f); return false; });
             if (W.ceiling(mid.x, mid.y, g) <= r.base + 0.01f && top <= r.base + 0.02f) capped++;
         }
-        snprintf(b, sizeof b, "%d shelters: %d blocked at both ends, %d open inside, %d with a roof overhead", shelters, blocked, open, capped);
-        check(shelters > 0 && blocked == shelters && open == shelters && capped == shelters, "Bus shelters are solid", b);
+        snprintf(b, sizeof b, "%d shelters: %d ends blocked, %d sign poles, %d open fronts, %d roofs overhead (widest gap %.2f m)", shelters, blocked, poles, open, capped, worstGap);
+        check(shelters > 0 && blocked == shelters && poles == shelters && open == shelters && capped == shelters, "Bus shelters are solid", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

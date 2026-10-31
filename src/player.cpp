@@ -139,9 +139,9 @@ void Player::ride(float dt, const Input& in, World& w) {
             if (s > 0.5f) {
                 float ny = atan2f(v.z, v.x);
                 if (speed < 0) ny = wrapPi(ny + PI);
-                yaw = lerpAngle(yaw, ny, 0.5f);
+                yaw = lerpAngle(yaw, ny, 1 - perFrame60(0.5f, dt));
             }
-            speed = copysignf(s * 0.85f, speed);
+            speed = copysignf(s * perFrame60(0.85f, dt), speed);   // scraping along a wall
         }
     }
     float g = w.ground(np.x, np.z, pos.y);

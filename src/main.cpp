@@ -14,8 +14,37 @@
 #include "birds.h"
 #include "instance.h"
 #include <cstdio>
+#include <chrono>
+#include <thread>
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
+
+// ---------------------------------------------------------------- frame pacing
+// "Max" (the default): vsync alone paces frames. (macOS's OpenGL vsync lets up to two frames through per display
+// refresh, so this can run faster than the display.) raylib's SetTargetFPS limiter stays off: its sleep runs long,
+// so its "60 fps" frames took ~17.1 ms against the display's 16.7 ms and every few dozen frames one was skipped.
+// "60" (Y key): our own wait to an absolute deadline. (A vsync swap interval of 2 would be neater, but macOS
+// accepts it and ignores it.)
+static bool gCap60 = true;    // the Mac's display is 60 Hz: drawing faster only adds heat (Y switches to Max)
+static double gFramePeriod = 1 / 60.0;
+static void updateFramePeriod() {   // a whole number of refreshes (1 at 60 Hz, 2 at 120 Hz), so frames land on refreshes
+    int hz = GetMonitorRefreshRate(GetCurrentMonitor());
+    if (hz <= 0) hz = 60;
+    gFramePeriod = std::max(1L, lround(hz / 60.0)) / (double)hz;
+}
+static void waitForFrameSlot() {   // call once a frame, after EndDrawing
+    static double next = 0;
+    static int frames = 0;
+    if (++frames % 120 == 0) updateFramePeriod();   // the window may have moved to another display
+    double now = GetTime();
+    next += gFramePeriod;
+    // off, or this frame ran late: no wait, and the schedule restarts from now (so a stall isn't "caught up" with a
+    // burst of fast frames, and a frame vsync held back resyncs us to the display)
+    if (!gCap60 || now >= next) { next = now; return; }
+    // sleep most of the way, then spin the last 2 ms, since the OS can oversleep a little
+    if (next - now > 0.002) std::this_thread::sleep_for(std::chrono::duration<double>(next - now - 0.002));
+    while (GetTime() < next) {}
+}
 
 // ---------------------------------------------------------------- lighting presets
 struct Sky {
@@ -267,7 +296,8 @@ int main() {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow(1600, 900, "SF Skate");
     SetWindowFocused();   // take the keyboard from the terminal that launched us (see the first-frame note below)
-    SetTargetFPS(60);
+    SetTargetFPS(0);   // no raylib frame limiter: see "frame pacing" above
+    updateFramePeriod();
     S.init();
 
     loadingScreen("Starting up", 0);
@@ -340,23 +370,14 @@ int main() {
             stars.push_back({cosf(a) * cosf(e), sinf(e), sinf(a) * cosf(e)});
         }
     }
-    struct Puff { Vector3 dir; float size; };
-    std::vector<Puff> clouds;
-    {
-        RNG r(77);
-        for (int c = 0; c < 22; c++) {
-            float az = r.range(0, TAU_F), el = r.range(0.04f, 0.2f);
-            int n = r.irange(5, 10);
-            for (int k = 0; k < n; k++) {
-                float a = az + r.range(-0.07f, 0.07f), e = el + r.range(-0.012f, 0.02f);
-                clouds.push_back({{cosf(a) * cosf(e), sinf(e), sinf(a) * cosf(e)}, r.range(250, 600)});
-            }
-        }
-    }
     float titleT = 0, sirenT = 0, landKick = 0, swingT = 0, squeezeYaw = 0;
     if (getenv("SFSKATE_NIGHT")) preset = 2; // test hook: start at night
     if (getenv("SFSKATE_TOD")) preset = atoi(getenv("SFSKATE_TOD")) % 3; // test hook: 0 day, 1 golden hour, 2 night
     if (getenv("SFSKATE_COPS")) CH.calmT = 0.5f; // test hook: cops show up right away
+    if (getenv("SFSKATE_FOG")) heavyFog = true, fogDen = 0.0022f; // test hook: start in Karl the Fog
+    if (getenv("SFSKATE_NOHELP")) showHelp = false; // test hook: no controls panel in the screenshots
+    const int atMaxSpots = getenv("SFSKATE_SHOTS") ? atoi(getenv("SFSKATE_SHOTS")) : 1000; // test hook: stop after this many spots
+    double atMs = 0; int atMsN = 0;   // frame time while settled at a spot
     int tokensGot = 0;
     // SFSKATE_AUTOTEST=1: visit each teleport spot, save a screenshot, log FPS, then quit (used for testing)
     bool autotest = getenv("SFSKATE_AUTOTEST") != nullptr;
@@ -415,7 +436,7 @@ int main() {
             } else
             if (atFrame > 61 && (atFrame - 62) % 150 == 0) {
                 atSpot++;
-                if (atSpot >= (int)W.spots.size() + 2) break;
+                if (atSpot >= (int)W.spots.size() + 2 || atSpot >= atMaxSpots) break;
                 if (atSpot < (int)W.spots.size()) {
                     P.spawn(W.spots[atSpot].pos, W.spots[atSpot].yaw);
                     camYaw = P.yaw;
@@ -425,9 +446,11 @@ int main() {
             }
             if (atFrame > 61 && (atFrame - 62) % 150 == 140) {
                 TakeScreenshot(TextFormat("shot_%02d.png", atSpot));
-                TraceLog(LOG_INFO, "SFSKATE: spot %d fps=%d pos=%.1f,%.1f,%.1f state=%d", atSpot, GetFPS(), P.pos.x, P.pos.y, P.pos.z, (int)P.state);
+                TraceLog(LOG_INFO, "SFSKATE: spot %d fps=%d frame=%.2f ms pos=%.1f,%.1f,%.1f state=%d", atSpot, GetFPS(), atMsN ? atMs / atMsN : 0.0, P.pos.x, P.pos.y, P.pos.z, (int)P.state);
+                atMs = 0; atMsN = 0;
             }
             if (atFrame > 100) { atFpsSum += GetFPS(); atFpsN++; }
+            if (atFrame > 61 && (atFrame - 62) % 150 >= 40) { atMs += GetFrameTime() * 1000.0; atMsN++; }
         }
         // ---------------- input
         bool justStarted = false;
@@ -506,7 +529,12 @@ int main() {
         if (IsKeyPressed(KEY_V) && !title) {
             R.setQuality((R.quality + 2) % 3);
             P.say(TextFormat("Graphics: %s", Renderer::QUALITY_NAMES[R.quality]), WHITE,
-                  R.quality == 2 ? "Sharp sun shadows, bloom" : R.quality == 1 ? "Softer shadows, bloom" : "No sun shadows or bloom (fastest)");
+                  R.quality == 2 ? "Sharp + distant shadows, soft occlusion, HDR, bloom" : R.quality == 1 ? "Softer shadows, bloom" : "No sun shadows or bloom (fastest)");
+        }
+        if (IsKeyPressed(KEY_Y) && !title) {
+            gCap60 = !gCap60;
+            updateFramePeriod();
+            P.say(gCap60 ? "Frame rate: 60" : "Frame rate: Max", WHITE, gCap60 ? "Capped at 60 fps" : "Matches the display's refresh rate");
         }
         if (IsKeyPressed(KEY_C)) camMode = (camMode + 1) % 3;
         for (int k = 0; k < 10 && !title && !picker; k++) {
@@ -914,7 +942,7 @@ int main() {
             float gy = W.terrain(desired.x, desired.z) + 0.6f;
             if (desired.y < gy) desired.y = gy;
             camPos = Vector3Lerp(camPos, desired, 1 - expf(-dt * 12));
-            if (best < 0.99f) camPos = Vector3Lerp(camPos, desired, 0.5f);
+            if (best < 0.99f) camPos = Vector3Lerp(camPos, desired, 1 - perFrame60(0.5f, dt));   // a wall is close: catch up faster
             // the smoothing lags behind a rising hill: never let the camera itself end up inside it
             camPos.y = std::max(camPos.y, W.terrain(camPos.x, camPos.z) + 0.6f);
             // a hard landing dips the camera and punches the field of view, then it settles
@@ -1013,6 +1041,29 @@ int main() {
         look.fogH = heavyFog ? 70.f : 300.f - 120.f * rainK;
         look.wet = WX.wet;
         R.setLook(look);
+        // street lamps: the 16 nearest the camera light the street at night. The furthest of them fade out, so one
+        // swapping in or out of the set doesn't pop.
+        {
+            float lampK = smooth01(0.4f, 0.9f, sky.night);
+            static std::vector<std::pair<float, int>> near;
+            near.clear();
+            if (lampK > 0.01f && !title)
+                for (int i = 0; i < (int)W.lamps.size(); i++) {
+                    const Vector3& l = W.lamps[i];
+                    float d2 = sq(l.x - cam.position.x) + sq(l.z - cam.position.z);
+                    if (d2 < 160.f * 160.f && fabsf(l.y - cam.position.y) < 60.f) near.push_back({d2, i});
+                }
+            int n = std::min((int)near.size(), Renderer::MAXLAMPS + 1);
+            std::partial_sort(near.begin(), near.begin() + n, near.end());
+            float edge = n > Renderer::MAXLAMPS ? sqrtf(near[Renderer::MAXLAMPS].first) : 160.f;
+            Vector4 lamps[Renderer::MAXLAMPS];
+            int m = std::min(n, Renderer::MAXLAMPS);
+            for (int k = 0; k < m; k++) {
+                const Vector3& l = W.lamps[near[k].second];
+                lamps[k] = {l.x, l.y, l.z, 2.f * lampK * (1.f - smooth01(edge * 0.75f, edge, sqrtf(near[k].first)))};
+            }
+            R.setLamps(lamps, m);
+        }
 
         // house rooms near the camera: a millisecond or two of meshing a frame, nearest first
         {
@@ -1064,56 +1115,43 @@ int main() {
                 EndShaderMode();
                 R.endCascade();
             }
+            // the wide far cascade (High): only the static city, so only when it has moved
+            if (R.farCasc && R.farDirty) {
+                R.beginCascade(2);
+                W.drawCasters(R.lightView[2], R.half[2], 6000.f, R.depth, true);
+                R.endCascade();
+                R.farDirty = false;
+            }
         }
         R.beginScene(toColor(fogC));
         {
-            // sky gradient down to the horizon line
-            float pitch = asinf(clampf(camFwd.y, -1, 1));
-            float horizonY = sh2 * 0.5f + tanf(pitch) * (sh2 * 0.5f) / tanf(cam.fovy * 0.5f * DEG2RAD);
-            Color top = toColor(heavyFog ? Vector3Lerp(lit.top, fogC, 0.7f) : lit.top);
-            int hy = (int)clampf(horizonY, 0, (float)sh2);
-            if (hy > 0) DrawRectangleGradientV(0, 0, sw, hy, top, toColor(horizonC));
-            {
-                float pxPerRad = (sh2 * 0.5f) / tanf(cam.fovy * 0.5f * DEG2RAD);
-                Vector3 cc = Vector3Lerp(Vector3Scale(sky.sunCol, 1.15f), {1, 1, 1}, 0.5f);
-                if (sky.night > 0.6f) cc = {0.25f, 0.27f, 0.35f};
-                unsigned char ca = heavyFog ? 25 : (unsigned char)((sky.night > 0.6f ? 40 : 70) + 90 * rainK);
-                if (rainK > 0.01f) cc = Vector3Lerp(cc, Vector3Scale({0.5f, 0.53f, 0.58f}, 1.f - sky.night * 0.8f), rainK);
-                Color c = toColor(cc);
-                c.a = ca;
-                for (auto& p : clouds) {
-                    if (Vector3DotProduct(p.dir, camFwd) < 0.3f) continue;
-                    Vector2 sp = GetWorldToScreen(Vector3Add(cam.position, Vector3Scale(p.dir, 9000)), cam);
-                    float rad = p.size / 9000.f * pxPerRad;
-                    DrawCircleV(sp, rad, c);
-                    DrawCircleV({sp.x, sp.y - rad * 0.25f}, rad * 0.7f, c);
+            // the sky: gradient, haze, sun or moon, clouds (see render.cpp)
+            float fogK = clampf((fogDen - 0.00011f) / (0.0022f - 0.00011f), 0, 1);
+            SkyLook sl;
+            sl.fwd = camFwd;
+            sl.right = Vector3Normalize(Vector3CrossProduct(camFwd, {0, 1, 0}));
+            sl.up = Vector3CrossProduct(sl.right, camFwd);
+            sl.tanHalf = tanf(cam.fovy * 0.5f * DEG2RAD);
+            sl.aspect = (float)sw / sh2;
+            sl.sunDir = sky.sunDir;
+            sl.sunCol = sky.sunCol;
+            sl.top = heavyFog ? Vector3Lerp(lit.top, fogC, 0.7f) : lit.top;
+            sl.horizon = horizonC;
+            sl.fog = fogC;
+            sl.night = sky.night;
+            sl.time = now;
+            sl.rain = rainK;
+            sl.fogK = fogK;
+            R.drawSky(sl);
+            // stars on clear nights, hidden behind the clouds
+            if (rainK < 0.5f && sky.night > 0.6f && !heavyFog)
+                for (auto& st : stars) {
+                    if (Vector3DotProduct(st, camFwd) < 0.2f) continue;
+                    float a = (150 + (int)(st.x * 1000) % 100) * (1.f - R.cloudAt(st));
+                    if (a < 8) continue;
+                    Vector2 p = GetWorldToScreen(Vector3Add(cam.position, Vector3Scale(st, 1000)), cam);
+                    DrawPixelV(p, {255, 255, 240, (unsigned char)a});
                 }
-            }
-            // the sun (or moon) also marks the bloom mask in alpha so it glows in the post pass
-            auto glow = [&](Vector2 p, float r, float amount) {
-                rlDrawRenderBatchActive();
-                glBlendFuncSeparate(GL_ZERO, GL_ONE, GL_ONE, GL_ZERO);
-                DrawCircleV(p, r, {0, 0, 0, (unsigned char)(255 * (1 - amount))});
-                rlDrawRenderBatchActive();
-                glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
-            };
-            if (rainK > 0.5f) {
-                // overcast: no sun, moon or stars
-            } else if (sky.night > 0.6f && !heavyFog) {
-                for (auto& s : stars) {
-                    if (Vector3DotProduct(s, camFwd) < 0.2f) continue;
-                    Vector2 p = GetWorldToScreen(Vector3Add(cam.position, Vector3Scale(s, 1000)), cam);
-                    if (p.y < hy) DrawPixelV(p, {255, 255, 240, (unsigned char)(150 + (int)(s.x * 1000) % 100)});
-                }
-                Vector2 mp = GetWorldToScreen(Vector3Add(cam.position, Vector3Scale(sky.sunDir, 1000)), cam);
-                if (Vector3DotProduct(sky.sunDir, camFwd) > 0.2f) { DrawCircleV(mp, 18, {235, 235, 220, 255}); glow(mp, 18, 0.45f); }
-            } else if (Vector3DotProduct(sky.sunDir, camFwd) > 0.2f) {
-                Vector2 sp = GetWorldToScreen(Vector3Add(cam.position, Vector3Scale(sky.sunDir, 1000)), cam);
-                Color sc = toColor(Vector3Scale(sky.sunCol, 1.1f));
-                DrawCircleV(sp, 60, {sc.r, sc.g, sc.b, (unsigned char)(heavyFog ? 20 : 50)});
-                DrawCircleV(sp, 26, {255, 250, 230, (unsigned char)(heavyFog ? 60 : 255)});
-                if (!heavyFog) glow(sp, 26, 0.8f);
-            }
         }
 
         // everything opaque draws with the city shader, which writes the bloom mask into alpha
@@ -1217,6 +1255,7 @@ int main() {
         rlDrawRenderBatchActive();
         rlEnableDepthMask();
         EndMode3D();
+        R.setView(cam.fovy, 0.15f, 270.f);   // the near pass's projection, for the ambient occlusion
         R.endScene();
 
         // graded, bloomed, and blurred at speed
@@ -1368,15 +1407,17 @@ int main() {
                 }
             }
             if (showHelp) {
+                // 22 px rows keep the panel clear of the FPS counter in the corner below it
+                const int rowH = 22, nLines = 20;
                 int hx = sw - 330, hy = 270;
-                DrawRectangle(hx, hy, 314, 482, {0, 0, 0, 140});
+                DrawRectangle(hx, hy, 314, 18 + nLines * rowH, {0, 0, 0, 140});
                 const char* lines[] = {"CONTROLS", "W / Up      push", "S / Down    brake", "A D         steer / spin in air",
                                        "Shift       tuck (go faster)", "Space       ollie / jump off rail", "J  K  L     kickflip, heelflip, shove-it",
                                        "I (hold)    grab", "Land on rails & ledges to grind", "B  free roam / cop chase   N  difficulty", "Right mouse  look around", "Wheel       zoom    C  camera",
                                        "Tab  choose landmark / time", "M  map  1-0  teleport  E  train/jetski", "T or F1-F3  time of day",
                                        "F fog  G rain  R reset  P pause", TextFormat("V  graphics: %s", Renderer::QUALITY_NAMES[R.quality]),
-                                       "Caught: mash SPACE A D / J K L", "H  hide this help"};
-                for (int i = 0; i < 19; i++) DrawText(lines[i], hx + 14, hy + 12 + i * 24, i == 0 ? 22 : 18, i == 0 ? Color{255, 210, 60, 255} : WHITE);
+                                       TextFormat("Y  frame rate: %s", gCap60 ? "60" : "Max"), "Caught: mash SPACE A D / J K L", "H  hide this help"};
+                for (int i = 0; i < nLines; i++) DrawText(lines[i], hx + 14, hy + 10 + i * rowH, i == 0 ? 22 : 18, i == 0 ? Color{255, 210, 60, 255} : WHITE);
             }
             }
             if (nearSki >= 0) {
@@ -1431,6 +1472,7 @@ int main() {
             DrawFPS(sw - 100, sh2 - 30);
         }
         EndDrawing();
+        waitForFrameSlot();
         static bool firstFrame = true;
         if (firstFrame) {
             firstFrame = false;

@@ -680,16 +680,20 @@ bool World::onBridge(float x, float z) const {
     return (x > -1115 && x < -1085 && z < -1050 && z > -2340) || (z > 318 && z < 352 && x > 1320 && x < 3990);
 }
 
-bool World::isWater(float x, float z, float y) const {
+const Pond* World::pondAt(float x, float z, float y) const {
     for (auto& pd : ponds)
-        if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1 && y < terrain(x, z) + 0.2f) return true;
+        if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1 && y < terrain(x, z) + 0.2f) return &pd;
+    return nullptr;
+}
+
+bool World::isWater(float x, float z, float y) const {
+    if (pondAt(x, z, y)) return true;
     return terrain(x, z) < 0.15f && y < 0.4f;
 }
 
 const char* World::waterKind(float x, float z, float y) const {
-    for (auto& pd : ponds)
-        if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1 && y < terrain(x, z) + 0.2f) return pd.kind;
-    return "bay";
+    if (const Pond* pd = pondAt(x, z, y)) return pd->kind;
+    return x < -1400 ? "ocean" : "bay";   // the same Pacific / bay split areaName() uses
 }
 
 bool Grid::edge(int i, int j, int d) const {

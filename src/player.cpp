@@ -380,8 +380,8 @@ void Player::grind(float dt, const Input& in, World& w) {
     speed += (-9.8f * slope * 0.8f - 0.7f) * dt;
     comboPts += 300 * dt;
     crouch = lerpf(crouch, 0.5f, 1 - expf(-dt * 8));
-    // balance: tap the opposite direction to stay on
-    balanceVel += ((GetRandomValue(-100, 100) / 100.f) * 2.4f + balance * 2.4f - in.steer * 4.2f) * dt;
+    // balance: tap the opposite direction to stay on (D pushes balance, and the HUD marker, right)
+    balanceVel += ((GetRandomValue(-100, 100) / 100.f) * 2.4f + balance * 2.4f + in.steer * 4.2f) * dt;
     balance += balanceVel * dt;
     lean = balance * 0.8f;
     if (fabsf(balance) > 1.f) { bail("Lost balance on the rail"); return; }

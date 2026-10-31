@@ -236,6 +236,24 @@ int main() {
         snprintf(b, sizeof b, "state=%d score=%lld", s.p.state, s.p.score);
         check(s.p.score > 0 || s.p.state == Player::BAIL, "grind ends (banked or bailed)", b);
     }
+    {   // grind balance follows the HUD meter: pressing away from the marker's side keeps you on the rail
+        int lost = 0, tries = 12;
+        for (int t = 0; t < tries; t++) {
+            SetRandomSeed(1300 + t);
+            Sim s; s.spawn(1186, -238, 0, 7);
+            s.run(60, Input{}, [](Player& p) { return p.pos.x > 1193.5f; });
+            Input in; in.ollie = true; s.run(1, in);
+            if (!s.run(90, Input{}, [](Player& p) { return p.state == Player::GRIND; })) { lost++; continue; }
+            for (int f = 0; f < 600 && s.p.state == Player::GRIND; f++) {
+                Input bal; // marker sits at sw/2 + balance * 115; tap the opposite direction
+                bal.steer = s.p.balance > 0.1f ? -1.f : s.p.balance < -0.1f ? 1.f : 0.f;
+                s.run(1, bal);
+            }
+            if (s.p.state == Player::BAIL) lost++;
+        }
+        snprintf(b, sizeof b, "lost balance %d/%d following the meter", lost, tries);
+        check(lost == 0, "grind balance matches HUD meter", b);
+    }
     {   // coping only on real lips: never a seam where a ramp meets a deck/box at its own height (issue #38)
         int coping = 0, flat = 0; char where[96] = "";
         for (const Rail& r : W.rails) {

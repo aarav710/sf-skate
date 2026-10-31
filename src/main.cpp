@@ -566,7 +566,7 @@ int main() {
                 }
             }
         }
-        if (!title && !picker && IsKeyPressed(KEY_R)) { if (JS.riding) { JS.skis[JS.cur].pos = P.pos; JS.riding = false; JS.cur = -1; } if (SP.riding) { SP.riding = false; SP.cur = -1; } P.spawn(P.safePos, P.safeYaw); P.say("Reset", WHITE); }
+        if (!title && !picker && IsKeyPressed(KEY_R)) { if (JS.riding) { JS.skis[JS.cur].pos = P.pos; JS.riding = false; JS.cur = -1; } if (SP.riding) { SP.riding = false; SP.cur = -1; } P.respawnSafe(W); P.say("Reset", WHITE); }
 
         Input in;
         in.steer = (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT) ? 1.f : 0.f) - (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT) ? 1.f : 0.f);
@@ -660,7 +660,7 @@ int main() {
         if (SP.riding && !paused && !picker && !showMap && !title) {
             if (IsKeyPressed(KEY_E) && !justMounted) {
                 if (SP.dismount(P, W)) { camYaw = P.yaw; P.say("Back on land", WHITE); }
-                else P.say(SP.onWater ? "Slow down near the shore to climb out" : "Land on the water first", WHITE);
+                else P.say(SP.refusalMsg(), WHITE);
             }
             if (SP.riding) {
                 bool climb = IsKeyDown(KEY_SPACE), dive = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
@@ -1257,7 +1257,7 @@ int main() {
         // a soft contact blob under the skater helps judge landings (the sun's shadow can fall far away)
         if (!title && !ride.on && !JS.riding && !SP.riding && !(P.state == Player::BAIL && P.splashed)) {
             Vector3 sp = P.state == Player::BAIL ? P.boardPos : P.pos;
-            float gy = W.ground(sp.x, sp.z, P.pos.y + 0.1f);
+            float gy = W.skaterGround(sp.x, sp.z, P.pos.y + 0.1f);
             float hgt = P.pos.y - gy;
             float k = R.nCasc > 0 ? 0.6f : 1.f;
             if (hgt < 12) DrawCylinder({sp.x, gy + 0.12f, sp.z}, 0.6f, 0.6f, 0.01f, 14, {0, 0, 0, (unsigned char)(55 * k * clampf(1 - hgt / 8, 0.25f, 1))});

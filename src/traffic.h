@@ -84,6 +84,9 @@ struct Cat {
 };
 
 struct Train { float s; int dir; float v; float dwell; };
+// Where a grid street's lane crosses the Caltrain tracks at grade, in m along the block from its node: the line a car's
+// front stops at short of them, and where the lane is clear of them on the far side; s: along the line, at the crossing
+struct RailCrossing { float stop = 1e9f, clear = 0, s = 0; };   // stop 1e9: no crossing
 
 struct Traffic {
     std::vector<Car> cars;
@@ -100,6 +103,7 @@ struct Traffic {
                                         // but) in the road leaving it, in m from the node; rebuilt every frame
     std::vector<Vector2> mainBand[3];   // per node and heading on those grids: where the lane leaving it crosses a main
                                         // road (from, to: m from the node, wide enough for both cars; from 1e9: none)
+    std::vector<RailCrossing> railX[3]; // per node and heading on those grids: the lane leaving it over the Caltrain tracks
     std::vector<std::vector<Vector2>> pathCross;   // per car path and way along it (path * 2 + (pdir > 0)): where its
                                                    // lanes cross a grid street (from, to: s), in order
     std::vector<uint64_t> carCells;   // (40 m cell << 32 | car index), sorted: who's near whom, for every car each frame
@@ -107,6 +111,8 @@ struct Traffic {
     void init(World& w);
     void update(float dt, World& w, const Player& p);
     void interact(Player& p);
+    // put the roofs of the vehicles near `at` into w.vehicleTops, for the skater to land on (update does this each frame)
+    void publishRoofs(World& w, Vector3 at) const;
     // nearPass: everything within reach of the near clip range; otherwise only cars far enough to need the far pass
     void draw(Vector3 cam, Vector3 camFwd, bool nearPass) const;
     // sun shadow casters: cars within rCars of c, people (and their dogs) within rPeds

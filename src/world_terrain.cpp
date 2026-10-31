@@ -246,6 +246,19 @@ static float rawHeight(float x, float z) {
         float d = sqrtf(sq(x - F.x) + sq(z - F.z));
         if (d < F.r1 && best > 0) best = lerpf(best, F.h, 1 - smooth01(F.r0, F.r1, d));
     }
+    // Palace of Fine Arts lagoon: dig a basin under the water and bank it up just outside, so the whole pond
+    // rectangle (where you splash) is drawn as water and the lawn around it stays above the surface
+    if (best > 0) {
+        float ex = std::max(LAGOON_X0 - x, x - LAGOON_X1), ez = std::max(LAGOON_Z0 - z, z - LAGOON_Z1);
+        float d = (ex > 0 || ez > 0) ? sqrtf(sq(std::max(ex, 0.f)) + sq(std::max(ez, 0.f))) : std::max(ex, ez);
+        if (d <= 0) {
+            best = lerpf(LAGOON_Y - 0.2f, LAGOON_Y - 1.5f, smooth01(0, 8, -d));   // a short shelf, then the bed
+        } else if (d < 40) {
+            float rim = lerpf(LAGOON_Y - 0.2f, LAGOON_Y + 0.6f, smooth01(0, 4, d));
+            best += std::max(rim - best, 0.f) * (1 - smooth01(4, 24, d));        // raise a low shore above the water
+            best = std::min(best, rim + 0.15f * d);                                // and ease a high one down to it
+        }
+    }
     // Menlo Park: gentle bayside flats rising slowly toward the wooded hills in the west
     {
         float dx = std::max(std::max(1100.f - x, 0.f), x - 3900.f), dz = std::max(std::max(8400.f - z, 0.f), z - 10800.f);
@@ -425,7 +438,7 @@ const char* World::district(float x, float z) const {
     if (x > gx(9) - 8 && x < gx(11) && z > gz(11) - 8 && z < gz(12) + 8) return "Alamo Square";
     if (z > 315 && z < 355 && x > 1300 && x < 4000) return x > 2420 && x < 2820 ? "Yerba Buena Island" : "Bay Bridge";
     float h = terrain(x, z);
-    if (h < 0.3f) {
+    if (h < 0.3f && !overPier(x, z)) {   // a pier stands over the seabed: name it after the shore it belongs to
         if (z < -1150 && x < -300) return "Golden Gate Strait";
         if (x < -1400) return "Pacific Ocean";
         return "San Francisco Bay";
@@ -435,7 +448,7 @@ const char* World::district(float x, float z) const {
     if (z < -2200) return "Marin Headlands";
     if (x > 3900) return "Oakland";
     if (x > 2400) return z < 50 ? "Treasure Island" : "Yerba Buena Island";
-    if (x > 200 && x < 420 && z < -1800) return "Alcatraz";
+    if (x > 200 && x < 460 && z < -1800) return "Alcatraz";   // the island, Building 64 and its dock out to x 455
     if (sq(x + 295) + sq(z - 895) < sq(200)) return "Twin Peaks";
     if (x > gx(23) && z > gz(16) && z < gz(18)) return "Oracle Park";
     if (x > 1255) return "The Embarcadero";
@@ -531,6 +544,14 @@ float World::terrain(float x, float z) const {
     return terrainRaw(x, z);
 }
 
+bool groundMeshGrid(float x, float z, float* ox, float* oz, float* S) {
+    // the same regions, in the same order, as terrain() above
+    if (x >= AZB_X0 && x < AZB_X1 && z >= AZB_Z0 && z < AZB_Z1) { *ox = AZB_X0; *oz = AZB_Z0; *S = 4.f; return true; }
+    if (x >= WX0 && z >= WZ0 && x < WX1 - 10.f && z < WZ1 - 10.f) { *ox = WX0; *oz = WZ0; *S = 10.f; return true; }
+    if (x >= MX0 - 390 && z >= MZ0 - 390 && x < MX1 + 380 && z < MZ1 + 380) { *ox = MX0 - 390; *oz = MZ0 - 390; *S = 10.f; return true; }
+    return false;
+}
+
 float World::terrainRaw(float x, float z) const {
     float fx = (x - WX0) / HF_RES, fz = (z - WZ0) / HF_RES;
     if (fx < 0 || fz < 0 || fx >= hfW - 1 || fz >= hfH - 1) {
@@ -570,6 +591,14 @@ int World::addPlat(const Platform& p) {
     return idx;
 }
 
+bool World::overPier(float x, float z) const {
+    int i = (int)floorf((x - PG_X0) / PG_CELL), j = (int)floorf((z - PG_Z0) / PG_CELL);
+    if (i < 0 || j < 0 || i >= pgW || j >= pgH) return false;
+    for (int idx : pgrid[(size_t)j * pgW + i])
+        if (plats[idx].kind == PK_PIER && plats[idx].contains(x, z)) return true;
+    return false;
+}
+
 float World::ground(float x, float z, float yRef) const {
     float h = terrain(x, z);
     int i = (int)floorf((x - PG_X0) / PG_CELL), j = (int)floorf((z - PG_Z0) / PG_CELL);
@@ -582,6 +611,15 @@ float World::ground(float x, float z, float yRef) const {
     }
     for (auto& pd : ponds)
         if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1) h = std::min(h, terrain(x, z) - 0.6f);
+    return h;
+}
+
+float World::skaterGround(float x, float z, float yRef) const {
+    float h = ground(x, z, yRef);
+    for (const VehicleTop& v : vehicleTops) {
+        float t = v.at(x, z);
+        if (t <= yRef + STEP_UP && t > h) h = t;
+    }
     return h;
 }
 
@@ -627,7 +665,36 @@ bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm
     return hit;
 }
 
-bool World::solidAt(Vector3 p, bool bigProps) const {
+bool World::collideSwept(Vector3 from, Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size) const {
+    // collide() only looks at where the mover ends up: one step longer than the radius can put the centre past the
+    // middle of a thin box, and the push-out then goes out the far side. Steps shorter than the radius never get the
+    // centre inside a box it wasn't already overlapping, so every hit is caught from the side it was approached from.
+    float dx = p.x - from.x, dz = p.z - from.z;
+    float len = sqrtf(dx * dx + dz * dz);
+    float maxStep = clampf(r * 0.7f, 0.05f, 0.25f);
+    int steps = std::min(std::max((int)ceilf(len / maxStep), 1), 256);
+    if (size) *size = 0;
+    bool hit = false;
+    Vector3 q = {from.x, p.y, from.z};
+    float sx = dx / steps, sz = dz / steps;
+    for (int k = 0; k < steps; k++) {
+        q.x += sx;
+        q.z += sz;
+        Vector2 n;
+        float s;
+        if (!collide(q, r, feetY, height, &n, &s)) continue;
+        hit = true;
+        if (nrm) *nrm = n;
+        if (size) *size = std::max(*size, s);
+        float into = sx * n.x + sz * n.y;   // < 0: the rest of the move heads into the wall, keep only the slide
+        if (into < 0) { sx -= n.x * into; sz -= n.y * into; }
+    }
+    p.x = q.x;
+    p.z = q.z;
+    return hit;
+}
+
+bool World::solidAt(Vector3 p, bool bigProps, bool piers) const {
     if (terrain(p.x, p.z) > p.y - 0.25f) return true;
     int i = (int)floorf((p.x - PG_X0) / PG_CELL), j = (int)floorf((p.z - PG_Z0) / PG_CELL);
     if (i < 0 || j < 0 || i >= pgW || j >= pgH) return false;
@@ -636,7 +703,7 @@ bool World::solidAt(Vector3 p, bool bigProps) const {
         // big prop boxes (gondola terminals, the ballpark wall...) count too when asked: over 3 m tall and
         // over 2 m across both ways, which leaves out furniture, benches, planters, stair ramps and poles
         bool big = bigProps && pl.kind == PK_PROP && std::max(pl.h0, pl.h1) - pl.base > 3.f && pl.x1 - pl.x0 > 2.f && pl.z1 - pl.z0 > 2.f;
-        if (pl.kind != PK_BUILDING && pl.kind != PK_DECK && !big) continue;
+        if (pl.kind != PK_BUILDING && pl.kind != PK_DECK && !big && !(piers && pl.kind == PK_PIER)) continue;
         if (pl.contains(p.x, p.z, 0.3f) && p.y < pl.top(p.x, p.z) + 0.3f && p.y > pl.base) return true;
     }
     return false;
@@ -668,6 +735,53 @@ bool World::doorBlocked(float x, float z, float pad) const {
     return false;
 }
 
+Vector2 World::stoopDetour(float x, float z, Vector2 routeDir) const {
+    // The walking line runs ~2 m out from the house fronts, and a tall stoop reaches up to 3 m out: a walker
+    // following it would go straight through the steps (too tall to step onto from the side, and far from the
+    // skater nothing pushes them out of a wall). So they swing out round the front of each stoop, easing over
+    // in the few metres before it and back after, with room for their body.
+    if (stoops.empty()) return {0, 0};
+    const float R = 0.45f, L = 1.8f;   // clearance for the body; how long the swing out and back takes
+    float best = 0;
+    Vector2 bestN = {0, 0};
+    static_assert(0.45f + 1.8f <= STOOP_REACH, "stoops are registered in every cell within STOOP_REACH");
+    auto r = stoops.equal_range(doorCell(x, z));   // (each stoop is listed in every cell within STOOP_REACH of it)
+    for (auto it = r.first; it != r.second; ++it) {
+        const Stoop& st = it->second;
+        Vector2 n = st.out, t = {-n.y, n.x};
+        // a route heading toward or away from the house (the cross street at a corner) passes beside it
+        if ((routeDir.x != 0 || routeDir.y != 0) && fabsf(routeDir.x * n.x + routeDir.y * n.y) > 0.7f) continue;
+        float sa = n.x * st.x0 + n.y * st.z0, sb = n.x * st.x1 + n.y * st.z1;
+        float ta = t.x * st.x0 + t.y * st.z0, tb = t.x * st.x1 + t.y * st.z1;
+        float s0 = std::min(sa, sb), s1 = std::max(sa, sb), t0 = std::min(ta, tb), t1 = std::max(ta, tb);
+        float ps = n.x * x + n.y * z, pt = t.x * x + t.y * z;
+        if (ps >= s1 + R || ps < s0 - 0.5f) continue;   // already clear in front, or beside the house itself
+        float off = std::max(std::max(t0 - R - pt, pt - t1 - R), 0.f);   // how far before / after the steps
+        if (off >= L) continue;
+        float k = 1.f - off / L, ease = k * k * (3 - 2 * k);
+        float d = (s1 + R - ps) * ease;
+        if (d > best) { best = d; bestN = n; }
+    }
+    return {bestN.x * best, bestN.y * best};
+}
+
+// Street furniture asks this before it goes down, so no lamp, tree or bin ends up inside a building or landmark
+// (Coit Tower's base used to swallow the lamps and trees of the hilltop, a lamp head poking out of its roof).
+bool World::buildingAt(float x, float z, float pad, float y0, float y1) const {
+    if (pgrid.empty()) return false;
+    int i0 = std::max((int)floorf((x - pad - PG_X0) / PG_CELL), 0), i1 = std::min((int)floorf((x + pad - PG_X0) / PG_CELL), pgW - 1);
+    int j0 = std::max((int)floorf((z - pad - PG_Z0) / PG_CELL), 0), j1 = std::min((int)floorf((z + pad - PG_Z0) / PG_CELL), pgH - 1);
+    i1 = std::max(i1, 0); j1 = std::max(j1, 0); i0 = std::min(i0, pgW - 1); j0 = std::min(j0, pgH - 1);   // clamp like addPlat
+    for (int j = j0; j <= j1; j++)
+        for (int i = i0; i <= i1; i++)
+            for (int idx : pgrid[(size_t)j * pgW + i]) {
+                const Platform& pl = plats[idx];
+                if (pl.kind != PK_BUILDING || !pl.contains(x, z, pad)) continue;
+                if (pl.base < y1 && std::max(pl.h0, pl.h1) > y0) return true;
+            }
+    return false;
+}
+
 int World::houseAt(float x, float z, float y) const {
     for (int i = 0; i < (int)houses.size(); i++) {
         const House& h = houses[i];
@@ -680,16 +794,20 @@ bool World::onBridge(float x, float z) const {
     return (x > -1115 && x < -1085 && z < -1050 && z > -2340) || (z > 318 && z < 352 && x > 1320 && x < 3990);
 }
 
-bool World::isWater(float x, float z, float y) const {
+const Pond* World::pondAt(float x, float z, float y) const {
     for (auto& pd : ponds)
-        if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1 && y < terrain(x, z) + 0.2f) return true;
+        if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1 && y < terrain(x, z) + 0.2f) return &pd;
+    return nullptr;
+}
+
+bool World::isWater(float x, float z, float y) const {
+    if (pondAt(x, z, y)) return true;
     return terrain(x, z) < 0.15f && y < 0.4f;
 }
 
 const char* World::waterKind(float x, float z, float y) const {
-    for (auto& pd : ponds)
-        if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1 && y < terrain(x, z) + 0.2f) return pd.kind;
-    return "bay";
+    if (const Pond* pd = pondAt(x, z, y)) return pd->kind;
+    return x < -1400 ? "ocean" : "bay";   // the same Pacific / bay split areaName() uses
 }
 
 bool Grid::edge(int i, int j, int d) const {

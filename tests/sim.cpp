@@ -6,6 +6,7 @@
 #include "../src/models.h"
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <algorithm>
 
 static World W;
@@ -236,6 +237,24 @@ int main() {
         snprintf(b, sizeof b, "state=%d score=%lld", s.p.state, s.p.score);
         check(s.p.score > 0 || s.p.state == Player::BAIL, "grind ends (banked or bailed)", b);
     }
+    {   // grind balance follows the HUD meter: pressing away from the marker's side keeps you on the rail
+        int lost = 0, tries = 12;
+        for (int t = 0; t < tries; t++) {
+            SetRandomSeed(1300 + t);
+            Sim s; s.spawn(1186, -238, 0, 7);
+            s.run(60, Input{}, [](Player& p) { return p.pos.x > 1193.5f; });
+            Input in; in.ollie = true; s.run(1, in);
+            if (!s.run(90, Input{}, [](Player& p) { return p.state == Player::GRIND; })) { lost++; continue; }
+            for (int f = 0; f < 600 && s.p.state == Player::GRIND; f++) {
+                Input bal; // marker sits at sw/2 + balance * 115; tap the opposite direction
+                bal.steer = s.p.balance > 0.1f ? -1.f : s.p.balance < -0.1f ? 1.f : 0.f;
+                s.run(1, bal);
+            }
+            if (s.p.state == Player::BAIL) lost++;
+        }
+        snprintf(b, sizeof b, "lost balance %d/%d following the meter", lost, tries);
+        check(lost == 0, "grind balance matches HUD meter", b);
+    }
     {   // coping only on real lips: never a seam where a ramp meets a deck/box at its own height (issue #38)
         int coping = 0, flat = 0; char where[96] = "";
         for (const Rail& r : W.rails) {
@@ -337,6 +356,38 @@ int main() {
         snprintf(b, sizeof b, "x=%.2f y=%.1f state=%d", s.p.pos.x, s.p.pos.y, s.p.state);
         check(s.p.pos.x < -1086 && s.p.pos.y > 25, "bridge railing holds", b);
     }
+    {   // a grind that slows to a stop steps off onto the deck: not over the Golden Gate railing, not into a rail
+        struct { float x, z; bool ns; } spots[] = {{-1086.2f, -1500, true}, {-1130, -2377, false}};
+        int ok = 0, tot = 0;
+        char det[400] = "";
+        for (auto& sp : spots) {
+            int ri = -1;
+            for (int i = 0; i < (int)W.rails.size() && ri < 0; i++) {
+                const Rail& r = W.rails[i];
+                float lo = sp.ns ? std::min(r.a.z, r.b.z) : std::min(r.a.x, r.b.x), hi = sp.ns ? std::max(r.a.z, r.b.z) : std::max(r.a.x, r.b.x);
+                float c = sp.ns ? sp.z : sp.x;
+                if ((sp.ns ? fabsf(r.a.x - sp.x) + fabsf(r.b.x - sp.x) : fabsf(r.a.z - sp.z) + fabsf(r.b.z - sp.z)) < 0.3f && c > lo && c < hi) ri = i;
+            }
+            if (ri < 0) continue;
+            for (int dirn = -1; dirn <= 1; dirn += 2) {
+                const Rail& r = W.rails[ri];
+                Sim s; s.spawn(sp.x, sp.z, 0, 0);
+                float t = sp.ns ? (sp.z - r.a.z) / (r.b.z - r.a.z) : (sp.x - r.a.x) / (r.b.x - r.a.x);
+                s.p.state = Player::GRIND; s.p.rail = ri; s.p.railT = t; s.p.railDir = dirn;
+                s.p.pos = Vector3Lerp(r.a, r.b, t); s.p.speed = 0.5f; s.p.yaw = atan2f((r.b.z - r.a.z) * dirn, (r.b.x - r.a.x) * dirn); s.p.balance = s.p.balanceVel = 0;
+                float railY = s.p.pos.y;
+                s.run(1, Input{});
+                float side = sp.ns ? s.p.pos.x - sp.x : s.p.pos.z - sp.z;
+                s.run(180, Input{}, [](Player& p) { return p.state == Player::RIDE || p.state == Player::BAIL; });
+                float deck = W.ground(sp.ns ? sp.x - 1.5f : sp.x, sp.ns ? sp.z : sp.z - 1.5f, railY);
+                bool good = s.p.state == Player::RIDE && !s.p.splashed && fabsf(side) > 0.4f && fabsf(s.p.pos.y - deck) < 0.5f;
+                tot++; ok += good;
+                char one[120]; snprintf(one, sizeof one, "%s%s off=%.2f y=%.1f st=%d %s; ", r.name, dirn > 0 ? "+" : "-", side, s.p.pos.y, s.p.state, s.p.subPopup.c_str());
+                strncat(det, one, sizeof det - strlen(det) - 1);
+            }
+        }
+        check(tot == 4 && ok == tot, "grind stop steps off onto the deck", det);
+    }
     {   // ride the length of the Bay Bridge deck
         Sim s; s.spawn(1500, 335 + 4, 0, 10);
         Input in; in.push = true; in.tuck = true;
@@ -398,6 +449,29 @@ int main() {
         snprintf(b, sizeof b, "length %.1f km, %d stations, steepest grade %.1f%%, %d obstacles on the tracks",
                  L / 1000, (int)W.stations.size(), maxGrade * 100, blocked);
         check(W.stations.size() == 5 && maxGrade < 0.04f && blocked == 0 && L > 9000, "Caltrain line", b);
+    }
+    {   // stepping off the train (at 4th & King or Menlo Park, the two ends you can ride to): on the platform,
+        // clear of the station building, and you can push off down the platform without hitting anything
+        int bad = 0;
+        for (int i : {0, (int)W.stations.size() - 1}) {
+            float yaw;
+            Vector3 p = W.caltrainDropoff(i, &yaw);
+            Vector3 q = p;
+            Vector2 n;
+            bool inWall = W.collide(q, 0.4f, p.y, 1.5f, &n);
+            bool onGround = fabsf(W.ground(p.x, p.z, p.y + 0.5f) - p.y) < 0.05f && !W.isWater(p.x, p.z, p.y);
+            Sim s; s.p.spawn(p, yaw);
+            Input in; in.push = true;
+            bool bailed = s.run(60 * 8, in, [](Player& pl) { return pl.state == Player::BAIL; });   // push off down the platform
+            float moved = Vector2Distance({s.p.pos.x, s.p.pos.z}, {p.x, p.z});
+            if (inWall || !onGround || bailed || s.p.state != Player::RIDE || moved < 40) {
+                bad++;
+                printf("      %s: (%.1f, %.1f) wall %d ground %d state %d moved %.1f\n", W.stations[i].name, p.x, p.z, inWall, onGround,
+                       s.p.state, moved);
+            }
+        }
+        snprintf(b, sizeof b, "%d bad of 2", bad);
+        check(bad == 0, "Caltrain arrival spots are clear", b);
     }
     {   // Menlo Park: big homes, oak-lined streets you can skate down
         int homes = 0;
@@ -1048,6 +1122,102 @@ int main() {
         s.run(60 * 3, in);
         snprintf(b, sizeof b, "after 3 s at x=%.0f z=%.0f (%s)", s.p.pos.x, s.p.pos.z, W.district(s.p.pos.x, s.p.pos.z));
         check(W.inPlay(s.p.pos.x, s.p.pos.z), "out of bounds puts you back", b);
+    }
+    {   // Union Square's skate props sit on its sloping plaza: nothing floats over it or sinks into it
+        // (assumes the square fills the block gx(19)..gx(20) x gz(6)..gz(7) and every PK_PROP platform in it is one of
+        // its props; the largest of them is the deck, and props under 1 m wide are the ledges)
+        const float X0 = gx(19), X1 = gx(20), Z0 = gz(6), Z1 = gz(7);
+        int props = 0, floating = 0, buried = 0, badLedge = 0;
+        float worstGap = 0, worstSink = 0;
+        const Platform* deck = nullptr;
+        for (const Platform& p : W.plats) {
+            if (p.kind != PK_PROP || p.x0 < X0 || p.x1 > X1 || p.z0 < Z0 || p.z1 > Z1) continue;
+            props++;
+            if (!deck || (p.x1 - p.x0) * (p.z1 - p.z0) > (deck->x1 - deck->x0) * (deck->z1 - deck->z0)) deck = &p;
+            bool thin = std::min(p.x1 - p.x0, p.z1 - p.z0) < 1.0f, fl = false, bu = false, bl = false;
+            for (float x = p.x0; x <= p.x1 + 0.01f; x += std::max(0.25f, (p.x1 - p.x0) / 40))
+                for (float z = p.z0; z <= p.z1 + 0.01f; z += std::max(0.25f, (p.z1 - p.z0) / 40)) {
+                    float t = W.terrain(x, z), top = p.top(x, z);
+                    worstGap = std::max(worstGap, p.base - t);
+                    worstSink = std::max(worstSink, t - top);
+                    fl |= p.base > t + 0.05f;
+                    bu |= top < t - 0.02f;
+                    bl |= thin && (top - t < 0.3f || top - t > 0.9f);
+                }
+            floating += fl; buried += bu; badLedge += bl;
+        }
+        snprintf(b, sizeof b, "%d props: %d floating (worst gap %.2f m), %d buried (worst %.2f m), %d ledges not ledge-height",
+                 props, floating, worstGap, buried, worstSink, badLedge);
+        check(props >= 8 && floating == 0 && buried == 0 && badLedge == 0, "Union Square props on the ground", b);
+
+        int rails = 0, badRail = 0;
+        float worst = 0;
+        for (const Rail& r : W.rails) {
+            if (r.a.x < X0 || r.a.x > X1 || r.a.z < Z0 || r.a.z > Z1) continue;
+            rails++;
+            bool ledge = strcmp(r.name, "Ledge") == 0, bad = false;
+            for (int k = 0; k <= 20; k++) {
+                Vector3 q = Vector3Lerp(r.a, r.b, k / 20.f);
+                float up = q.y - W.terrain(q.x, q.z);
+                if (up < 0.3f || (ledge && up > 0.9f)) { bad = true; worst = up < 0.3f ? std::min(worst, up) : std::max(worst, up); }
+            }
+            badRail += bad;
+        }
+        snprintf(b, sizeof b, "%d rails, %d under the ground or off their ledge (worst %.2f m above the ground)", rails, badRail, worst);
+        check(rails >= 8 && badRail == 0, "Union Square rails above the ground", b);
+
+        // walk from the plaza below up the stairs and onto the deck; its uphill (west) edge meets the ground
+        bool onDeck = false;
+        float maxDrop = 0, westLip = 99;
+        if (deck) {
+            float z = (deck->z0 + deck->z1) / 2, h = W.terrain(deck->x1 + 15, z);
+            for (float x = deck->x1 + 15; x >= deck->x0 - 3; x -= 0.1f) {
+                float nh = W.ground(x, z, h);
+                maxDrop = std::max(maxDrop, h - nh);
+                h = nh;
+                onDeck |= deck->contains(x, z) && fabsf(h - deck->top(x, z)) < 0.01f;
+            }
+            westLip = 0;
+            for (float zz = deck->z0; zz <= deck->z1; zz += 0.5f) westLip = std::max(westLip, deck->top(deck->x0, zz) - W.terrain(deck->x0 - 0.05f, zz));
+        }
+        snprintf(b, sizeof b, "reached deck=%d, biggest drop %.2f m, west lip %.2f m above the ground", onDeck, maxDrop, westLip);
+        check(onDeck && maxDrop < STEP_UP && westLip < 0.3f, "Union Square stairs reach the deck", b);
+
+        // ride up the stairs from the plaza below, pushing, in the middle and along both edges
+        int rides = 0, upOk = 0;
+        std::string why;
+        for (float v : {4.f, 6.f, 9.f, 12.f})
+            for (int lane = 0; deck && lane < 3; lane++) {
+                float z = lane == 0 ? deck->z0 + 1 : lane == 1 ? (deck->z0 + deck->z1) / 2 : deck->z1 - 1;
+                Sim s; s.spawn(deck->x1 + 16, z, PI, v);
+                Input in; in.push = true;
+                bool bailed = false, on = false;
+                s.run(60 * 8, in, [&](Player& q) {
+                    bailed |= q.state == Player::BAIL;
+                    on |= deck->contains(q.pos.x, q.pos.z) && fabsf(q.pos.y - deck->top(q.pos.x, q.pos.z)) < 0.05f;
+                    return bailed || on;
+                });
+                rides++;
+                if (on && !bailed) upOk++;
+                else if (why.empty()) { char w[96]; snprintf(w, sizeof w, " (first miss: %.0f m/s at z %.0f, bailed=%d, stopped at x %.1f)", v, z, bailed, s.p.pos.x); why = w; }
+            }
+        snprintf(b, sizeof b, "%d of %d pushes up the stairs reached the deck%s", upOk, rides, why.c_str());
+        check(rides == 12 && upOk == rides, "Union Square stairs ride up", b);
+
+        // ollie onto each ledge while rolling along it
+        int ledges = 0, grinds = 0;
+        for (const Platform& p : W.plats) {
+            if (p.kind != PK_PROP || p.x0 < X0 || p.x1 > X1 || p.z0 < Z0 || p.z1 > Z1 || std::min(p.x1 - p.x0, p.z1 - p.z0) >= 1.0f) continue;   // (ledges: under 1 m wide)
+            ledges++;
+            bool alongX = p.x1 - p.x0 > p.z1 - p.z0;
+            float sx = alongX ? p.x0 - 6 : p.x0 + 0.04f, sz = alongX ? p.z0 + 0.04f : p.z0 - 6;
+            Sim s; s.spawn(sx, sz, alongX ? 0 : PI / 2, 7);
+            s.run(60, Input{}, [&](Player& q) { return alongX ? q.pos.x > p.x0 - 2.5f : q.pos.z > p.z0 - 2.5f; });
+            Input in; in.ollie = true; s.run(1, in);
+            grinds += s.run(90, Input{}, [](Player& q) { return q.state == Player::GRIND; });
+        }
+        snprintf(b, sizeof b, "%d of %d ledges grindable", grinds, ledges);
+        check(ledges == 3 && grinds == ledges, "Union Square ledges grindable", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

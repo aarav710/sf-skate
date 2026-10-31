@@ -383,14 +383,24 @@ void Player::grind(float dt, const Input& in, World& w) {
     speed += (-9.8f * slope * 0.8f - 0.7f) * dt;
     comboPts += 300 * dt;
     crouch = lerpf(crouch, 0.5f, 1 - expf(-dt * 8));
-    // balance: tap the opposite direction to stay on
-    balanceVel += ((GetRandomValue(-100, 100) / 100.f) * 2.4f + balance * 2.4f - in.steer * 4.2f) * dt;
+    // balance: tap the opposite direction to stay on (D pushes balance, and the HUD marker, right)
+    balanceVel += ((GetRandomValue(-100, 100) / 100.f) * 2.4f + balance * 2.4f + in.steer * 4.2f) * dt;
     balance += balanceVel * dt;
     lean = balance * 0.8f;
     if (fabsf(balance) > 1.f) { bail("Lost balance on the rail"); return; }
     if (speed < 1.0f) {
         state = AIR; vel = {dir.x * railDir * 1.5f, 0, dir.y * railDir * 1.5f}; vy = 0; airTime = 0; spinAccum = 0;
-        pos.x += -dir.y * 0.6f;
+        // step off sideways, to whichever side has floor and no wall (a bridge railing has the bay on one side)
+        Vector3 off = pos;
+        float best = -1e9f;
+        for (int side = 1; side >= -1; side -= 2) {
+            Vector3 q = {pos.x - dir.y * 0.6f * side, pos.y, pos.z + dir.x * 0.6f * side};
+            float g = w.ground(q.x, q.z, pos.y);
+            Vector3 c = q; Vector2 n;
+            float score = g - (w.collide(c, 0.35f, g, 1.7f, &n) ? 100.f : 0.f) - (w.isWater(q.x, q.z, g) ? 1000.f : 0.f);
+            if (score > best) { best = score; off = q; }
+        }
+        pos = off;
         return;
     }
     if (!boardslide) yaw = atan2f(dir.y * railDir, dir.x * railDir);

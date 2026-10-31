@@ -174,6 +174,7 @@ struct World {
     float railGrade(float s) const;                                 // top of the ballast
     Vector3 trackPoint(float s, float lateral, Vector2* dir) const; // lateral > 0 = west side going south
     float railDistance(float x, float z, float* s) const;
+    Vector3 caltrainDropoff(int station, float* yaw) const;        // a clear spot on the platform to step off the train
     Image mapImg2{};                 // Peninsula / Menlo Park map
     std::vector<House> houses;
     int rowhouseCount = 0, houseTooSteep = 0, houseTooHigh = 0;   // generation stats: street fronts built, and why some stay closed

@@ -389,7 +389,7 @@ void World::buildLandmarks() {
             m.box({px - 1.5f, py + 12, pz - 1.5f}, {px + 1.5f, py + 13.5f, pz + 1.5f}, peach);
             addPlat({px - 1, px + 1, pz - 1, pz + 1, py + 12, py + 12, py - 1, 0, PK_POLE});
         }
-        ponds.push_back({cx + 25, cz - 30, cx + 90, cz + 25});
+        ponds.push_back({cx + 25, cz - 30, cx + 90, cz + 25, "lagoon"});
         float py = terrain(cx + 55, cz) - 0.3f;
         m.quad({cx + 25, py, cz - 30}, {cx + 90, py, cz - 30}, {cx + 90, py, cz + 25}, {cx + 25, py, cz + 25}, col(50, 100, 110, M_WATER));
     }
@@ -603,13 +603,14 @@ void World::buildWaterfront() {
 }
 
 // ---------------------------------------------------------------- skate spots
-void World::addRamp(float x0, float z0, float x1, float z1, float rise, int axis, bool up) {
+void World::addRamp(float x0, float z0, float x1, float z1, float rise, int axis, bool up, bool coping) {
     float y = terrain((x0 + x1) / 2, (z0 + z1) / 2);
     float lo = y, hi = y + rise;
     Platform p{x0, x1, z0, z1, up ? lo : hi, up ? hi : lo, y - 0.4f, (uint8_t)axis, PK_PROP};
     addPlat(p);
     mb((x0 + x1) / 2, (z0 + z1) / 2).slab(x0, x1, z0, z1, p.h0, p.h1, axis, y - 0.4f, col(184, 152, 112, M_GROUND), col(120, 120, 124));
-    // coping rail on the high edge
+    // coping rail on the high edge (not where the ramp butts against a deck or box: there it's a seam in a flat top)
+    if (!coping) return;
     if (axis == 0) {
         float ex = up ? x1 : x0;
         rails.push_back({{ex, hi, z0 + 0.1f}, {ex, hi, z1 - 0.1f}, "Coping"});
@@ -669,20 +670,20 @@ void World::buildSkateSpots() {
         float y = terrain(1190, -300);
         addBox(1170, -312, 1205, -286, y - 0.3f, y + 1.6f, PK_PROP, conc, C_PLAZA);
         addStairs(1176, -286, 1199, -278, 1.6f, 4, 2, true);
-        addRamp(1205, -310, 1216, -288, 1.6f, 0, false); // bank down off the deck
+        addRamp(1205, -310, 1216, -288, 1.6f, 0, false, false); // bank down off the deck (no coping: it adjoins the deck)
         addLedge(1172, -268, 1190, -267.2f, 0.55f, gran);
         addLedge(1172, -258, 1190, -257.2f, 0.45f, gran);
         addLedge(1172, -248, 1192, -247.0f, 0.7f, gran);
         addRailObj({1196, y + 0.45f, -238}, {1214, y + 0.45f, -238}, "Flat Bar");
-        addRamp(1222, -262, 1226, -250, 1.0f, 0, true);
+        addRamp(1222, -262, 1226, -250, 1.0f, 0, true, false);   // funbox: the ramps' high edges meet the box top
         addBox(1226, -262, 1232, -250, y - 0.3f, y + 1.0f, PK_PROP, conc, C_PLAZA);
         rails.push_back({{1226, y + 1.0f, -261.9f}, {1232, y + 1.0f, -261.9f}, "Funbox"});
         rails.push_back({{1226, y + 1.0f, -250.1f}, {1232, y + 1.0f, -250.1f}, "Funbox"});
-        addRamp(1232, -262, 1236, -250, 1.0f, 0, false);
+        addRamp(1232, -262, 1236, -250, 1.0f, 0, false, false);
         addRamp(1240, -244, 1243, -238, 0.9f, 0, true);     // kicker
         addRamp(1222, -300, 1225, -294, 0.9f, 0, true);     // kicker
         // Vaillancourt Fountain
-        ponds.push_back({1236, -312, 1253, -296});
+        ponds.push_back({1236, -312, 1253, -296, "fountain"});
         MeshBuilder& m = mb(1245, -304);
         m.quad({1236, y - 0.25f, -312}, {1253, y - 0.25f, -312}, {1253, y - 0.25f, -296}, {1236, y - 0.25f, -296}, col(60, 110, 120, M_WATER));
         RNG r(12);

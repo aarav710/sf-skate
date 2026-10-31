@@ -1224,6 +1224,7 @@ void World::addTree(float x, float z, int type, float s, RNG& r, bool solid) {
     if (solid && doorBlocked(x, z, 2.6f)) return; // never plant a trunk in front of a front door
     float y = terrain(x, z);
     if (y < 0.8f) return;
+    if (buildingAt(x, z, 0.5f * s, y - 0.2f, y + 5.f)) return;   // not inside a building or landmark base
     treeCells[(int)floorf(z / 25.f) * 100000 + (int)floorf(x / 25.f)]++;
     MeshBuilder& m = mb(x, z);
     Color bark = jitterC(col(96, 72, 52), r, 0.15f);
@@ -1349,10 +1350,13 @@ void World::addFlowerBed(float x0, float z0, float x1, float z1, int count, RNG&
 void World::addLamp(float x, float z, float yaw) {
     if (doorBlocked(x, z, 2.1f)) return;
     float y = terrain(x, z);
+    // keep the pole out of buildings and landmark bases, and the arm's lamp head out of their walls
+    Vector3 head = {x + cosf(yaw) * 1.4f, y + 6.6f, z + sinf(yaw) * 1.4f};
+    if (buildingAt(x, z, 0.2f, y - 0.2f, y + 6.6f) || buildingAt(head.x, head.z, 0.3f, head.y - 0.3f, head.y + 0.1f)) return;
     MeshBuilder& m = mb(x, z);
     Color pole = col(56, 66, 60);
     m.beam({x, y - 0.2f, z}, {x, y + 6.5f, z}, 0.18f, 0.18f, pole);
-    Vector3 tip = {x + cosf(yaw) * 1.4f, y + 6.6f, z + sinf(yaw) * 1.4f};
+    Vector3 tip = head;
     m.beam({x, y + 6.4f, z}, tip, 0.1f, 0.1f, pole);
     m.box({tip.x - 0.3f, tip.y - 0.25f, tip.z - 0.3f}, {tip.x + 0.3f, tip.y + 0.05f, tip.z + 0.3f}, col(255, 222, 160, M_EMISSIVE));
     lamps.push_back({tip.x, tip.y - 0.4f, tip.z});
@@ -1370,6 +1374,7 @@ static void disk(MeshBuilder& m, Vector3 c, Vector3 a, Vector3 b, float r, int n
 
 void World::addClutter(Vector2 p, Vector2 f, Vector2 o, int kind, uint32_t h) {
     float y = terrain(p.x, p.y);
+    if (buildingAt(p.x, p.y, kind == 5 ? 2.2f : 1.0f, y - 0.2f, y + 2.6f)) return;   // not inside a building or landmark base
     MeshBuilder& m = mb(p.x, p.y);
     Vector3 F = {f.x, 0, f.y}, O = {o.x, 0, o.y}, U = {0, 1, 0};
     auto at = [&](float alongF, float up, float outO) { return V3(p.x + f.x * alongF + o.x * outO, y + up, p.y + f.y * alongF + o.y * outO); };
@@ -1529,6 +1534,7 @@ void World::buildIntersections(const Grid& g) {
                 Vector2 c = {n.x - head.x * 7.7f + right.x * 7.7f, n.y - head.y * 7.7f + right.y * 7.7f};
                 if (doorBlocked(c.x, c.y, 3.6f)) continue;
                 float y = terrain(c.x, c.y);
+                if (buildingAt(c.x, c.y, 0.3f, y - 0.2f, y + 6.5f)) continue;   // a corner inside a landmark's base
                 MeshBuilder& m = mb(c.x, c.y);
                 Vector3 face = {-head.x, 0, -head.y};   // toward the oncoming cars
                 if (signal) {

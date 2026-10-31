@@ -58,10 +58,10 @@ void Chase::moveCar(Cop& c, float dt, const Player& p, const World& w) {
     Vector3 pre = np;
     w.collide(np, 1.8f, c.pos.y, 1.5f, nullptr);
     float y = w.ground(np.x, np.z, c.pos.y);
-    if (w.isWater(np.x, np.z, y)) { c.stuck += dt; c.speed *= 0.5f; return; }
+    if (w.isWater(np.x, np.z, y)) { c.stuck += dt; c.speed *= perFrame60(0.5f, dt); return; }
     float moved = dist2d(np, c.pos), asked = c.speed * dt;
     c.stuck = (asked > 0.01f && moved < asked * 0.4f) ? c.stuck + dt : std::max(0.f, c.stuck - dt * 2);
-    if (dist2d(np, pre) > 0.5f) c.speed *= 0.8f;
+    if (dist2d(np, pre) > 0.5f) c.speed *= perFrame60(0.8f, dt);   // scraping along a wall
     c.pos = {np.x, y, np.z};
 }
 

@@ -1283,6 +1283,7 @@ void World::addLamp(float x, float z, float yaw) {
     Vector3 tip = {x + cosf(yaw) * 1.4f, y + 6.6f, z + sinf(yaw) * 1.4f};
     m.beam({x, y + 6.4f, z}, tip, 0.1f, 0.1f, pole);
     m.box({tip.x - 0.3f, tip.y - 0.25f, tip.z - 0.3f}, {tip.x + 0.3f, tip.y + 0.05f, tip.z + 0.3f}, col(255, 222, 160, M_EMISSIVE));
+    lamps.push_back({tip.x, tip.y - 0.4f, tip.z});
     addPlat({x - 0.15f, x + 0.15f, z - 0.15f, z + 0.15f, y + 6.5f, y + 6.5f, y - 1, 0, PK_POLE});
 }
 

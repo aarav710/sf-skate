@@ -24,28 +24,41 @@ static float boardSlope(World& w, Vector3 p, Vector3 f) {
     return clampf((hF - hB) / 1.4f, -1.5f, 1.5f);
 }
 
-// Is p a good place to put the skater back after a splash? It must be clear of water all around, and there
-// must be a heading (near `yaw`) the board stays at rest on with no input, or a respawn on a shore that
-// slopes toward the water just rolls straight back in. On success *restYaw gets that heading.
-static bool safeSpot(World& w, Vector3 p, float yaw, float* restYaw) {
+// A heading near `yaw` that a board standing still at p stays at rest on with no input: `yaw` itself if its
+// slope is below the rolling drag, else the contour direction (across the fall line) nearest to it.
+// Returns false (with *restYaw = the best try) if even that would roll.
+static bool restHeading(World& w, Vector3 p, float yaw, float* restYaw) {
     const float REST = 0.01f;   // the ride's rolling drag (0.15 m/s^2) holds a board on slopes below ~0.015
-    float y = yaw;
-    if (fabsf(boardSlope(w, p, {cosf(y), 0, sinf(y)})) > REST) {
-        // turn across the fall line (along the contour), whichever way is nearer the current heading
-        float gx = w.ground(p.x + 0.7f, p.z, p.y + 0.2f) - w.ground(p.x - 0.7f, p.z, p.y + 0.2f);
-        float gz = w.ground(p.x, p.z + 0.7f, p.y + 0.2f) - w.ground(p.x, p.z - 0.7f, p.y + 0.2f);
-        if (gx * gx + gz * gz < 1e-8f) return false;
-        y = wrapPi(atan2f(gz, gx) + PI / 2);
-        if (fabsf(wrapPi(y - yaw)) > PI / 2) y = wrapPi(y + PI);
-        if (fabsf(boardSlope(w, p, {cosf(y), 0, sinf(y)})) > REST) return false;
-    }
+    *restYaw = yaw;
+    if (fabsf(boardSlope(w, p, {cosf(yaw), 0, sinf(yaw)})) <= REST) return true;
+    float gx = w.ground(p.x + 0.7f, p.z, p.y + 0.2f) - w.ground(p.x - 0.7f, p.z, p.y + 0.2f);
+    float gz = w.ground(p.x, p.z + 0.7f, p.y + 0.2f) - w.ground(p.x, p.z - 0.7f, p.y + 0.2f);
+    if (gx * gx + gz * gz < 1e-8f) return false;
+    float y = wrapPi(atan2f(gz, gx) + PI / 2);
+    if (fabsf(wrapPi(y - yaw)) > PI / 2) y = wrapPi(y + PI);
+    *restYaw = y;
+    return fabsf(boardSlope(w, p, {cosf(y), 0, sinf(y)})) <= REST;
+}
+
+// Is p a good place to put the skater back after a splash? It must be clear of water all around, and the
+// board must have a heading (near `yaw`) it stays at rest on, or a respawn on a shore that slopes toward
+// the water just rolls straight back in. On success *restYaw gets that heading.
+static bool safeSpot(World& w, Vector3 p, float yaw, float* restYaw) {
+    if (!restHeading(w, p, yaw, restYaw)) return false;
     for (int k = 0; k < 12; k++)   // no water (bay, lake, fountain, pool) within 6 m
         for (float r = 2; r <= 6; r += 2) {
             float x = p.x + cosf(k * PI / 6) * r, z = p.z + sinf(k * PI / 6) * r;
             if (w.isWater(x, z, w.ground(x, z, p.y + 1.f))) return false;
         }
-    *restYaw = y;
     return true;
+}
+
+// Back to the last safe spot. That may be one nobody checked (where the skater spawned, or stepped off a jet
+// ski or seaplane, right by the water), so stand the board across the slope there rather than rolling back in.
+void Player::respawnSafe(World& w) {
+    float y;
+    restHeading(w, safePos, safeYaw, &y);
+    spawn(safePos, y);
 }
 
 void Player::spawn(Vector3 p, float y) {
@@ -137,17 +150,20 @@ void Player::update(float dt, const Input& in, World& w) {
         if (state == RIDE) speed *= 0.5f;
         if (state == AIR) vel = Vector3Scale(vel, 0.3f);
     } else if (!w.inPlay(pos.x, pos.z) && w.inPlay(safePos.x, safePos.z)) {
-        spawn(safePos, safeYaw);   // already outside (dropped off out there somehow): back to the last safe spot
+        respawnSafe(w);   // already outside (dropped off out there somehow): back to the last safe spot
         return;
     }
     // remember the last safe spot for respawns after a splash
     safeT += dt;
     float restYaw;
-    if (state == RIDE && safeT > 0.5f && w.terrain(pos.x, pos.z) > 1.0f && fabsf(speed) < 20 && w.inPlay(pos.x, pos.z) &&
-        safeSpot(w, pos, yaw, &restYaw)) {
-        safeT = 0;
-        safePos = pos;
-        safeYaw = restYaw;
+    if (state == RIDE && safeT > 0.5f && w.terrain(pos.x, pos.z) > 1.0f && fabsf(speed) < 20 && w.inPlay(pos.x, pos.z)) {
+        if (safeSpot(w, pos, yaw, &restYaw)) {
+            safeT = 0;
+            safePos = pos;
+            safeYaw = restYaw;
+        } else {
+            if (!w.onBridge(pos.x, pos.z)) safeT = 0.4f;   // not here: look again in 0.1 s, not every frame
+        }
     }
     if (state == RIDE && w.onBridge(pos.x, pos.z) && safeT > 0.5f && w.inPlay(pos.x, pos.z)) {
         safeT = 0;
@@ -513,7 +529,7 @@ void Player::bailUpdate(float dt, World& w) {
     }
     if (bailT > (splashed ? 1.6f : 1.8f)) {
         if (splashed) {
-            spawn(safePos, safeYaw);
+            respawnSafe(w);
         } else {
             state = RIDE;
             speed = 0;

@@ -528,20 +528,25 @@ int main() {
                     if (W.isWater(st.x + cosf(a) * r, st.z + sinf(a) * r, 0)) { best = r; yaw = a; }
             }
             if (best > 39) continue;
-            Sim s; s.spawn(st.x, st.z, yaw, 3);
-            Input in; in.push = true;
-            if (!s.run(60 * 20, in, [](Player& p) { return p.splashed; })) continue;
-            tried++;
-            int again = 0;
-            for (int f = 0; f < 60 * 15; f++) {
-                s.p.update(1.f / 60, Input{}, W);
-                if (s.p.evSplash) again++;
-            }
-            if (again || s.p.state != Player::RIDE) {
-                bad++;
-                char t[96];
-                snprintf(t, sizeof t, " (%.0f,%.0f): %d more splashes", st.x, st.z, again);
-                worst += t;
+            // from the start itself, and from 4 m short of the water: too close for any spot on the way to be
+            // saved, so the respawn is the (unchecked) start spot, on the shore slope facing the water
+            for (float back : {best, 4.f}) {
+                float sx = st.x + cosf(yaw) * (best - back), sz = st.z + sinf(yaw) * (best - back);
+                Sim s; s.spawn(sx, sz, yaw, 3);
+                Input in; in.push = true;
+                if (!s.run(60 * 20, in, [](Player& p) { return p.splashed; })) continue;
+                tried++;
+                int again = 0;
+                for (int f = 0; f < 60 * 15; f++) {
+                    s.p.update(1.f / 60, Input{}, W);
+                    if (s.p.evSplash) again++;
+                }
+                if (again || s.p.state != Player::RIDE) {
+                    bad++;
+                    char t[96];
+                    snprintf(t, sizeof t, " (%.0f,%.0f): %d more splashes", sx, sz, again);
+                    worst += t;
+                }
             }
         }
         snprintf(b, sizeof b, "%d/%d shores re-splashed%s", bad, tried, worst.c_str());

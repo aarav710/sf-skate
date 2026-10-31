@@ -63,6 +63,7 @@ struct Player {
     Vector3 safePos{}; float safeYaw = 0; float safeT = 0;
 
     void spawn(Vector3 p, float yaw);
+    void respawnSafe(World& w);   // back to safePos, turned so the board stays at rest there
     void update(float dt, const Input& in, World& w);
     void bail(const char* why);
     Vector3 fwd() const { return {cosf(yaw), 0, sinf(yaw)}; }

@@ -538,7 +538,7 @@ int main() {
         for (const T& t : towers) {
             float worstIn = 1e9f, worstOut = 0;
             for (int k = 0; k < 8; k++) {
-                float a = k * PI / 4, d0 = t.lo + 7;
+                float a = k * PI / 4, d0 = (t.lo + 7) / (t.square ? std::max(fabsf(cosf(a)), fabsf(sinf(a))) : 1.f);
                 Sim s; s.spawn(t.cx + cosf(a) * d0, t.cz + sinf(a) * d0, a + PI, 4);
                 float closest = 1e9f;
                 s.run(300, Input{}, [&](Player& q) {

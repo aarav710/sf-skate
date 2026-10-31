@@ -1151,18 +1151,27 @@ void World::buildMeta() {
     struct TS { float x, z, rad; int n; };
     TS ts[] = {{-1150, -2415, 22, 14}, {-285, 885, 20, 12}, {-330, 175, 30, 14}, {1250, -224, 6, 8},
                {880, -862, 12, 8},     {-830, -1040, 25, 10}, {1025, -1180, 15, 14}, {700, -1080, 40, 14},
-               {1290, -170, 10, 10},   {gx(19) + 55, gz(6) + 55, 25, 14}, {1815, 1880, 25, 16}, {2380, 9400, 14, 10}, {1900, 9418, 30, 10},
+               {1277, -170, 5, 10},    {gx(19) + 55, gz(6) + 55, 25, 14}, {1815, 1880, 25, 16}, {2380, 9400, 14, 10}, {1900, 9418, 30, 10},
                {360, -1900, 4, 6},     {263, -1900, 10, 8},    {438, -1886, 8, 5}};   // Alcatraz: by the front door, in the yard, on the pier
+    // tourists stand on the ground (the terrain, or a kerb or plaza a step up from it), not on whatever roof or
+    // monument top is highest there; out over the water they stand on the pier deck instead. A spot inside a
+    // building or a monument is skipped and another one tried, so each landmark still gets its crowd
+    auto feet = [&](float x, float z) {
+        float y = ground(x, z, terrain(x, z));
+        return isWater(x, z, y) ? ground(x, z, 3.f) : y;
+    };
     for (auto& t : ts)
-        for (int k = 0; k < t.n; k++) {
+        for (int k = 0, tries = 0; k < t.n && tries < t.n * 10; tries++) {
             float a = r.range(0, TAU_F), d = r.range(2, t.rad);
             float x = t.x + cosf(a) * d, z = t.z + sinf(a) * d;
             if (onBridge(x, z) || fabsf(x + 1100) < 17) continue;
-            Vector3 p = {x, G(x, z), z};
+            Vector3 p = {x, feet(x, z), z};
+            if (isWater(x, z, p.y)) continue;
             Vector3 tmp = p;
             Vector2 n;
             if (collide(tmp, 0.5f, p.y, 1.8f, &n)) continue;
             tourists.push_back(p);
+            k++;
         }
     // people out on the lawns of the parks on a blanket, many with a laptop (this is San Francisco)
     {

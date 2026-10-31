@@ -679,10 +679,11 @@ int main() {
             ride.s += ride.dir * ride.v * dt;
             T.update(dt, W, P);
             if (remain < 0.5f || IsKeyPressed(KEY_SPACE)) {
-                Vector3 p = W.trackPoint(ride.target, 6.2f, nullptr);
-                P.spawn({p.x, W.ground(p.x, p.z, p.y + 3), p.z}, PI);
-                camYaw = PI;
-                camPos = {p.x + 6, p.y + 3, p.z};
+                float yaw;
+                Vector3 p = W.caltrainDropoff(ride.dest, &yaw);
+                P.spawn(p, yaw);
+                camYaw = yaw;
+                camPos = {p.x - cosf(yaw) * 6, p.y + 3, p.z - sinf(yaw) * 6};
                 P.say(W.stations[ride.dest].name, {255, 225, 160, 255}, "Arrived by Caltrain");
                 ride.on = false;
             }

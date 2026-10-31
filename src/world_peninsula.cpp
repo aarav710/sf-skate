@@ -85,6 +85,29 @@ void World::buildCaltrain() {
     }
 }
 
+// Where you step off at a station: on the platform (west side first), clear of the station building and the
+// overhead-wire poles, facing along the platform away from its middle. At 4th & King the depot's collision box
+// reaches over the middle of the west platform, so you land 20 m down it instead.
+Vector3 World::caltrainDropoff(int station, float* yaw) const {
+    float s0 = stations[station].s;
+    for (float lat : {6.2f, -6.2f})
+        for (float k : {0.f, 20.f, -20.f, 30.f, -30.f, 45.f, -45.f, 60.f, -60.f}) {
+            Vector2 d;
+            Vector3 c = trackPoint(s0 + k, lat, &d);
+            float y = ground(c.x, c.z, c.y + 3);
+            if (fabsf(y - (c.y + 0.47f)) > 0.3f) continue;   // not on the platform deck
+            Vector3 q = {c.x, y, c.z};
+            Vector2 n;
+            if (collide(q, 1.0f, y, 1.8f, &n)) continue;
+            float dir = k < 0 ? -1.f : 1.f;
+            if (yaw) *yaw = atan2f(d.y * dir, d.x * dir);
+            return {c.x, y, c.z};
+        }
+    Vector3 c = trackPoint(s0, 6.2f, nullptr);   // no clear spot found: the old drop-off
+    if (yaw) *yaw = PI;
+    return {c.x, ground(c.x, c.z, c.y + 3), c.z};
+}
+
 // ---------------------------------------------------------------- Menlo Park homes
 static const Color WALLS[] = {col(242, 240, 232), col(236, 226, 202), col(176, 190, 200), col(186, 196, 176),
                               col(210, 194, 168), col(170, 104, 84),  col(225, 222, 214), col(150, 160, 150)};

@@ -75,6 +75,7 @@ void Player::update(float dt, const Input& in, World& w) {
     popupT -= dt;
     evPop = evLand = evBail = evSplash = evGrindStart = false;
     Vector3 before = pos;
+    if (state != AIR) bouncing = ollieQueued = false;
     switch (state) {
     case RIDE: ride(dt, in, w); break;
     case AIR: air(dt, in, w); break;
@@ -183,6 +184,7 @@ void Player::ride(float dt, const Input& in, World& w) {
 
 void Player::air(float dt, const Input& in, World& w) {
     airTime += dt;
+    if (bouncing && airTime > bounceDur) bouncing = ollieQueued = false; // bounced off an edge into a real drop: controls back
     pitch = lerpf(pitch, 0.f, 1 - expf(-dt * 3));
     float prevY = pos.y;
     vy -= GRAVITY * dt;
@@ -195,13 +197,13 @@ void Player::air(float dt, const Input& in, World& w) {
         pos.y = cl - 1.75f;
         if (vy > 0) vy = -vy * 0.25f;
     }
-    float spin = in.steer * 6.0f * dt;
+    float spin = bouncing ? 0.f : in.steer * 6.0f * dt;
     yaw = wrapPi(yaw + spin);
     spinAccum += spin;
     crouch = lerpf(crouch, in.grab ? 1.0f : 0.55f, 1 - expf(-dt * 10));
 
     // flip tricks
-    if (flipT < 0 && shoveT < 0) {
+    if (flipT < 0 && shoveT < 0 && !bouncing) {
         if (in.kickflip) { flipT = 0; flipDir = 1; addTrick("Kickflip", 500); }
         else if (in.heelflip) { flipT = 0; flipDir = -1; addTrick("Heelflip", 500); }
         else if (in.shove) { shoveT = 0; addTrick("Pop Shove-it", 400); }
@@ -216,7 +218,7 @@ void Player::air(float dt, const Input& in, World& w) {
         shoveAngle = 180.f * clampf(shoveT / shoveDur, 0, 1);
         if (shoveT >= shoveDur) { shoveT = -1; shoveAngle = 0; }
     }
-    if (in.grab && flipT < 0 && shoveT < 0) {
+    if (in.grab && flipT < 0 && shoveT < 0 && !bouncing) {
         if (!grabbed) { grabbed = true; addTrick("Indy Grab", 300); }
         grabT += dt;
         comboPts += 500 * dt;
@@ -270,8 +272,15 @@ void Player::air(float dt, const Input& in, World& w) {
 
     // landing
     float g = w.ground(pos.x, pos.z, std::max(prevY, pos.y));
-    if (pos.y <= g && vy <= 0) land(w, g);
+    if (pos.y <= g && vy <= 0) {
+        bool pop = bouncing && (ollieQueued || in.ollie); // Space during a landing bounce pops as it touches down
+        bouncing = ollieQueued = false;
+        land(w, g);
+        if (pop && state == RIDE) ollie(7.4f + clampf(fabsf(speed) * 0.03f, 0, 0.6f));
+        else if (pop && bouncing) ollieQueued = true; // bounced again (downhill): keep waiting
+    }
     else if (pos.y < g) pos.y = g;   // still rising into a steeper hillside: skim along it rather than through it
+    if (bouncing && in.ollie) ollieQueued = true;
 }
 
 void Player::land(World& w, float g) {
@@ -327,6 +336,8 @@ void Player::land(World& w, float g) {
         airTime = 0;
         spinAccum = 0;
         grabbed = false;
+        bouncing = true;
+        bounceDur = 2.f * bv / GRAVITY + 0.1f;
     }
 }
 

@@ -84,6 +84,25 @@ int main() {
         snprintf(b, sizeof b, "hopped=%d launch=%.1f m/s, final state=%d", hopped, hop, s.p.state);
         check(hopped && hop < 3.5f && s.p.state == Player::RIDE, "landing bounce", b);
     }
+    {   // the bounce is part of riding: Space pops, steering and flip keys can't bail a clean landing (issue #11)
+        int popped = 0, bails = 0, tries = 0;
+        for (int mode = 0; mode < 3; mode++)
+            for (int k = 1; k <= 16; k++) {
+                Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
+                Input in; in.ollie = true; s.run(1, in);
+                s.run(120, Input{}, [](Player& p) { return p.evLand; });
+                s.run(k - 1, Input{});
+                Input b2;
+                if (mode == 0) b2.ollie = true; else if (mode == 1) b2.steer = 1; else b2.kickflip = true;
+                float peak = 0, y0 = s.p.pos.y;
+                bool bailed = s.run(60, b2, [&](Player& p) { peak = std::max(peak, p.pos.y - y0); return p.state == Player::BAIL; });
+                tries++;
+                if (bailed) bails++;
+                if (mode == 0 && peak > 1.0f) popped++;
+            }
+        snprintf(b, sizeof b, "Space popped %d of 16, %d bails in %d tries", popped, bails, tries);
+        check(popped == 16 && bails == 0, "input during landing bounce", b);
+    }
     {   // kickflip landed cleanly
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
         Input in; in.ollie = true; s.run(1, in);

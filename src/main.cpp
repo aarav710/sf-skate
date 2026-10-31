@@ -634,7 +634,6 @@ int main() {
             CH.reset(8);
             P.evPop = P.evLand = P.evBail = P.evSplash = P.evGrindStart = false;
             camYaw = P.yaw;
-            P.say("JET SKI", {120, 220, 255, 255}, "Hold W to go, Shift to boost, E near the shore to hop off");
             running = false;
         }
         if (JS.riding && !paused && !picker && !showMap && !title) {
@@ -656,7 +655,6 @@ int main() {
             CH.reset(8);
             P.evPop = P.evLand = P.evBail = P.evSplash = P.evGrindStart = false;
             camYaw = P.yaw;
-            P.say("SEAPLANE", {255, 225, 140, 255}, "W throttle up, Space to lift off past 55 mph");
             running = false;
         }
         if (SP.riding && !paused && !picker && !showMap && !title) {
@@ -1428,18 +1426,40 @@ int main() {
                 }
             }
             if (showHelp) {
-                const char* lines[] = {"CONTROLS", "W / Up      push", "S / Down    brake", "A D         steer / spin in air",
+                const char* skateLines[] = {"CONTROLS", "W / Up      push", "S / Down    brake", "A D         steer / spin in air",
                                        "Shift       tuck (go faster)", "Space       ollie / jump off rail", "J  K  L     kickflip, heelflip, shove-it",
                                        "I (hold)    grab", "Land on rails & ledges to grind", "B  free roam / cop chase   N  difficulty", "Right mouse  look around", "Wheel       zoom    C  camera",
                                        "Tab  choose landmark / time", "M  map  1-0  teleport  E  train/jetski", "T or F1-F3  time of day",
                                        "F fog  G rain  R reset  P pause", TextFormat("V  graphics: %s", Renderer::QUALITY_NAMES[R.quality]),
                                        TextFormat("Y  frame rate: %s", gCap60 ? "60" : "Max"), "Caught: mash SPACE A D / J K L", "H  hide this help"};
+                // on a jet ski or seaplane the panel shows its controls instead, with its name as a small title
+                // ("key|action": drawn as two aligned columns)
+                const char* skiLines[] = {"JET SKI", "W|go", "S|brake", "A D|steer", "Shift|boost", "E|hop off at the shore",
+                                          "Right mouse|look around", "H|hide controls"};
+                const char* planeLines[] = {"SEAPLANE", "W / S|throttle", "A D|steer", "Space|climb (lift off past 55 mph)",
+                                            "Shift|dive", "E|climb out at the shore", "Right mouse|look around", "H|hide controls"};
+                const char** lines = JS.riding ? skiLines : SP.riding ? planeLines : skateLines;
+                const int n = JS.riding ? (int)(sizeof(skiLines) / sizeof(*skiLines))
+                            : SP.riding ? (int)(sizeof(planeLines) / sizeof(*planeLines)) : (int)(sizeof(skateLines) / sizeof(*skateLines));
+                Color head = JS.riding ? Color{120, 220, 255, 255} : SP.riding ? Color{255, 225, 140, 255} : Color{255, 210, 60, 255};
                 // size the panel from the measured text so no line is cut off; in small windows shrink the font
                 // until it fits below the minimap (y 270) and clear of the FPS counter below it, then slide it up if still too tall
-                const int n = sizeof(lines) / sizeof(lines[0]);
+                auto split = [](const char* l, std::string& key) {   // "key|action": key out, action returned (null if no '|')
+                    const char* bar = strchr(l, '|');
+                    if (bar) key.assign(l, bar - l);
+                    return bar ? bar + 1 : nullptr;
+                };
+                auto keyCol = [&](int fs) {   // width of the key column
+                    int w = 0; std::string k;
+                    for (int i = 1; i < n; i++) if (split(lines[i], k)) w = std::max(w, MeasureText(k.c_str(), fs) + 14);
+                    return w;
+                };
                 auto panelW = [&](int fs) {
-                    int w = 0;
-                    for (int i = 0; i < n; i++) w = std::max(w, MeasureText(lines[i], i == 0 ? fs + 4 : fs));
+                    int w = 0, kc = keyCol(fs); std::string k;
+                    for (int i = 0; i < n; i++) {
+                        const char* act = i ? split(lines[i], k) : nullptr;
+                        w = std::max(w, act ? kc + MeasureText(act, fs) : MeasureText(lines[i], i == 0 ? fs + 4 : fs));
+                    }
                     return w + 28;
                 };
                 auto panelH = [&](int fs) { return 10 + n * (fs + 4) + 8; };   // 22 px rows at size 18
@@ -1449,20 +1469,26 @@ int main() {
                 int hw = panelW(fs), hh = panelH(fs);
                 int hx = std::max(16, sw - hw - 16), hy = std::max(16, std::min(270, sh2 - 40 - hh));
                 DrawRectangle(hx, hy, hw, hh, {0, 0, 0, 140});
-                for (int i = 0; i < n; i++) DrawText(lines[i], hx + 14, hy + 10 + i * (fs + 4), i == 0 ? fs + 4 : fs, i == 0 ? Color{255, 210, 60, 255} : WHITE);
+                int kc = keyCol(fs); std::string k;
+                for (int i = 0; i < n; i++) {
+                    int y = hy + 10 + i * (fs + 4);
+                    const char* act = i ? split(lines[i], k) : nullptr;
+                    if (act) {
+                        DrawText(k.c_str(), hx + 14, y, fs, {200, 210, 225, 255});
+                        DrawText(act, hx + 14 + kc, y, fs, WHITE);
+                    } else DrawText(lines[i], hx + 14, y, i == 0 ? fs + 4 : fs, i == 0 ? head : WHITE);
+                }
+            } else if (JS.riding || SP.riding) {
+                textShadow("H  show controls", sw - MeasureText("H  show controls", 18) - 24, 270, 18, {220, 225, 235, 220});
             }
             }
             if (nearSki >= 0) {
                 promptBar("Press E to ride the jet ski", sw, sh2 - 230, 22, {20, 110, 170, 220}, WHITE);
             }
-            if (JS.riding) {
-                promptBar("W go   S brake   A D steer   Shift boost   E hop off at the shore", sw, sh2 - 230, 20, {0, 0, 0, 130}, {200, 235, 255, 255});
-            }
             if (nearPlane >= 0) {
                 promptBar("Press E to fly the seaplane", sw, sh2 - 230, 22, {200, 140, 30, 230}, WHITE);
             }
             if (SP.riding) {
-                promptBar("W / S throttle   A D steer   Space climb   Shift dive   E climb out at the shore", sw, sh2 - 230, 20, {0, 0, 0, 130}, {255, 235, 200, 255});
                 int bx = 16, by = sh2 - 200;
                 DrawRectangle(bx, by, 300, 96, {0, 0, 0, 130});
                 textShadow(TextFormat("ALT  %d ft", (int)(SP.altitude(W) * 3.281f)), bx + 14, by + 10, 24, WHITE);

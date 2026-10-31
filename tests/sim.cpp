@@ -743,6 +743,40 @@ int main() {
                 check(splash && s.p.subPopup == sp.msg, "splash message names the water", b);
             }
     }
+    {   // Palace of Fine Arts lagoon: everywhere you splash is drawn under the water, the lawn around it is above it,
+        // and riding in from the Palace you only splash once you're over drawn water
+        const Pond* lg = nullptr;
+        for (auto& pd : W.ponds) if (std::string(pd.kind) == "lagoon") { lg = &pd; break; }
+        int dry = 0, n = 0, sunk = 0, m = 0;
+        float top = -1e9f;
+        if (lg)
+            for (float z = lg->z0 + 0.1f; z < lg->z1; z += 0.5f)
+                for (float x = lg->x0 + 0.1f; x < lg->x1; x += 0.5f) {
+                    n++;
+                    float t = W.terrain(x, z);
+                    top = std::max(top, t);
+                    if (t > LAGOON_Y - 0.1f) dry++;
+                }
+        // the water sheet reaches 10 m past the pond: its edge must be hidden under the bank
+        for (float s = 0; s <= 1.001f; s += 0.01f) {
+            float xs[] = {lerpf(LAGOON_X0 - 10, LAGOON_X1 + 10, s), LAGOON_X1 + 10, lerpf(LAGOON_X0 - 10, LAGOON_X1 + 10, s), LAGOON_X0 - 10};
+            float zs[] = {LAGOON_Z0 - 10, lerpf(LAGOON_Z0 - 10, LAGOON_Z1 + 10, s), LAGOON_Z1 + 10, lerpf(LAGOON_Z0 - 10, LAGOON_Z1 + 10, s)};
+            for (int k = 0; k < 4; k++, m++) if (W.terrain(xs[k], zs[k]) < LAGOON_Y + 0.1f) sunk++;
+        }
+        snprintf(b, sizeof b, "pond found=%d, %d/%d samples above the water (top %.2f vs %.2f), %d/%d sheet edge exposed",
+                 lg != nullptr, dry, n, top, LAGOON_Y, sunk, m);
+        check(lg && n > 0 && dry == 0 && sunk == 0, "lagoon drawn as water", b);
+        int early = 0, wet = 0;
+        for (float z0 : {-1030.f, -1020.f, -1000.f, -990.f}) {
+            Sim s; s.spawn(-815, z0, 0, 4);   // just east of the Palace dome, rolling east into the lagoon
+            Input in; in.push = true;
+            bool splash = s.run(600, in, [](Player& p) { return p.splashed; });
+            if (splash) wet++;
+            if (splash && (s.p.pos.x < LAGOON_X0 || W.terrain(s.p.pos.x, s.p.pos.z) > LAGOON_Y - 0.1f)) early++;
+        }
+        snprintf(b, sizeof b, "%d/4 rides splashed, %d of them on drawn lawn", wet, early);
+        check(wet == 4 && early == 0, "lagoon splash only in drawn water", b);
+    }
     {   // the Golden Gate railing keeps you on the deck
         Sim s; s.spawn(-1100, -1500, 0, 8); // heading east toward the railing
         Input in; in.push = true;

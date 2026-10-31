@@ -1257,7 +1257,7 @@ int main() {
         // a soft contact blob under the skater helps judge landings (the sun's shadow can fall far away)
         if (!title && !ride.on && !JS.riding && !SP.riding && !(P.state == Player::BAIL && P.splashed)) {
             Vector3 sp = P.state == Player::BAIL ? P.boardPos : P.pos;
-            float gy = W.ground(sp.x, sp.z, P.pos.y + 0.1f);
+            float gy = W.skaterGround(sp.x, sp.z, P.pos.y + 0.1f);
             float hgt = P.pos.y - gy;
             float k = R.nCasc > 0 ? 0.6f : 1.f;
             if (hgt < 12) DrawCylinder({sp.x, gy + 0.12f, sp.z}, 0.6f, 0.6f, 0.01f, 14, {0, 0, 0, (unsigned char)(55 * k * clampf(1 - hgt / 8, 0.25f, 1))});

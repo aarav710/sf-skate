@@ -1602,6 +1602,7 @@ int main() {
         snprintf(b, sizeof b, "overlapping: same road %.1f s, crossing %.1f s (Embarcadero %.1f s); longest stop %.0f s; main roads avg %.1f m/s",
                  sameOv, crossOv, embOv, longestStop, slowest);
         check(sameOv == 0 && crossOv < 20 && embOv == 0 && longestStop < 60 && slowest > 5, "Traffic keeps out of itself", b);
+        W.vehicleTops.clear();   // T.update published the roofs of the cars near pl
     }
     {   // street-grid cars take turns at intersections instead of driving through each other, and nobody gets
         // gridlocked waiting on everyone else: the whole city, a few minutes of traffic. Crossings of a main road
@@ -1673,6 +1674,7 @@ int main() {
         snprintf(b, sizeof b, "%d grid cars, off the main roads: overlapping %.1f s, longest stop %.0f s (%.0f s in an intersection); average speed %.1f m/s",
                  (int)grid.size(), gridOv, longest, longestIn, avg);
         check(gridOv < 15 && longest < 120 && longestIn < 30 && avg > 6.5f, "Grid traffic takes turns", b);
+        W.vehicleTops.clear();   // T.update published the roofs of the cars near pl
     }
     {   // and where the main roads cross the grid, and at their ends, nobody waits on anybody for minutes (#47): the
         // whole city for ten minutes (those lockups mostly started after three), every car on the main roads and the
@@ -1699,6 +1701,7 @@ int main() {
         snprintf(b, sizeof b, "%d cars stood over a minute; longest stop %.0f s on the grid, %.0f s on the main roads",
                  stuck, longGrid, longMain);
         check(std::max(longGrid, longMain) < 90 && longMain < 60, "Main-road crossings don't lock up", b);
+        W.vehicleTops.clear();   // T.update published the roofs of the cars near pl
     }
     {   // sidewalk walkers go round the front of a house's steps, not through them (#86): the walking line runs ~2 m
         // out from the house fronts and a stoop reaches up to 3 m out, so following it put them inside the step boxes,
@@ -1758,6 +1761,7 @@ int main() {
         }
         snprintf(b, sizeof b, "%d of %d walkway samples (%d within 120 m) off the deck, worst %.1f m", bad, tot, near, worst);
         check(tot > 61 * 200 && near > 61 * 10 && bad == 0, "Golden Gate walkers stay on the deck", b);
+        W.vehicleTops.clear();   // T.update published the roofs of the cars near pl
     }
     {   // a stopped vehicle is solid all the way to its ends: roll at 3 m/s into each end of each type, on the axis and
         // near a corner, on the runway (flat and open), and the skater stops at the body (or bails), not inside it
@@ -1792,6 +1796,45 @@ int main() {
         }
         snprintf(b, sizeof b, "%d of %d rides got inside; closest stop, m outside the body: %s", bad, tot, det.c_str());
         check(bad == 0, "Vehicles are solid to their ends", b);
+    }
+    {   // the roof of a vehicle stopped in traffic is ground: drop onto it from 1 m up at 3 and 5 m/s (along it, from
+        // just inside its back end) and the skater lands on top and rides, rather than sinking into it or bailing
+        int bad = 0, tot = 0;
+        std::string det;
+        struct { int type; const char* n; } kinds[] = {{CT_SEDAN, "car"}, {CT_BUS, "bus"}, {CT_CABLECAR, "cable car"},
+                                                       {CT_STREETCAR, "streetcar"}, {CT_LRV, "LRV"}, {CT_PEDALBUS, "pedal bus"}};
+        for (auto& k : kinds)
+            for (float spd : {3.f, 5.f}) {
+                const CarModel& m = carModel(k.type);
+                Traffic T;
+                Car c; c.type = k.type; c.speed = 0; c.stopT = 1e9f; c.placed = true;
+                c.pos = {1950, W.ground(1950, 2262, 500), 2262};
+                T.cars.push_back(c);
+                float roof = c.pos.y + m.height - 0.1f;
+                Sim s; s.spawn(1950 - m.halfLen + 0.3f, 2262, 0, spd);
+                s.p.pos.y = roof + 1; s.p.state = Player::AIR; s.p.vel = {spd, 0, 0}; s.p.vy = 0;
+                bool rode = false;
+                float low = 1e9f;
+                for (int f = 0; f < 60 && s.p.state != Player::BAIL; f++) {
+                    T.publishRoofs(W, s.p.pos);
+                    s.run(1, Input{});
+                    T.interact(s.p);
+                    if (fabsf(s.p.pos.x - 1950) < m.halfLen - 0.3f) low = std::min(low, s.p.pos.y);
+                    if (s.p.state == Player::RIDE && fabsf(s.p.pos.y - roof) < 0.05f) rode = true;
+                }
+                tot++;
+                bool ok = rode && s.p.state != Player::BAIL && low > roof - 0.05f;
+                if (!ok) {
+                    char one[96];
+                    snprintf(one, sizeof one, "%s%s at %.0f m/s: %s, lowest %+.2f", det.empty() ? "" : "; ", k.n, spd,
+                             s.p.state == Player::BAIL ? s.p.popup.c_str() : rode ? "rode" : "never rode on top", low - roof);
+                    det += one;
+                    bad++;
+                }
+            }
+        W.vehicleTops.clear();
+        snprintf(b, sizeof b, "%d of %d drops onto a stopped vehicle missed the roof%s%s", bad, tot, det.empty() ? "" : ": ", det.c_str());
+        check(bad == 0, "Stopped vehicles have a roof to land on", b);
     }
     {   // the "SFO Airport" label covers the airport fill, and not the East Bay shore and hills beyond it
         int wrong = 0, land = 0, missed = 0, fill = 0;

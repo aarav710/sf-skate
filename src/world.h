@@ -147,7 +147,7 @@ struct World {
     float terrainRaw(float x, float z) const;                 // the 4 m heightfield itself (what the mesh is built from)
     float ground(float x, float z, float yRef) const;         // highest walkable surface <= yRef+STEP_UP
     bool collide(Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr) const; // push out of walls; size = widest box hit
-    bool solidAt(Vector3 p) const;                             // for camera collision
+    bool solidAt(Vector3 p, bool bigProps = false) const;      // buildings/decks (+ big prop boxes: the camera)
     float ceiling(float x, float z, float feetY) const;        // lowest underside above the feet (1e9 if open sky)
     int houseAt(float x, float z, float y) const;              // index into houses if inside one, else -1
     bool doorBlocked(float x, float z, float pad) const;       // is (x,z) on the way from the sidewalk to a front door?
@@ -254,7 +254,7 @@ private:
     // p is on the sidewalk, f runs along the street, o points out toward the road.
     void addClutter(Vector2 p, Vector2 f, Vector2 o, int kind, uint32_t h);
     void buildIntersections(const Grid& g);
-    void addRamp(float x0, float z0, float x1, float z1, float rise, int axis, bool up);
+    void addRamp(float x0, float z0, float x1, float z1, float rise, int axis, bool up, bool coping = true);
     void addLedge(float x0, float z0, float x1, float z1, float h, Color c);
     void addRailObj(Vector3 a, Vector3 b, const char* name = nullptr);
     void addStairs(float x0, float z0, float x1, float z1, float drop, int steps, int dir, bool handrails);

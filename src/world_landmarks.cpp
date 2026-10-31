@@ -602,17 +602,19 @@ void World::buildWaterfront() {
     // Piers along the Embarcadero
     for (float zc : {-800.f, -660.f, -520.f, -380.f, 50.f, 180.f, 480.f}) {
         float root = 1290, x1 = 1480;   // the shed and the piles stand from the root out
-        float x0 = root, y = terrain(root, zc) + 0.02f;
+        auto lowest = [&](float x) {
+            float h = 1e9f;
+            for (float z = zc - 15; z <= zc + 15; z += 2.5f) h = std::min(h, terrain(x, z));
+            return h;
+        };
+        // level with the lowest point of the promenade across its root, so nowhere along it is there a lip a
+        // rolling board can't ride up (the promenade falls across the width)
+        float x0 = root, y = lowest(root) + 0.02f;
         if (y < 2.4f) {
             // The north end of the promenade runs out past the seawall: at z -800 the shore has already dropped into
             // the bay at the root. Run the deck back west over the shore to where the promenade is still up at its
             // height across the whole width, and build it at that height, so you roll straight off the promenade
             // onto it (never under the bay, and no step up out of the water at its end).
-            auto lowest = [&](float x) {
-                float h = 1e9f;
-                for (float z = zc - 15; z <= zc + 15; z += 2.5f) h = std::min(h, terrain(x, z));
-                return h;
-            };
             while (x0 > root - 40 && lowest(x0) < 2.4f) x0 -= 1;
             y = std::max(lowest(x0), 2.0f) + 0.02f;
         }

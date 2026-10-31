@@ -2278,7 +2278,9 @@ int main() {
             piers++;
             float zc = (p.z0 + p.z1) * 0.5f;
             if (p.h0 > 2.f && !W.isWater(1300, zc + 14.2f, p.h0) && W.ground(1300, zc + 14.2f, p.h0 + 1) > p.h0 - 0.1f) dry++;
-            for (float z : {zc - 14.2f, zc + 14.2f}) {   // the open strips of deck either side of the shed
+            // the open strips of deck either side of the shed (clear of the promenade benches: at 14.2 m one lane grazed
+            // the end of one, a knee-high ledge a rolling board doesn't climb)
+            for (float z : {zc - 13.8f, zc + 13.8f}) {
                 rides++;
                 Sim s; s.spawn(1260, z, 0, 3);   // on the promenade (the Embarcadero roadway, south of its north end)
                 bool bad = false;

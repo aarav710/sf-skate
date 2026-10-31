@@ -604,6 +604,38 @@ int main() {
         snprintf(b, sizeof b, "%d of %d towers ridden through", through, towers);
         check(towers > 0 && through == towers, "Ride between gondola tower legs", b);
     }
+    {   // Lombard planters: the collision box is the drawn shrub (same layout as World::buildLombard)
+        float x0 = gx(16) + 6, x1 = gx(17) - 6, zc = gz(3);
+        std::vector<Vector2> pts;
+        pts.push_back({gx(16) - 4, zc});
+        for (int k = 0; k <= 8; k++) pts.push_back({lerpf(x0, x1, k / 8.f), zc + ((k % 2) ? 6.5f : -6.5f)});
+        int tot = 0, tallOk = 0, wideOk = 0;
+        float worst = 99;
+        for (int k = 1; k <= 8; k++) {
+            Vector2 a = pts[k], b2 = pts[k + 1];
+            Vector2 d = Vector2Normalize(Vector2Subtract(b2, a)), n = {-d.y, d.x};
+            float L = Vector2Distance(a, b2);
+            for (int side = -1; side <= 1; side += 2)
+                for (float s0 = 2.5f; s0 < L - 2.0f; s0 += 1.6f) {
+                    Vector2 p = Vector2Add(Vector2Add(a, Vector2Scale(d, s0)), Vector2Scale(n, side * 3.4f));
+                    if (fabsf(p.y - zc) > 9.5f) continue;
+                    float gy = W.terrain(p.x, p.y);
+                    tot++;
+                    if (W.ground(p.x, p.y, gy + 2) > gy + 1.0f) tallOk++;   // standing on it puts the board at the shrub's crown
+                    // roll from the road straight into it: the skater stops outside the foliage
+                    Vector2 q = Vector2Subtract(p, Vector2Scale(n, side * 1.8f));
+                    Sim s;
+                    s.p.spawn({q.x, W.ground(q.x, q.y, W.terrain(q.x, q.y) + 0.5f), q.y}, atan2f(p.y - q.y, p.x - q.x));
+                    s.p.speed = 4;
+                    float minD = 99;
+                    s.run(90, Input{}, [&](Player& pl) { minD = std::min(minD, sqrtf(sq(pl.pos.x - p.x) + sq(pl.pos.z - p.y))); return false; });
+                    worst = std::min(worst, minD);
+                    if (minD > 1.05f) wideOk++;
+                }
+        }
+        snprintf(b, sizeof b, "%d planters, %d tall enough, %d stop outside (closest %.2f m)", tot, tallOk, wideOk, worst);
+        check(tot > 20 && tallOk == tot && wideOk == tot, "Lombard planters match the shrubs", b);
+    }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;
 }

@@ -47,8 +47,10 @@ void Player::bankCombo() {
 void Player::bail(const char* why) {
     if (state == BAIL) return;
     airClip = false;
-    if (state == GRIND && railFakie) yaw = wrapPi(yaw + PI); // fakie 50-50: fall along the rail travel, not back up it
+    // grinding: fall along the rail travel, not back up it (fakie 50-50) or off its side (boardslide)
+    if (state == GRIND) yaw = atan2f(railTravel.y, railTravel.x);
     Vector3 f = state == AIR ? vel : Vector3Scale(fwd(), speed);
+    float kick = state != AIR && speed < 0 ? -1.5f : 1.5f; // rolling backwards: travel is opposite the facing
     if (state == AIR) {
         float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
         if (hv > 0.5f) yaw = atan2f(vel.z, vel.x);
@@ -58,7 +60,7 @@ void Player::bail(const char* why) {
     state = BAIL;
     bailT = 0;
     boardPos = pos;
-    boardVel = Vector3Add(Vector3Scale(f, 0.8f), Vector3Scale(fwd(), 1.5f)); // kick along the heading, not world +x
+    boardVel = Vector3Add(Vector3Scale(f, 0.8f), Vector3Scale(fwd(), kick)); // kick the way the rider travels, not world +x
     boardVel.y = 3.0f;
     if (Vector3Length(boardVel) < 0.1f) boardVel = Vector3Scale(fwd(), 2);
     boardYaw = yaw;
@@ -281,6 +283,7 @@ void Player::air(float dt, const Input& in, World& w) {
             rail = i;
             railT = t;
             railDir = al > 0 ? 1 : -1;
+            railTravel = {rd.x * railDir, rd.y * railDir};
             speed = std::max(3.5f, hv * fabsf(al));
             Vector2 bf = {cosf(yaw), sinf(yaw)};
             boardslide = fabsf(bf.x * rd.x + bf.y * rd.y) < 0.6f;
@@ -391,6 +394,7 @@ void Player::grind(float dt, const Input& in, World& w) {
     float Lxz = sqrtf(d.x * d.x + d.z * d.z);
     Vector2 dir = {d.x / Lxz, d.z / Lxz};
     float slope = d.y / Lxz * railDir;
+    railTravel = {dir.x * railDir, dir.y * railDir};
     pitch = lerpf(pitch, atanf(slope), 1 - expf(-dt * 14));
     speed += (-9.8f * slope * 0.8f - 0.7f) * dt;
     comboPts += 300 * dt;

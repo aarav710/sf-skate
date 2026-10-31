@@ -63,6 +63,7 @@ void Player::respawnSafe(World& w) {
 
 void Player::spawn(Vector3 p, float y) {
     pos = p; yaw = y; speed = 0; vel = {0, 0, 0}; vy = 0; rideVy = 0;
+    parked = true;   // several spots (Twin Peaks, Union Square...) are on steep hills: don't roll off before the first input
     state = RIDE; flipT = shoveT = -1; flipAngle = shoveAngle = 0; combo.clear(); comboPts = 0;
     rail = -1; splashed = false; airClip = false; bailT = 0; pitch = 0;
     safePos = p; safeYaw = y;
@@ -188,6 +189,11 @@ void Player::ride(float dt, const Input& in, World& w) {
     if (pushing) acc += 8.0f;
     pushAmt = lerpf(pushAmt, pushing ? 1.f : 0.f, 1 - expf(-dt * 6));
     if (pushAmt > 0.05f) pushPhase += dt * 5.5f;
+    // a fresh spawn stays put until the rider asks to go (steering only aims the board); anything that has
+    // already given the board speed (a cop breaking free, a scripted run) lets go too
+    if (parked && (in.push || in.tuck || in.ollie || in.ollieHeld || in.kickflip || in.heelflip || in.shove || in.grab || speed != 0))
+        parked = false;
+    if (parked) speed = acc = 0;
     if (in.brake) {
         if (fabsf(speed) < 0.5f) speed = acc = 0;   // held: no creep from the slope
         else acc += speed > 0 ? -8.f : 8.f;

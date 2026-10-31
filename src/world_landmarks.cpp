@@ -695,20 +695,71 @@ void World::buildSkateSpots() {
         addPlat({1239, 1250, -309, -299, y + 9, y + 9, y - 1, 0, PK_BUILDING});
     }
     // --- Union Square: Dewey Monument, palms, ledges
+    // The square sits on a hill that falls ~2 m every 10 m to the east, so nothing here can share one height: each
+    // prop is fitted to the ground under its own footprint.
     {
         float cx = (gx(19) + gx(20)) / 2, cz = (gz(6) + gz(7)) / 2, y = terrain(cx, cz);
+        // lowest / highest ground under a footprint (the terrain mesh is 10 m triangles; 1 m samples catch its kinks)
+        auto lowHigh = [&](float x0, float z0, float x1, float z1, float& lo, float& hi) {
+            lo = 1e9f; hi = -1e9f;
+            int nx = std::max(1, (int)ceilf(x1 - x0)), nz = std::max(1, (int)ceilf(z1 - z0));
+            for (int j = 0; j <= nz; j++)
+                for (int i = 0; i <= nx; i++) {
+                    float t = terrain(lerpf(x0, x1, (float)i / nx), lerpf(z0, z1, (float)j / nz));
+                    lo = std::min(lo, t); hi = std::max(hi, t);
+                }
+        };
+        float mLo, mHi;
+        lowHigh(cx - 3, cz - 3, cx + 3, cz + 3, mLo, mHi);
         MeshBuilder& m = mb(cx, cz);
-        m.box({cx - 3, y - 0.3f, cz - 3}, {cx + 3, y + 2, cz + 3}, col(200, 196, 190));
+        m.box({cx - 3, mLo - 0.3f, cz - 3}, {cx + 3, y + 2, cz + 3}, col(200, 196, 190));
         m.prism({cx, y + 2, cz}, 12, 1.4f, 1.2f, 26, col(225, 222, 215), col(225, 222, 215));
         m.prism({cx, y + 28, cz}, 8, 0.8f, 0.2f, 4, col(200, 160, 60), col(200, 160, 60));
-        addPlat({cx - 3, cx + 3, cz - 3, cz + 3, y + 28, y + 28, y - 1, 0, PK_BUILDING});
+        addPlat({cx - 3, cx + 3, cz - 3, cz + 3, y + 28, y + 28, mLo - 1, 0, PK_BUILDING});
         RNG r(44);
         for (int k = 0; k < 4; k++) addTree(cx + (k & 1 ? 32.f : -32.f), cz + (k & 2 ? 32.f : -32.f), 2, 1.1f, r, true);
-        addLedge(cx - 25, cz - 15, cx - 10, cz - 14.2f, 0.55f, gran);
-        addLedge(cx + 10, cz + 14.2f, cx + 25, cz + 15, 0.55f, gran);
-        addLedge(cx - 15, cz + 20, cx - 14.2f, cz + 34, 0.5f, gran);
-        addStairs(cx + 14, cz - 34, cx + 30, cz - 27, 1.4f, 4, 3, true);
-        addBox(cx + 14, cz - 27, cx + 30, cz - 18, y - 0.3f, y + 1.4f, PK_PROP, conc, C_PLAZA);
+        // granite ledges that run with the slope, standing h above the ground along their whole length
+        auto ledge = [&](float x0, float z0, float x1, float z1, float h) {
+            int axis = x1 - x0 > z1 - z0 ? 0 : 1;
+            float lo, hi, e0, e1, dummy;
+            lowHigh(x0, z0, x1, z1, lo, hi);
+            if (axis == 0) { lowHigh(x0, z0, x0, z1, dummy, e0); lowHigh(x1, z0, x1, z1, dummy, e1); }
+            else           { lowHigh(x0, z0, x1, z0, dummy, e0); lowHigh(x0, z1, x1, z1, dummy, e1); }
+            float h0 = e0 + h, h1 = e1 + h;
+            Platform p{x0, x1, z0, z1, h0, h1, lo - 0.3f, (uint8_t)axis, PK_PROP};
+            addPlat(p);
+            mb((x0 + x1) / 2, (z0 + z1) / 2).slab(x0, x1, z0, z1, h0, h1, axis, lo - 0.3f, scaleC(gran, 1.05f), gran);
+            if (axis == 0) {
+                rails.push_back({{x0, h0, z0 + 0.04f}, {x1, h1, z0 + 0.04f}, "Ledge"});
+                rails.push_back({{x0, h0, z1 - 0.04f}, {x1, h1, z1 - 0.04f}, "Ledge"});
+            } else {
+                rails.push_back({{x0 + 0.04f, h0, z0}, {x0 + 0.04f, h1, z1}, "Ledge"});
+                rails.push_back({{x1 - 0.04f, h0, z0}, {x1 - 0.04f, h1, z1}, "Ledge"});
+            }
+        };
+        ledge(cx - 25, cz - 15, cx - 10, cz - 14.2f, 0.55f);
+        ledge(cx + 10, cz + 14.2f, cx + 25, cz + 15, 0.55f);
+        ledge(cx - 15, cz + 20, cx - 14.2f, cz + 34, 0.5f);
+        // a terrace dug into the hill: level with the ground on its uphill (west) side, with stairs and handrails
+        // running down its downhill (east) face to the plaza below
+        float dx0 = cx + 12, dx1 = cx + 20, sx1 = cx + 30, dz0 = cz - 27, dz1 = cz - 15;
+        float dLo, dHi, fLo, fHi;
+        lowHigh(dx0, dz0, dx1, dz1, dLo, dHi);
+        lowHigh(sx1, dz0, sx1, dz1, fLo, fHi);
+        float deck = dHi;
+        addBox(dx0, dz0, dx1, dz1, dLo - 0.3f, deck, PK_PROP, conc, C_PLAZA);
+        Color stone = col(186, 180, 170);
+        const int steps = 8;
+        for (int k = 0; k < steps; k++) {
+            float a0 = lerpf(dx1, sx1, (float)k / steps), a1 = lerpf(dx1, sx1, (float)(k + 1) / steps);
+            float sLo, sHi;
+            lowHigh(a0, dz0, a1, dz1, sLo, sHi);
+            float top = std::max(lerpf(deck, fHi, (float)(k + 1) / (steps + 1)), sHi + 0.05f);
+            addBox(a0, dz0, a1, dz1, sLo - 0.3f, top, PK_PROP, stone, stone, 0.9f);
+        }
+        float hr = 0.95f;
+        for (float z : {dz0 + 0.4f, dz1 - 0.4f})
+            addRailObj({dx1, deck + hr, z}, {sx1 + 1.5f, terrain(sx1 + 1.5f, z) + hr * 0.6f, z}, "Handrail");
     }
     // --- Civic Center Plaza: raised lawns with grindable edges
     {

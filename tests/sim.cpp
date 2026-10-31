@@ -5,6 +5,7 @@
 #include "../src/traffic.h"
 #include "../src/models.h"
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 
 static World W;
@@ -962,6 +963,78 @@ int main() {
         snprintf(b, sizeof b, "%d grid cars, off the main roads: overlapping %.1f s, longest stop %.0f s (%.0f s in an intersection); average speed %.1f m/s",
                  (int)grid.size(), gridOv, longest, longestIn, avg);
         check(gridOv < 15 && longest < 120 && longestIn < 30 && avg > 6.5f, "Grid traffic takes turns", b);
+    }
+    {   // Union Square's skate props sit on its sloping plaza: nothing floats over it or sinks into it
+        const float X0 = gx(19), X1 = gx(20), Z0 = gz(6), Z1 = gz(7);
+        int props = 0, floating = 0, buried = 0, badLedge = 0;
+        float worstGap = 0, worstSink = 0;
+        const Platform* deck = nullptr;
+        for (const Platform& p : W.plats) {
+            if (p.kind != PK_PROP || p.x0 < X0 || p.x1 > X1 || p.z0 < Z0 || p.z1 > Z1) continue;
+            props++;
+            if (!deck || (p.x1 - p.x0) * (p.z1 - p.z0) > (deck->x1 - deck->x0) * (deck->z1 - deck->z0)) deck = &p;
+            bool thin = std::min(p.x1 - p.x0, p.z1 - p.z0) < 1.0f, fl = false, bu = false, bl = false;
+            for (float x = p.x0; x <= p.x1 + 0.01f; x += std::max(0.25f, (p.x1 - p.x0) / 40))
+                for (float z = p.z0; z <= p.z1 + 0.01f; z += std::max(0.25f, (p.z1 - p.z0) / 40)) {
+                    float t = W.terrain(x, z), top = p.top(x, z);
+                    worstGap = std::max(worstGap, p.base - t);
+                    worstSink = std::max(worstSink, t - top);
+                    fl |= p.base > t + 0.05f;
+                    bu |= top < t - 0.02f;
+                    bl |= thin && (top - t < 0.3f || top - t > 0.9f);
+                }
+            floating += fl; buried += bu; badLedge += bl;
+        }
+        snprintf(b, sizeof b, "%d props: %d floating (worst gap %.2f m), %d buried (worst %.2f m), %d ledges not ledge-height",
+                 props, floating, worstGap, buried, worstSink, badLedge);
+        check(props >= 8 && floating == 0 && buried == 0 && badLedge == 0, "Union Square props on the ground", b);
+
+        int rails = 0, badRail = 0;
+        float worst = 0;
+        for (const Rail& r : W.rails) {
+            if (r.a.x < X0 || r.a.x > X1 || r.a.z < Z0 || r.a.z > Z1) continue;
+            rails++;
+            bool ledge = strcmp(r.name, "Ledge") == 0, bad = false;
+            for (int k = 0; k <= 20; k++) {
+                Vector3 q = Vector3Lerp(r.a, r.b, k / 20.f);
+                float up = q.y - W.terrain(q.x, q.z);
+                if (up < 0.3f || (ledge && up > 0.9f)) { bad = true; worst = up < 0.3f ? std::min(worst, up) : std::max(worst, up); }
+            }
+            badRail += bad;
+        }
+        snprintf(b, sizeof b, "%d rails, %d under the ground or off their ledge (worst %.2f m above the ground)", rails, badRail, worst);
+        check(rails >= 8 && badRail == 0, "Union Square rails above the ground", b);
+
+        // walk from the plaza below up the stairs, across the deck and off its uphill side
+        bool onDeck = false;
+        float maxDrop = 0, endOff = 99;
+        if (deck) {
+            float z = (deck->z0 + deck->z1) / 2, h = W.terrain(deck->x1 + 15, z);
+            for (float x = deck->x1 + 15; x >= deck->x0 - 3; x -= 0.1f) {
+                float nh = W.ground(x, z, h);
+                maxDrop = std::max(maxDrop, h - nh);
+                h = nh;
+                onDeck |= deck->contains(x, z) && fabsf(h - deck->top(x, z)) < 0.01f;
+            }
+            endOff = fabsf(h - W.terrain(deck->x0 - 3, z));
+        }
+        snprintf(b, sizeof b, "reached deck=%d, biggest drop %.2f m, off the far side %.2f m from the ground", onDeck, maxDrop, endOff);
+        check(onDeck && maxDrop < STEP_UP && endOff < 0.01f, "Union Square stairs reach the deck", b);
+
+        // ollie onto each ledge while rolling along it
+        int ledges = 0, grinds = 0;
+        for (const Platform& p : W.plats) {
+            if (p.kind != PK_PROP || p.x0 < X0 || p.x1 > X1 || p.z0 < Z0 || p.z1 > Z1 || std::min(p.x1 - p.x0, p.z1 - p.z0) >= 1.0f) continue;   // (ledges: under 1 m wide)
+            ledges++;
+            bool alongX = p.x1 - p.x0 > p.z1 - p.z0;
+            float sx = alongX ? p.x0 - 6 : p.x0 + 0.04f, sz = alongX ? p.z0 + 0.04f : p.z0 - 6;
+            Sim s; s.spawn(sx, sz, alongX ? 0 : PI / 2, 7);
+            s.run(60, Input{}, [&](Player& q) { return alongX ? q.pos.x > p.x0 - 2.5f : q.pos.z > p.z0 - 2.5f; });
+            Input in; in.ollie = true; s.run(1, in);
+            grinds += s.run(90, Input{}, [](Player& q) { return q.state == Player::GRIND; });
+        }
+        snprintf(b, sizeof b, "%d of %d ledges grindable", grinds, ledges);
+        check(ledges == 3 && grinds == ledges, "Union Square ledges grindable", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

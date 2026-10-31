@@ -698,6 +698,23 @@ Vector2 World::stoopDetour(float x, float z, Vector2 routeDir) const {
     return {bestN.x * best, bestN.y * best};
 }
 
+// Street furniture asks this before it goes down, so no lamp, tree or bin ends up inside a building or landmark
+// (Coit Tower's base used to swallow the lamps and trees of the hilltop, a lamp head poking out of its roof).
+bool World::buildingAt(float x, float z, float pad, float y0, float y1) const {
+    if (pgrid.empty()) return false;
+    int i0 = std::max((int)floorf((x - pad - PG_X0) / PG_CELL), 0), i1 = std::min((int)floorf((x + pad - PG_X0) / PG_CELL), pgW - 1);
+    int j0 = std::max((int)floorf((z - pad - PG_Z0) / PG_CELL), 0), j1 = std::min((int)floorf((z + pad - PG_Z0) / PG_CELL), pgH - 1);
+    i1 = std::max(i1, 0); j1 = std::max(j1, 0); i0 = std::min(i0, pgW - 1); j0 = std::min(j0, pgH - 1);   // clamp like addPlat
+    for (int j = j0; j <= j1; j++)
+        for (int i = i0; i <= i1; i++)
+            for (int idx : pgrid[(size_t)j * pgW + i]) {
+                const Platform& pl = plats[idx];
+                if (pl.kind != PK_BUILDING || !pl.contains(x, z, pad)) continue;
+                if (pl.base < y1 && std::max(pl.h0, pl.h1) > y0) return true;
+            }
+    return false;
+}
+
 int World::houseAt(float x, float z, float y) const {
     for (int i = 0; i < (int)houses.size(); i++) {
         const House& h = houses[i];

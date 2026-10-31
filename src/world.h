@@ -154,6 +154,7 @@ struct World {
     // how far to step a sidewalk walker at (x,z), out toward the street, to keep them clear of the front steps
     // of a house (routeDir: the way their route runs, or zero); zero when no stoop is near
     Vector2 stoopDetour(float x, float z, Vector2 routeDir) const;
+    bool buildingAt(float x, float z, float pad, float y0, float y1) const; // does a building box overlap x/z +-pad between heights y0..y1?
     bool isWater(float x, float z, float y) const;
     const char* waterKind(float x, float z, float y) const;   // what isWater found there: "bay", "ocean", or the pond's kind
     const Pond* pondAt(float x, float z, float y) const;      // the pond (lake, pool, ...) whose water is at this spot, if any
@@ -185,7 +186,7 @@ struct World {
     std::unordered_multimap<int, Vector4> doorWays; // coarse grid of door approach segments (ax, az, bx, bz)
     static constexpr float STOOP_REACH = 3.f;   // how far round a stoop stoopDetour can move a walker (clearance + ease)
     struct Stoop { float x0, x1, z0, z1; Vector2 out; };   // a house's front-step collision box, and the way to the street
-    std::unordered_multimap<int, Stoop> stoops;     // same coarse grid, by the box's centre
+    std::unordered_multimap<int, Stoop> stoops;     // same coarse grid, in every cell within STOOP_REACH of the box
     std::vector<Platform> plats;
     std::vector<std::vector<int>> pgrid; int pgW = 0, pgH = 0;
     std::vector<Rail> rails;

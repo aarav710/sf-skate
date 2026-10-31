@@ -584,8 +584,9 @@ float World::ground(float x, float z, float yRef) const {
     return h;
 }
 
-bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm) const {
+bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size) const {
     bool hit = false;
+    if (size) *size = 0;
     for (int iter = 0; iter < 3; iter++) {
         bool any = false;
         int i0 = (int)floorf((p.x - r - PG_X0) / PG_CELL), i1 = (int)floorf((p.x + r - PG_X0) / PG_CELL);
@@ -617,6 +618,7 @@ bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm
                     p.x += n.x * push;
                     p.z += n.y * push;
                     if (nrm) *nrm = n;
+                    if (size) *size = std::max(*size, std::max(pl.x1 - pl.x0, pl.z1 - pl.z0));
                     hit = any = true;
                 }
         if (!any) break;

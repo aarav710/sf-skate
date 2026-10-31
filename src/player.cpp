@@ -7,7 +7,7 @@ static const Color C_RED = {255, 80, 70, 255};
 void Player::spawn(Vector3 p, float y) {
     pos = p; yaw = y; speed = 0; vel = {0, 0, 0}; vy = 0; rideVy = 0;
     state = RIDE; flipT = shoveT = -1; flipAngle = shoveAngle = 0; combo.clear(); comboPts = 0;
-    rail = -1; splashed = false; bailT = 0; pitch = 0;
+    rail = -1; splashed = false; airClip = false; bailT = 0; pitch = 0;
     safePos = p; safeYaw = y;
 }
 
@@ -39,6 +39,7 @@ void Player::bankCombo() {
 
 void Player::bail(const char* why) {
     if (state == BAIL) return;
+    airClip = false;
     Vector3 f = state == AIR ? vel : Vector3Scale(fwd(), speed);
     if (state == AIR) {
         float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
@@ -225,14 +226,20 @@ void Player::air(float dt, const Input& in, World& w) {
 
     // walls
     Vector2 n;
-    if (w.collide(pos, 0.35f, pos.y, 1.7f, &n)) {
+    float hitSize;
+    if (w.collide(pos, 0.35f, pos.y, 1.7f, &n, &hitSize)) {
+        bool pole = hitSize < 1.2f;
         float into = -(vel.x * n.x + vel.z * n.y);
-        if (into > 9.f) { bail("Flew into a wall"); return; }
+        if (into > 9.f) { bail(pole ? "Hit a pole" : "Flew into a wall"); return; }
         if (into > 0) {
             float before = atan2f(vel.z, vel.x);
             vel.x += n.x * into; vel.z += n.y * into;
+            float turn = wrapPi(atan2f(vel.z, vel.x) - before);
+            // slamming a wall at a steep angle is a crash; brushing a pole or glancing off a wall just knocks you aside
+            if (!pole && into > 2.f && fabsf(turn) > 0.7f) { bail("Flew into a wall"); return; }
             // turn the board with the deflection (keeping any spin/fakie offset), or the landing reads it as sideways
-            if (vel.x * vel.x + vel.z * vel.z > 0.25f) yaw = wrapPi(yaw + wrapPi(atan2f(vel.z, vel.x) - before));
+            if (vel.x * vel.x + vel.z * vel.z > 1.f) yaw = wrapPi(yaw + turn);
+            airClip = true;
         }
     }
 
@@ -260,6 +267,7 @@ void Player::air(float dt, const Input& in, World& w) {
             balance = 0;
             balanceVel = (GetRandomValue(0, 1) ? 1 : -1) * 0.3f;
             state = GRIND;
+            airClip = false;
             std::string nm = boardslide ? "Boardslide" : "50-50";
             if (r.name) nm += std::string(" (") + r.name + ")";
             addTrick(nm, 250);
@@ -302,7 +310,8 @@ void Player::land(World& w, float g) {
     // how clean was it? lined up and gentle is a stomp, crooked or from a height is sketchy
     float impact = -vy;
     float quality = 1.f - clampf(fabsf(fabsf(diff) > PI / 2 ? fabsf(diff) - PI : diff) / 0.5f, 0.f, 1.f) * 0.7f - clampf((impact - 9.f) / 12.f, 0.f, 1.f) * 0.5f;
-    bool stomp = quality > 0.85f && impact > 3.f, sketchy = quality < 0.45f;
+    bool stomp = quality > 0.85f && impact > 3.f && !airClip, sketchy = quality < 0.45f;
+    airClip = false;
     // spins and Big Air are part of the combo too, so add them before the landing scales it
     int halves = (int)roundf(fabsf(spinAccum) / PI);
     if (halves > 0) addTrick(std::string(spinAccum > 0 ? "FS " : "BS ") + std::to_string(halves * 180), 300.f * halves);

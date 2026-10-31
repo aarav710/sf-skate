@@ -112,18 +112,38 @@ int main() {
         check(s.p.state == Player::RIDE && s.p.score > 100, "FS 360 lands", b);
     }
     {   // brushing the Embarcadero Plaza lamp post mid-ollie turns the board with the deflection (issue #3)
-        int ok = 0, deflected = 0;
+        int ok = 0, deflected = 0; float worst = 0; bool spinTrick = false;
         for (float side : {-0.3f, 0.3f}) {
             float yaw = 0.77f, x = 1185 - cosf(yaw) * 4 - sinf(yaw) * side, z = -222.7f - sinf(yaw) * 4 + cosf(yaw) * side;
             Sim s; s.spawn(x, z, yaw, 10);
             Input in; in.ollie = true; s.run(1, in);
-            bool hit = false;
-            s.run(120, Input{}, [&](Player& p) { if (p.state == Player::AIR && p.hspeed() < 9) hit = true; return p.state != Player::AIR; });
+            bool hit = false; float off = 0;
+            s.run(120, Input{}, [&](Player& p) {
+                if (p.state == Player::AIR && p.hspeed() < 9) hit = true;
+                if (p.state == Player::AIR) off = fabsf(wrapPi(p.yaw - atan2f(p.vel.z, p.vel.x)));
+                return p.state != Player::AIR;
+            });
+            for (auto& t : s.p.combo) if (t.rfind("FS ", 0) == 0 || t.rfind("BS ", 0) == 0) spinTrick = true;
+            worst = std::max(worst, off);
             deflected += hit;
-            ok += hit && s.p.state == Player::RIDE;
+            ok += hit && s.p.state == Player::RIDE && s.p.score == 100; // lands, but a clipped landing is no stomp
         }
-        snprintf(b, sizeof b, "deflected %d of 2, landed %d", deflected, ok);
-        check(deflected == 2 && ok == 2, "mid-air pole clip lands", b);
+        snprintf(b, sizeof b, "deflected %d of 2, landed clean %d, board off line %.0f deg, spin trick=%d", deflected, ok, worst * RAD2DEG, spinTrick);
+        check(deflected == 2 && ok == 2 && worst < 0.05f && !spinTrick, "mid-air pole clip lands", b);
+    }
+    {   // ...but flying into a building wall at a steep angle is still a crash
+        int bailed = 0, tot = 0;
+        for (float sp : {8.f, 10.f})
+            for (float off : {15.f, 30.f, 45.f}) {
+                float yaw = off * DEG2RAD, x = 396 - cosf(yaw) * 2.35f, z = -572 - sinf(yaw) * 2;
+                Sim s; s.spawn(x, z, yaw, sp);
+                Input in; in.ollie = true; s.run(1, in);
+                s.run(120, Input{}, [](Player& p) { return p.state != Player::AIR; });
+                tot++;
+                bailed += s.p.state == Player::BAIL && s.p.subPopup == "Flew into a wall";
+            }
+        snprintf(b, sizeof b, "%d of %d steep wall hits at 8-10 m/s bailed", bailed, tot);
+        check(bailed == tot, "steep mid-air wall hit bails", b);
     }
     {   // a stomped landing scales the spin and Big Air too, not just the tricks done before it
         auto stomped = [](float spin, float air) {

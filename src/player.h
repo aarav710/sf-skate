@@ -23,6 +23,7 @@ struct Player {
     Vector3 vel{0, 0, 0};     // horizontal velocity while airborne
     float vy = 0;             // vertical velocity
     float rideVy = 0;         // vertical speed implied by the slope while riding
+    bool parked = false;      // just (re)spawned: held still, even on a hill, until the rider pushes, tucks or pops
 
     // animation
     float crouch = 0, lean = 0, pushPhase = 0, pushAmt = 0;

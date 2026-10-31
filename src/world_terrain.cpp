@@ -246,6 +246,19 @@ static float rawHeight(float x, float z) {
         float d = sqrtf(sq(x - F.x) + sq(z - F.z));
         if (d < F.r1 && best > 0) best = lerpf(best, F.h, 1 - smooth01(F.r0, F.r1, d));
     }
+    // Palace of Fine Arts lagoon: dig a basin under the water and bank it up just outside, so the whole pond
+    // rectangle (where you splash) is drawn as water and the lawn around it stays above the surface
+    if (best > 0) {
+        float ex = std::max(LAGOON_X0 - x, x - LAGOON_X1), ez = std::max(LAGOON_Z0 - z, z - LAGOON_Z1);
+        float d = (ex > 0 || ez > 0) ? sqrtf(sq(std::max(ex, 0.f)) + sq(std::max(ez, 0.f))) : std::max(ex, ez);
+        if (d <= 0) {
+            best = lerpf(LAGOON_Y - 0.2f, LAGOON_Y - 1.5f, smooth01(0, 8, -d));   // a short shelf, then the bed
+        } else if (d < 40) {
+            float rim = lerpf(LAGOON_Y - 0.2f, LAGOON_Y + 0.6f, smooth01(0, 4, d));
+            best += std::max(rim - best, 0.f) * (1 - smooth01(4, 24, d));        // raise a low shore above the water
+            best = std::min(best, rim + 0.15f * d);                                // and ease a high one down to it
+        }
+    }
     // Menlo Park: gentle bayside flats rising slowly toward the wooded hills in the west
     {
         float dx = std::max(std::max(1100.f - x, 0.f), x - 3900.f), dz = std::max(std::max(8400.f - z, 0.f), z - 10800.f);
@@ -531,6 +544,14 @@ float World::terrain(float x, float z) const {
     return terrainRaw(x, z);
 }
 
+bool groundMeshGrid(float x, float z, float* ox, float* oz, float* S) {
+    // the same regions, in the same order, as terrain() above
+    if (x >= AZB_X0 && x < AZB_X1 && z >= AZB_Z0 && z < AZB_Z1) { *ox = AZB_X0; *oz = AZB_Z0; *S = 4.f; return true; }
+    if (x >= WX0 && z >= WZ0 && x < WX1 - 10.f && z < WZ1 - 10.f) { *ox = WX0; *oz = WZ0; *S = 10.f; return true; }
+    if (x >= MX0 - 390 && z >= MZ0 - 390 && x < MX1 + 380 && z < MZ1 + 380) { *ox = MX0 - 390; *oz = MZ0 - 390; *S = 10.f; return true; }
+    return false;
+}
+
 float World::terrainRaw(float x, float z) const {
     float fx = (x - WX0) / HF_RES, fz = (z - WZ0) / HF_RES;
     if (fx < 0 || fz < 0 || fx >= hfW - 1 || fz >= hfH - 1) {
@@ -590,6 +611,16 @@ float World::ground(float x, float z, float yRef, float stepUp, const Vector2* l
     }
     for (auto& pd : ponds)
         if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1) h = std::min(h, terrain(x, z) - 0.6f);
+    return h;
+}
+
+float World::skaterGround(float x, float z, float yRef, float stepUp, const Vector2* lipAt) const {
+    float h = ground(x, z, yRef, stepUp, lipAt);
+    for (const VehicleTop& v : vehicleTops) {
+        float t = v.at(x, z), lip = lipAt ? v.at(lipAt->x, lipAt->y) : t;
+        if (lip < -1e8f) lip = t;   // (coming from off the roof: its edge is the lip)
+        if (lip <= yRef + stepUp && t > h) h = t;
+    }
     return h;
 }
 

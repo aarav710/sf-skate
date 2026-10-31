@@ -44,6 +44,18 @@ struct Platform {
 
 struct Rail { Vector3 a, b; const char* name; };
 
+// The roof of a vehicle out in traffic, for the skater to land and ride on (Traffic publishes the ones near the
+// skater every frame; parked cars are plain PK_CAR platforms instead). The footprint is a box around (x, z) facing
+// (fx, fz), and the roof rises `slope` per m forward from height y over the center (cars pitch on SF's hills).
+struct VehicleTop {
+    float x, z, fx, fz, halfLen, halfWid, y, slope;
+    // roof height over (px, pz), or -1e9 outside the footprint
+    float at(float px, float pz) const {
+        float dx = px - x, dz = pz - z, lx = dx * fx + dz * fz, lz = -dx * fz + dz * fx;
+        return fabsf(lx) <= halfLen && fabsf(lz) <= halfWid ? y + lx * slope : -1e9f;
+    }
+};
+
 // An aerial gondola: stations on summits joined by cables on lattice towers. path is the sagging centerline
 // (stations at stationS along it), and the cabins ride a loop up one cable and back down the other.
 struct GondolaLine {
@@ -92,6 +104,9 @@ struct Spot { const char* name; Vector3 pos; float yaw; };
 struct Seat { Vector3 pos; float yaw; bool grass; };   // where someone can sit: the seat surface (or lawn) and the way they face
 struct MapLabel { const char* name; float x, z; int size; };
 struct Pond { float x0, z0, x1, z1; const char* kind = "pond"; };   // kind names it in the splash message
+// The Palace of Fine Arts lagoon. Its edges lie on both the 10 m ground-mesh grid and the 4 m heightfield grid, so
+// the basin dug under it (rawHeight) keeps every drawn ground triangle inside it below the water surface.
+constexpr float LAGOON_X0 = -800, LAGOON_X1 = -740, LAGOON_Z0 = -1040, LAGOON_Z1 = -980, LAGOON_Y = 3.6f;
 
 // Static geometry is split into layers per 400 m cell: the main layer is always drawn; foliage detail (every leaf)
 // only up close, swapped for low-poly canopy blobs further out; house interiors only near the camera.
@@ -150,6 +165,9 @@ struct World {
     // measured there instead, so a ramp or sloped deck the board is on (or enters at its low edge) never reads as a
     // step however far it rises in one frame, while a box's lip, or a ramp's side, still does
     float ground(float x, float z, float yRef, float stepUp = STEP_UP, const Vector2* lipAt = nullptr) const;
+    // ground for the skater: the same, plus the roofs of the vehicles in vehicleTops (the cars' own placement and
+    // everyone else keep to ground(), or a car on a bridge deck would climb onto its own roof)
+    float skaterGround(float x, float z, float yRef, float stepUp = STEP_UP, const Vector2* lipAt = nullptr) const;
     // push out of walls: anything standing over feetY+stepUp (measured at lipAt if given, as for ground); size = widest box hit
     bool collide(Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr,
                  float stepUp = STEP_UP, const Vector2* lipAt = nullptr) const;
@@ -202,6 +220,7 @@ struct World {
     std::vector<Platform> plats;
     std::vector<std::vector<int>> pgrid; int pgW = 0, pgH = 0;
     std::vector<Rail> rails;
+    std::vector<VehicleTop> vehicleTops;   // the traffic near the skater, as of the last Traffic::update
     std::vector<Pond> ponds;
     Grid sf, oak, mp;
     std::vector<Path> carPaths;      // bridges, Market St

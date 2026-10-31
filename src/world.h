@@ -254,7 +254,7 @@ private:
     // p is on the sidewalk, f runs along the street, o points out toward the road.
     void addClutter(Vector2 p, Vector2 f, Vector2 o, int kind, uint32_t h);
     void buildIntersections(const Grid& g);
-    void addRamp(float x0, float z0, float x1, float z1, float rise, int axis, bool up);
+    void addRamp(float x0, float z0, float x1, float z1, float rise, int axis, bool up, bool coping = true);
     void addLedge(float x0, float z0, float x1, float z1, float h, Color c);
     void addRailObj(Vector3 a, Vector3 b, const char* name = nullptr);
     void addStairs(float x0, float z0, float x1, float z1, float drop, int steps, int dir, bool handrails);

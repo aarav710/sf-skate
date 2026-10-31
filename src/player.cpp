@@ -124,6 +124,12 @@ void Player::ride(float dt, const Input& in, World& w) {
     Vector3 f = fwd();
     float hF = w.ground(pos.x + f.x * 0.7f, pos.z + f.z * 0.7f, pos.y + 0.2f);
     float hB = w.ground(pos.x - f.x * 0.7f, pos.z - f.z * 0.7f, pos.y + 0.2f);
+    // a sample past a drop edge is not a slope (a flat deck near its edge would pull the skater over it):
+    // continue the surface under the board from the other sample instead
+    bool edgeF = hF < pos.y - STEP_UP, edgeB = hB < pos.y - STEP_UP;
+    if (edgeF && edgeB) hF = hB = pos.y;
+    else if (edgeF) hF = 2 * pos.y - hB;
+    else if (edgeB) hB = 2 * pos.y - hF;
     float slope = clampf((hF - hB) / 1.4f, -1.5f, 1.5f);
     pitch = lerpf(pitch, atanf(slope), 1 - expf(-dt * 14));
     float acc = -9.8f * slope / sqrtf(1 + slope * slope);
@@ -132,7 +138,7 @@ void Player::ride(float dt, const Input& in, World& w) {
     pushAmt = lerpf(pushAmt, pushing ? 1.f : 0.f, 1 - expf(-dt * 6));
     if (pushAmt > 0.05f) pushPhase += dt * 5.5f;
     if (in.brake) {
-        if (fabsf(speed) < 0.5f) speed = 0;
+        if (fabsf(speed) < 0.5f) speed = acc = 0;   // held: no creep from the slope
         else acc += speed > 0 ? -8.f : 8.f;
     }
     float drag = (in.tuck ? 0.0010f : 0.0026f) * speed * speed + 0.15f;
@@ -160,8 +166,8 @@ void Player::ride(float dt, const Input& in, World& w) {
     }
     float g = w.ground(np.x, np.z, pos.y);
     float predicted = pos.y + rideVy * dt - 0.5f * GRAVITY * dt * dt;
-    if (g < predicted - 0.06f && fabsf(speed) > 1.5f) {
-        // the ground dropped away: we're flying (ramp lip, stairs, crest)
+    if (g < predicted - 0.06f && (fabsf(speed) > 1.5f || g < pos.y - STEP_UP)) {
+        // the ground dropped away: we're flying (ramp lip, stairs, crest, or rolling slowly off a real drop)
         pos = np;
         pos.y = predicted;
         vel = Vector3Scale(f, speed);

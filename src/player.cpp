@@ -11,6 +11,56 @@ static float groundRate(World& w, Vector3 p, Vector3 f, float speed) {
     return clampf(speed * (hF - hB), -30, 30);
 }
 
+// rise per metre of the ground under a board at p heading along f, as the ride physics feels it
+static float boardSlope(World& w, Vector3 p, Vector3 f) {
+    float hF = w.ground(p.x + f.x * 0.7f, p.z + f.z * 0.7f, p.y + 0.2f);
+    float hB = w.ground(p.x - f.x * 0.7f, p.z - f.z * 0.7f, p.y + 0.2f);
+    // a sample past a drop edge is not a slope (a flat deck near its edge would pull the skater over it):
+    // continue the surface under the board from the other sample instead
+    bool edgeF = hF < p.y - STEP_UP, edgeB = hB < p.y - STEP_UP;
+    if (edgeF && edgeB) hF = hB = p.y;
+    else if (edgeF) hF = 2 * p.y - hB;
+    else if (edgeB) hB = 2 * p.y - hF;
+    return clampf((hF - hB) / 1.4f, -1.5f, 1.5f);
+}
+
+// A heading near `yaw` that a board standing still at p stays at rest on with no input: `yaw` itself if its
+// slope is below the rolling drag, else the contour direction (across the fall line) nearest to it.
+// Returns false (with *restYaw = the best try) if even that would roll.
+static bool restHeading(World& w, Vector3 p, float yaw, float* restYaw) {
+    const float REST = 0.01f;   // the ride's rolling drag (0.15 m/s^2) holds a board on slopes below ~0.015
+    *restYaw = yaw;
+    if (fabsf(boardSlope(w, p, {cosf(yaw), 0, sinf(yaw)})) <= REST) return true;
+    float gx = w.ground(p.x + 0.7f, p.z, p.y + 0.2f) - w.ground(p.x - 0.7f, p.z, p.y + 0.2f);
+    float gz = w.ground(p.x, p.z + 0.7f, p.y + 0.2f) - w.ground(p.x, p.z - 0.7f, p.y + 0.2f);
+    if (gx * gx + gz * gz < 1e-8f) return false;
+    float y = wrapPi(atan2f(gz, gx) + PI / 2);
+    if (fabsf(wrapPi(y - yaw)) > PI / 2) y = wrapPi(y + PI);
+    *restYaw = y;
+    return fabsf(boardSlope(w, p, {cosf(y), 0, sinf(y)})) <= REST;
+}
+
+// Is p a good place to put the skater back after a splash? It must be clear of water all around, and the
+// board must have a heading (near `yaw`) it stays at rest on, or a respawn on a shore that slopes toward
+// the water just rolls straight back in. On success *restYaw gets that heading.
+static bool safeSpot(World& w, Vector3 p, float yaw, float* restYaw) {
+    if (!restHeading(w, p, yaw, restYaw)) return false;
+    for (int k = 0; k < 12; k++)   // no water (bay, lake, fountain, pool) within 6 m
+        for (float r = 2; r <= 6; r += 2) {
+            float x = p.x + cosf(k * PI / 6) * r, z = p.z + sinf(k * PI / 6) * r;
+            if (w.isWater(x, z, w.ground(x, z, p.y + 1.f))) return false;
+        }
+    return true;
+}
+
+// Back to the last safe spot. That may be one nobody checked (where the skater spawned, or stepped off a jet
+// ski or seaplane, right by the water), so stand the board across the slope there rather than rolling back in.
+void Player::respawnSafe(World& w) {
+    float y;
+    restHeading(w, safePos, safeYaw, &y);
+    spawn(safePos, y);
+}
+
 void Player::spawn(Vector3 p, float y) {
     pos = p; yaw = y; speed = 0; vel = {0, 0, 0}; vy = 0; rideVy = 0;
     state = RIDE; flipT = shoveT = -1; flipAngle = shoveAngle = 0; combo.clear(); comboPts = 0;
@@ -47,8 +97,10 @@ void Player::bankCombo() {
 void Player::bail(const char* why) {
     if (state == BAIL) return;
     airClip = false;
-    if (state == GRIND && railFakie) yaw = wrapPi(yaw + PI); // fakie 50-50: fall along the rail travel, not back up it
+    // grinding: fall along the rail travel, not back up it (fakie 50-50) or off its side (boardslide)
+    if (state == GRIND) yaw = atan2f(railTravel.y, railTravel.x);
     Vector3 f = state == AIR ? vel : Vector3Scale(fwd(), speed);
+    float kick = state != AIR && speed < 0 ? -1.5f : 1.5f; // rolling backwards: travel is opposite the facing
     if (state == AIR) {
         float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
         if (hv > 0.5f) yaw = atan2f(vel.z, vel.x);
@@ -58,7 +110,7 @@ void Player::bail(const char* why) {
     state = BAIL;
     bailT = 0;
     boardPos = pos;
-    boardVel = Vector3Add(Vector3Scale(f, 0.8f), Vector3Scale(fwd(), 1.5f)); // kick along the heading, not world +x
+    boardVel = Vector3Add(Vector3Scale(f, 0.8f), Vector3Scale(fwd(), kick)); // kick the way the rider travels, not world +x
     boardVel.y = 3.0f;
     if (Vector3Length(boardVel) < 0.1f) boardVel = Vector3Scale(fwd(), 2);
     boardYaw = yaw;
@@ -98,15 +150,20 @@ void Player::update(float dt, const Input& in, World& w) {
         if (state == RIDE) speed *= 0.5f;
         if (state == AIR) vel = Vector3Scale(vel, 0.3f);
     } else if (!w.inPlay(pos.x, pos.z) && w.inPlay(safePos.x, safePos.z)) {
-        spawn(safePos, safeYaw);   // already outside (dropped off out there somehow): back to the last safe spot
+        respawnSafe(w);   // already outside (dropped off out there somehow): back to the last safe spot
         return;
     }
     // remember the last safe spot for respawns after a splash
     safeT += dt;
+    float restYaw;
     if (state == RIDE && safeT > 0.5f && w.terrain(pos.x, pos.z) > 1.0f && fabsf(speed) < 20 && w.inPlay(pos.x, pos.z)) {
-        safeT = 0;
-        safePos = pos;
-        safeYaw = yaw;
+        if (safeSpot(w, pos, yaw, &restYaw)) {
+            safeT = 0;
+            safePos = pos;
+            safeYaw = restYaw;
+        } else {
+            if (!w.onBridge(pos.x, pos.z)) safeT = 0.4f;   // not here: look again in 0.1 s, not every frame
+        }
     }
     if (state == RIDE && w.onBridge(pos.x, pos.z) && safeT > 0.5f && w.inPlay(pos.x, pos.z)) {
         safeT = 0;
@@ -122,15 +179,7 @@ void Player::ride(float dt, const Input& in, World& w) {
     lean = lerpf(lean, in.steer * clampf(spd / 6.f, 0, 1), 1 - expf(-dt * 8));
 
     Vector3 f = fwd();
-    float hF = w.ground(pos.x + f.x * 0.7f, pos.z + f.z * 0.7f, pos.y + 0.2f);
-    float hB = w.ground(pos.x - f.x * 0.7f, pos.z - f.z * 0.7f, pos.y + 0.2f);
-    // a sample past a drop edge is not a slope (a flat deck near its edge would pull the skater over it):
-    // continue the surface under the board from the other sample instead
-    bool edgeF = hF < pos.y - STEP_UP, edgeB = hB < pos.y - STEP_UP;
-    if (edgeF && edgeB) hF = hB = pos.y;
-    else if (edgeF) hF = 2 * pos.y - hB;
-    else if (edgeB) hB = 2 * pos.y - hF;
-    float slope = clampf((hF - hB) / 1.4f, -1.5f, 1.5f);
+    float slope = boardSlope(w, pos, f);
     pitch = lerpf(pitch, atanf(slope), 1 - expf(-dt * 14));
     float acc = -9.8f * slope / sqrtf(1 + slope * slope);
     bool pushing = in.push && speed < 17.f && speed > -1.f;
@@ -142,9 +191,11 @@ void Player::ride(float dt, const Input& in, World& w) {
         else acc += speed > 0 ? -8.f : 8.f;
     }
     float drag = (in.tuck ? 0.0010f : 0.0026f) * speed * speed + 0.15f;
+    float speed0 = speed;
     speed += acc * dt;
     if (fabsf(speed) > 0.01f) speed -= copysignf(std::min(drag * dt, fabsf(speed)), speed);
-    speed = clampf(speed, -9, 40);
+    // fakie never builds past 9, but a fast 180 landed fakie carries its speed on and lets drag wear it down
+    speed = clampf(speed, std::max(-40.f, std::min(-9.f, speed0)), 40);
     crouch = lerpf(crouch, in.tuck ? 0.85f : (in.ollieHeld ? 0.6f : 0.12f), 1 - expf(-dt * 10));
 
     Vector3 np = Vector3Add(pos, Vector3Scale(f, speed * dt));
@@ -181,6 +232,12 @@ void Player::ride(float dt, const Input& in, World& w) {
     Vector3 f2 = fwd();
     float hF2 = w.ground(np.x + f2.x * 0.5f, np.z + f2.z * 0.5f, g + 0.2f);
     float hB2 = w.ground(np.x - f2.x * 0.5f, np.z - f2.z * 0.5f, g + 0.2f);
+    // same edge rule as the slope above: a sample past a lip reads the ground far below, which would make
+    // the climb off a kicker a huge plunge (and the roll-off a "Way too much drop" bail). Continue the surface instead
+    bool edgeF2 = hF2 < g - STEP_UP, edgeB2 = hB2 < g - STEP_UP;
+    if (edgeF2 && edgeB2) hF2 = hB2 = g;
+    else if (edgeF2) hF2 = 2 * g - hB2;
+    else if (edgeB2) hB2 = 2 * g - hF2;
     rideVy = clampf(speed * (hF2 - hB2), -30, 30);
     pos = np;
     pos.y = g;
@@ -282,6 +339,7 @@ void Player::air(float dt, const Input& in, World& w) {
             rail = i;
             railT = t;
             railDir = al > 0 ? 1 : -1;
+            railTravel = {rd.x * railDir, rd.y * railDir};
             speed = std::max(3.5f, hv * fabsf(al));
             Vector2 bf = {cosf(yaw), sinf(yaw)};
             boardslide = fabsf(bf.x * rd.x + bf.y * rd.y) < 0.6f;
@@ -337,9 +395,10 @@ void Player::land(World& w, float g) {
     bool fakie = false;
     if (fabsf(diff) > 0.65f) {
         if (fabsf(fabsf(diff) - PI) < 0.65f) {
-            // an odd number of half spins brought it round: ride out the other way. No spin: it left the ground
-            // rolling fakie, so it rolls on fakie (negative speed) instead of snapping round
-            if ((int)roundf(fabsf(spinAccum) / PI) % 2) { fakie = true; yaw = wrapPi(yaw + PI); diff = wrapPi(yaw - atan2f(vel.z, vel.x)); }
+            // landed backwards: keep the yaw it landed with and roll on fakie (negative speed) rather than snapping
+            // the board round. An odd number of half spins (a forwards 180/540) is what brought it round: "to Fakie".
+            // No spin (or 360s): it left the ground rolling fakie and simply carries on fakie
+            fakie = (int)roundf(fabsf(spinAccum) / PI) % 2;
         }
         else { bail("Landed sideways"); return; }
     }
@@ -392,6 +451,7 @@ void Player::grind(float dt, const Input& in, World& w) {
     float Lxz = sqrtf(d.x * d.x + d.z * d.z);
     Vector2 dir = {d.x / Lxz, d.z / Lxz};
     float slope = d.y / Lxz * railDir;
+    railTravel = {dir.x * railDir, dir.y * railDir};
     pitch = lerpf(pitch, atanf(slope), 1 - expf(-dt * 14));
     speed += (-9.8f * slope * 0.8f - 0.7f) * dt;
     comboPts += 300 * dt;
@@ -403,6 +463,7 @@ void Player::grind(float dt, const Input& in, World& w) {
     if (fabsf(balance) > 1.f) { bail("Lost balance on the rail"); return; }
     if (speed < 1.0f) {
         state = AIR; vel = {dir.x * railDir * 1.5f, 0, dir.y * railDir * 1.5f}; vy = 0; airTime = 0; spinAccum = 0;
+        if (boardslide) yaw = atan2f(vel.z, vel.x); // swing the crosswise board round to the travel, as the other exits do
         // step off sideways, to whichever side has floor and no wall (a bridge railing has the bay on one side)
         Vector3 off = pos;
         float best = -1e9f;
@@ -472,7 +533,7 @@ void Player::bailUpdate(float dt, World& w) {
     }
     if (bailT > (splashed ? 1.6f : 1.8f)) {
         if (splashed) {
-            spawn(safePos, safeYaw);
+            respawnSafe(w);
         } else {
             state = RIDE;
             speed = 0;

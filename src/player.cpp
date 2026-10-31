@@ -193,7 +193,7 @@ void Player::ride(float dt, const Input& in, World& w) {
 void Player::air(float dt, const Input& in, World& w) {
     airTime += dt;
     // bounced off an edge into a real drop: controls back. Hills are fine: the ground is expected to keep its slope under the hop
-    if (bouncing && w.ground(pos.x, pos.z, pos.y + 0.2f) < bounceY + bounceRate * airTime - 0.5f) bouncing = ollieQueued = false;
+    if (bouncing && w.ground(pos.x, pos.z, pos.y + 0.2f) < bounceY + bounceRate * airTime - 1.0f) bouncing = ollieQueued = false;
     pitch = lerpf(pitch, 0.f, 1 - expf(-dt * 3));
     float prevY = pos.y;
     vy -= GRAVITY * dt;

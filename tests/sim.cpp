@@ -2,6 +2,8 @@
 #include "../src/world.h"
 #include "../src/player.h"
 #include "../src/chase.h"
+#include "../src/traffic.h"
+#include "../src/models.h"
 #include <cstdio>
 #include <algorithm>
 
@@ -684,6 +686,47 @@ int main() {
         }
         snprintf(b, sizeof b, "%d planters, %d tall enough, %d stop outside (closest %.2f m)", tot, tallOk, wideOk, worst);
         check(tot > 20 && tallOk == tot && wideOk == tot, "Lombard planters match the shrubs", b);
+    }
+    {   // traffic doesn't drive through itself: the queue behind a skater standing on the Golden Gate, and Market St and
+        // the Bay Bridge's Embarcadero end against the street grid; and nobody gets gridlocked at those crossings
+        auto overlap = [](const Car& a, const Car& b) {   // oriented boxes, a little inside the drawn bodies
+            const CarModel &ma = carModel(a.type), &mb = carModel(b.type);
+            if (fabsf(a.pos.y - b.pos.y) > 3) return false;
+            Vector2 ax[4] = {{cosf(a.yaw), sinf(a.yaw)}, {-sinf(a.yaw), cosf(a.yaw)}, {cosf(b.yaw), sinf(b.yaw)}, {-sinf(b.yaw), cosf(b.yaw)}};
+            Vector2 d = {b.pos.x - a.pos.x, b.pos.z - a.pos.z};
+            for (auto& n : ax) {
+                float ra = (ma.halfLen - 0.15f) * fabsf(Vector2DotProduct(ax[0], n)) + (ma.halfWid - 0.15f) * fabsf(Vector2DotProduct(ax[1], n));
+                float rb = (mb.halfLen - 0.15f) * fabsf(Vector2DotProduct(ax[2], n)) + (mb.halfWid - 0.15f) * fabsf(Vector2DotProduct(ax[3], n));
+                if (fabsf(Vector2DotProduct(d, n)) > ra + rb) return false;
+            }
+            return true;
+        };
+        struct { const char* n; float x, z; } spots[] = {{"Golden Gate", -1100, -2000}, {"Bay Bridge end", 1265, 335}, {"Market St", 1100, -80}};
+        float sameOv = 0, crossOv = 0, longestStop = 0;
+        for (auto& sp : spots) {
+            Traffic T; T.init(W);
+            Player pl; pl.spawn({sp.x, W.ground(sp.x, sp.z, 1000), sp.z}, 0);
+            bool onBridge = &sp == &spots[0];
+            if (!onBridge) pl.pos.y += 200;   // the skater out of everyone's way
+            std::vector<float> still(T.cars.size(), 0);
+            for (int f = 0; f < 60 * 70; f++) {
+                T.update(1.f / 60, W, pl);
+                for (size_t i = 0; i < T.cars.size(); i++) {
+                    const Car& a = T.cars[i];
+                    if (a.mode > 1 || sq(a.pos.x - sp.x) + sq(a.pos.z - sp.z) > 300 * 300) continue;
+                    still[i] = a.speed < 0.3f ? still[i] + 1.f / 60 : 0;
+                    if (!onBridge) longestStop = std::max(longestStop, still[i]);
+                    if (f < 60 * 10 || sq(a.pos.x - sp.x) + sq(a.pos.z - sp.z) > 150 * 150) continue;
+                    for (size_t j = i + 1; j < T.cars.size(); j++) {
+                        const Car& b = T.cars[j];
+                        if (b.mode > 1 || (a.mode == 0 && b.mode == 0) || fabsf(a.pos.x - b.pos.x) > 25 || fabsf(a.pos.z - b.pos.z) > 25) continue;
+                        if (overlap(a, b)) (a.mode == b.mode ? sameOv : crossOv) += 1.f / 60;
+                    }
+                }
+            }
+        }
+        snprintf(b, sizeof b, "overlapping: same road %.1f s, crossing %.1f s; longest stop %.0f s", sameOv, crossOv, longestStop);
+        check(sameOv == 0 && crossOv < 20 && longestStop < 60, "Traffic keeps out of itself", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

@@ -604,6 +604,48 @@ int main() {
         snprintf(b, sizeof b, "%d of %d towers ridden through", through, towers);
         check(towers > 0 && through == towers, "Ride between gondola tower legs", b);
     }
+    {   // Muni bus shelters: the end panels stop you, the front stays open, the roof is a ceiling
+        // (the roof is a thin PK_DECK box about 4.1 m by 1.5 m, 2.44 m above the sidewalk)
+        int shelters = 0, blocked = 0, open = 0, capped = 0;
+        for (const Platform& r : W.plats) {
+            float sx = r.x1 - r.x0, sz = r.z1 - r.z0;
+            if (r.kind != PK_DECK || fabsf(r.h0 - r.base - 0.12f) > 0.01f || fabsf(std::max(sx, sz) - 4.1f) > 0.05f || fabsf(std::min(sx, sz) - 1.5f) > 0.05f) continue;
+            if (shelters >= 20) break;
+            shelters++;
+            Vector2 mid = {(r.x0 + r.x1) * 0.5f, (r.z0 + r.z1) * 0.5f}, d = sx > sz ? Vector2{1, 0} : Vector2{0, 1}, o = {-d.y, d.x};
+            float g = W.ground(mid.x, mid.y, r.base - 1.f);
+            // ride in lengthwise from 4.5 m outside each end, through the middle
+            int stopped = 0;
+            for (int e = -1; e <= 1; e += 2) {
+                Vector2 dir = Vector2Scale(d, (float)-e);
+                Sim s;
+                float x = mid.x + d.x * e * 6.55f, z = mid.y + d.y * e * 6.55f;
+                s.p.spawn({x, W.ground(x, z, g + 0.5f), z}, atan2f(dir.y, dir.x));
+                s.p.speed = 6;
+                Input in; in.push = true;
+                bool passed = s.run(240, in, [&](Player& p) { return Vector2DotProduct({p.pos.x - mid.x, p.pos.z - mid.y}, dir) > 0.f; });
+                if (!passed) stopped++;
+            }
+            if (stopped == 2) blocked++;
+            // the open front: standing room inside, nothing in the gap between the front posts
+            Vector3 c = {mid.x, g, mid.y};
+            bool sideOpen = false;
+            for (int k = -1; k <= 1; k += 2) {   // one long side (the front) is open, the other is the back panel
+                Vector3 q = {mid.x + o.x * k * 0.8f, g, mid.y + o.y * k * 0.8f};
+                sideOpen |= !W.collide(q, 0.3f, g, 1.7f, nullptr);
+            }
+            if (!W.collide(c, 0.3f, g, 1.7f, nullptr) && sideOpen) open++;
+            // an ollie underneath bumps the roof instead of poking through it
+            Sim s;
+            s.p.spawn({mid.x, g, mid.y}, atan2f(d.y, d.x));
+            Input in; in.ollie = true;
+            float top = 0;
+            s.run(90, in, [&](Player& p) { top = std::max(top, p.pos.y + 1.75f); return false; });
+            if (W.ceiling(mid.x, mid.y, g) <= r.base + 0.01f && top <= r.base + 0.02f) capped++;
+        }
+        snprintf(b, sizeof b, "%d shelters: %d blocked at both ends, %d open inside, %d with a roof overhead", shelters, blocked, open, capped);
+        check(shelters > 0 && blocked == shelters && open == shelters && capped == shelters, "Bus shelters are solid", b);
+    }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;
 }

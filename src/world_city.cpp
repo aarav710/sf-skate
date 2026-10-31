@@ -1405,6 +1405,14 @@ void World::addClutter(Vector2 p, Vector2 f, Vector2 o, int kind, uint32_t h) {
         Vector3 q0 = at(-L, 0, 0.5f), q1 = at(L, 0, 0.62f);
         addPlat({std::min(q0.x, q1.x), std::max(q0.x, q1.x), std::min(q0.z, q1.z), std::max(q0.z, q1.z), y + 2.3f, y + 2.3f, y - 1, 0, PK_POLE});
         for (int a = -1; a <= 1; a += 2) pole(a * L, -0.6f, 0.08f, 2.4f);
+        auto box = [&](float f0, float f1, float o0, float o1, float top, float base, uint8_t pk) {
+            Vector3 c0 = at(f0, 0, o0), c1 = at(f1, 0, o1);
+            addPlat({std::min(c0.x, c1.x), std::max(c0.x, c1.x), std::min(c0.z, c1.z), std::max(c0.z, c1.z), y + top, y + top, base, 0, pk});
+        };
+        box(-L - 0.05f, -L + 0.05f, -0.55f, 0.55f, 2.15f, y - 1, PK_POLE);   // glass end panel
+        box(L - 0.06f, L + 0.06f, -0.55f, 0.55f, 2.2f, y - 1, PK_POLE);      // ad panel
+        pole(-L - 0.4f, 0.75f, 0.06f, 2.9f);                                   // stop sign pole
+        box(-L - 0.15f, L + 0.15f, -0.77f, 0.73f, 2.56f, y + 2.44f, PK_DECK);  // roof: a ceiling to bump your head on
         break;
     }
     }

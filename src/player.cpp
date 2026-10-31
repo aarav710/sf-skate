@@ -57,7 +57,8 @@ void Player::bail(const char* why) {
     state = BAIL;
     bailT = 0;
     boardPos = pos;
-    boardVel = {f.x * 0.8f + 1.5f, 3.0f, f.z * 0.8f};
+    boardVel = Vector3Add(Vector3Scale(f, 0.8f), Vector3Scale(fwd(), 1.5f)); // kick along the heading, not world +x
+    boardVel.y = 3.0f;
     if (Vector3Length(boardVel) < 0.1f) boardVel = Vector3Scale(fwd(), 2);
     boardYaw = yaw;
     say("BAILED!", C_RED, why);

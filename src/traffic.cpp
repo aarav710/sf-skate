@@ -4,6 +4,9 @@
 
 static RNG gR(20240);
 static const World* gTrainWorld = nullptr;
+// Caltrain: five cars of 25.8 m behind the front; and how far either side of the line's middle a road car stops short
+// of it (the trains run 2.4 m out on either track and are 1.55 m half-wide; the ballast runs out to 7.5 m)
+static const float TRAIN_LEN = 5 * 25.8f, RAIL_CLEAR = 7.5f;
 
 static void colorPed(Ped& p, RNG& r) {
     static const Color SKIN[] = {{240, 205, 175, 255}, {214, 170, 134, 255}, {170, 120, 85, 255}, {120, 80, 55, 255}, {90, 60, 40, 255}};
@@ -170,6 +173,30 @@ void Traffic::init(World& w) {
                         if (sq(u - di * g.sp) + sq(v - dj * g.sp) < 50 * 50) mark(i + di, j + dj);
             }
         exitTail[gi].assign((size_t)g.ni * g.nj * 4, 1e9f);
+        // grade crossings of the Caltrain tracks (#60): where each lane (2.4 m right of the street's middle, as every
+        // grid car drives) runs over the line at ground level, the stop line short of it and the far side
+        railX[gi].assign((size_t)g.ni * g.nj * 4, RailCrossing{});
+        for (int j = 0; j < g.nj; j++)
+            for (int i = 0; i < g.ni; i++)
+                for (int d = 0; d < 4; d++) {
+                    if (!g.edge(i, j, d)) continue;
+                    Vector2 a = g.node(i, j), dir = {(float)DI[d], (float)DJ[d]}, right = {-dir.y, dir.x};
+                    auto at = [&](float u) { return Vector2Add(a, Vector2Add(Vector2Scale(dir, u), Vector2Scale(right, 2.4f))); };
+                    auto railD = [&](float u, float* s) { Vector2 p = at(u); return w.railDistance(p.x, p.y, s); };
+                    float s, best = 1e9f, bu = 0, bs = 0;
+                    if (railD(g.sp / 2, &s) > g.sp) continue;   // nowhere near it
+                    for (float u = 0; u <= g.sp; u += 0.25f) {
+                        float dd = railD(u, &s);
+                        if (dd < best) { best = dd; bu = u; bs = s; }
+                    }
+                    Vector2 p = at(bu);
+                    if (best > 1 || fabsf(w.railGrade(bs) - w.terrain(p.x, p.y)) > 2.5f) continue;   // (not over or under it)
+                    RailCrossing& x = railX[gi][((size_t)j * g.ni + i) * 4 + d];
+                    x.s = bs;
+                    x.stop = x.clear = bu;
+                    while (x.stop > 0 && railD(x.stop, &s) < RAIL_CLEAR) x.stop -= 0.25f;
+                    while (x.clear < g.sp && railD(x.clear, &s) < RAIL_CLEAR) x.clear += 0.25f;
+                }
     }
     spawnGrid(&w.sf, 1300, true);
     spawnGrid(&w.oak, 170, false);
@@ -592,6 +619,17 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             float& e = exitTail[gridIdx(k)][((size_t)k.j * k.g->ni + k.i) * 4 + k.d];
             e = std::min(e, k.t * k.g->sp - carModel(k.type).halfLen);
         }
+    // a train on a grade crossing at s along the line, or coming up to it (#60): any of it from the front back to the
+    // end of the last car (a few metres to spare either way), or its front within 150 m or 20 s of it (but not one
+    // still stood at a station for a while yet)
+    auto trainAt = [&](float s) {
+        for (auto& t : trains) {
+            float ahead = (s - t.s) * t.dir;   // from its front to the crossing
+            if (ahead > -(TRAIN_LEN + 6) && ahead < 6) return true;
+            if (ahead >= 6 && t.dwell < 4 && (ahead < 150 || ahead < t.v * 20)) return true;
+        }
+        return false;
+    };
     for (auto& c : cars) {
         float distP = sqrtf(sq(c.pos.x - pp.x) + sq(c.pos.z - pp.z));
         // target speed: stop for the skater and for cars ahead
@@ -779,6 +817,26 @@ void Traffic::update(float dt, World& w, const Player& pl) {
                     sigHold = true;
                 }
             }
+        }
+        // Caltrain grade crossings (#60): stop short of the tracks while a train's on them or coming, and don't drive
+        // onto them without room past them for the whole car (or it'd stand on the tracks at the back of a queue)
+        if (c.mode == 0 && !railX[gridIdx(c)].empty()) {
+            const Grid& g = *c.g;
+            int gi = gridIdx(c);
+            float u = c.t * g.sp, hl = carModel(c.type).halfLen, stop = 1e9f;
+            const RailCrossing& x = railX[gi][((size_t)c.j * g.ni + c.i) * 4 + c.d];
+            if (x.stop < 1e8f && u + hl < x.stop + 0.3f) {   // (not over the line already)
+                float tail = u + tailAhead, et = exitTail[gi][((size_t)c.j * g.ni + c.i) * 4 + c.d];
+                if (et > u + hl) tail = std::min(tail, et);
+                if (trainAt(x.s) || tail < x.clear + 2 * hl + 2.5f) stop = x.stop;
+            } else if (c.nd >= 0) {   // one just round the corner ahead, with no room to stop for it in the next block
+                int nn = (c.j + DJ[c.d]) * g.ni + c.i + DI[c.d];
+                const RailCrossing& y = railX[gi][(size_t)nn * 4 + c.nd];
+                if (y.stop < 10 + 2 * hl + 2.5f && trainAt(y.s)) stop = g.sp - 11.5f;
+            }
+            float d = stop - u - hl;
+            if (stop < 1e8f && d > -0.3f && (c.speed < 1 || d > c.speed * c.speed / 28 + 0.3f))
+                target = std::min(target, d > 0.4f ? sqrtf(2 * 4.5f * d) - 0.6f : 0.f);
         }
         if (c.mode == 0) {
             float hl = carModel(c.type).halfLen;

@@ -1765,6 +1765,56 @@ int main() {
         check(tot > 61 * 200 && near > 61 * 10 && bad == 0, "Golden Gate walkers stay on the deck", b);
         W.vehicleTops.clear();   // T.update published the roofs of the cars near pl
     }
+    {   // Caltrain grade crossings (#60): street cars wait for the trains instead of driving straight through them.
+        // Eight minutes of traffic, every grid car near a crossing against every car of every train (oriented boxes, a
+        // little inside the drawn bodies); and the cars that waited for one got going again after it.
+        Traffic T; T.init(W);
+        Player pl; pl.spawn({0, W.ground(0, 0, 1000) + 200, 0}, 0);   // the skater out of everyone's way
+        int crossings = 0, menlo = 0;
+        for (int gi = 0; gi < 3; gi++)
+            for (size_t k = 0; k < T.railX[gi].size(); k++)
+                if (T.railX[gi][k].stop < 1e8f) { crossings++; menlo += gi == 2; }
+        const CarModel& tm = carModel(CT_CALTRAIN);
+        auto hit = [&](const Car& a, Vector3 c, Vector2 d) {
+            const CarModel& m = carModel(a.type);
+            Vector2 ax[4] = {{cosf(a.yaw), sinf(a.yaw)}, {-sinf(a.yaw), cosf(a.yaw)}, d, {-d.y, d.x}};
+            Vector2 r = {c.x - a.pos.x, c.z - a.pos.z};
+            for (auto& n : ax) {
+                float ra = (m.halfLen - 0.15f) * fabsf(Vector2DotProduct(ax[0], n)) + (m.halfWid - 0.15f) * fabsf(Vector2DotProduct(ax[1], n));
+                float rb = (tm.halfLen - 0.15f) * fabsf(Vector2DotProduct(ax[2], n)) + (tm.halfWid - 0.15f) * fabsf(Vector2DotProduct(ax[3], n));
+                if (fabsf(Vector2DotProduct(r, n)) > ra + rb) return false;
+            }
+            return true;
+        };
+        std::vector<float> still(T.cars.size(), 0);
+        std::vector<uint8_t> waited(T.cars.size(), 0);
+        float inside = 0, longest = 0;
+        int samples = 0, waits = 0;
+        for (int f = 0; f < 60 * 480; f++) {
+            T.update(1.f / 60, W, pl);
+            for (size_t i = 0; i < T.cars.size(); i++) {
+                const Car& a = T.cars[i];
+                float rs;
+                if (a.mode != 0 || W.railDistance(a.pos.x, a.pos.z, &rs) > 30) { still[i] = 0; continue; }
+                still[i] = a.speed < 0.3f ? still[i] + 1.f / 60 : 0;
+                longest = std::max(longest, still[i]);
+                bool in = false, near = false;
+                for (auto& t : T.trains)
+                    for (int k = 0; k < 5; k++) {
+                        Vector2 d;
+                        Vector3 c = W.trackPoint(t.s - t.dir * (k * 25.8f + 12.9f), 2.4f * t.dir, &d);
+                        float d2 = sq(c.x - a.pos.x) + sq(c.z - a.pos.z);
+                        near |= d2 < 40 * 40;
+                        if (d2 < 30 * 30 && hit(a, c, d)) in = true;
+                    }
+                if (in) { inside += 1.f / 60; samples++; }
+                if (near && a.speed < 0.3f && !waited[i]) { waited[i] = 1; waits++; }
+            }
+        }
+        snprintf(b, sizeof b, "%d grade crossings (%d in Menlo Park); car inside a train %.1f s (%d samples); %d cars waited for one, longest stop %.0f s",
+                 crossings, menlo, inside, samples, waits, longest);
+        check(menlo >= 2 && samples == 0 && waits > 0 && longest < 90, "Cars stop for Caltrain", b);
+    }
     {   // a stopped vehicle is solid all the way to its ends: roll at 3 m/s into each end of each type, on the axis and
         // near a corner, on the runway (flat and open), and the skater stops at the body (or bails), not inside it
         int bad = 0, tot = 0;

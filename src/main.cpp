@@ -171,6 +171,14 @@ static void textShadow(const char* t, int x, int y, int size, Color c) {
     DrawText(t, x, y, size, c);
 }
 static void textCenter(const char* t, int cx, int y, int size, Color c) { textShadow(t, cx - MeasureText(t, size) / 2, y, size, c); }
+// centred 44 px prompt bar sized from the measured text (20 px padding each side); in narrow windows the
+// font shrinks until the bar fits with an 8 px margin, down to size 10
+static void promptBar(const char* t, int sw, int y, int size, Color bg, Color fg) {
+    while (size > 10 && MeasureText(t, size) + 40 > sw - 16) size--;
+    int w = MeasureText(t, size) + 40;
+    DrawRectangle(sw / 2 - w / 2, y, w, 44, bg);
+    textCenter(t, sw / 2, y + 22 - size / 2, size, fg);
+}
 
 
 static void drawPlayerArrow(Vector2 c, float yaw, float s, Color col) {
@@ -907,7 +915,7 @@ int main() {
             auto freeFrac = [&](float cyy) {
                 Vector3 d = {-cosf(cyy) * dist, hgt, -sinf(cyy) * dist};
                 for (int i = 1; i <= 14; i++)
-                    if (W.solidAt(Vector3Add(target, Vector3Scale(d, i / 14.f)))) return (i - 1) / 14.f;
+                    if (W.solidAt(Vector3Add(target, Vector3Scale(d, i / 14.f)), true)) return (i - 1) / 14.f;
                 return 1.f;
             };
             {
@@ -929,7 +937,7 @@ int main() {
             float best = 1.f;
             for (int i = 1; i <= 14; i++) {
                 float t = i / 14.f;
-                if (W.solidAt(Vector3Add(target, Vector3Scale(dir, t)))) { best = std::max(0.12f, (i - 1) / 14.f); break; }
+                if (W.solidAt(Vector3Add(target, Vector3Scale(dir, t)), true)) { best = std::max(0.12f, (i - 1) / 14.f); break; }
             }
             desired = Vector3Add(target, Vector3Scale(dir, best));
             if (best < 0.6f) {
@@ -1376,13 +1384,15 @@ int main() {
             drawMinimap(sw - 250, 20, 230);
             if (CH.scuffle) {
                 int bw = 380, bx = sw / 2 - bw / 2, by = sh2 - 124;
-                DrawRectangle(bx - 12, by - 56, bw + 24, 130, {0, 0, 0, 170});
+                const char* hint = "Mash SPACE and A / D   -   swing the board with J K L";
+                int pw = std::max(bw, MeasureText(hint, 20)) + 24;   // backdrop wide enough for the hint line
+                DrawRectangle(sw / 2 - pw / 2, by - 56, pw, 130, {0, 0, 0, 170});
                 float jit = sinf(now * 45.f) * 2.f;
                 textCenter("STRUGGLE!", sw / 2 + (int)jit, by - 48, 40, {255, 140, 70, 255});
                 DrawRectangle(bx, by, bw, 24, {170, 40, 40, 255});
                 DrawRectangle(bx, by, (int)(bw * clampf(CH.meter, 0, 1)), 24, {110, 230, 120, 255});
                 DrawRectangleLines(bx, by, bw, 24, WHITE);
-                textCenter("Mash SPACE and A / D   -   swing the board with J K L", sw / 2, by + 36, 20, WHITE);
+                textCenter(hint, sw / 2, by + 36, 20, WHITE);
             }
             if (CH.on) {
                 int bw = 440, bx = sw / 2 - bw / 2, by = 92;
@@ -1440,20 +1450,16 @@ int main() {
             }
             }
             if (nearSki >= 0) {
-                DrawRectangle(sw / 2 - 200, sh2 - 230, 400, 44, {20, 110, 170, 220});
-                textCenter("Press E to ride the jet ski", sw / 2, sh2 - 218, 22, WHITE);
+                promptBar("Press E to ride the jet ski", sw, sh2 - 230, 22, {20, 110, 170, 220}, WHITE);
             }
             if (JS.riding) {
-                DrawRectangle(sw / 2 - 270, sh2 - 230, 540, 44, {0, 0, 0, 130});
-                textCenter("W go   S brake   A D steer   Shift boost   E hop off at the shore", sw / 2, sh2 - 218, 20, {200, 235, 255, 255});
+                promptBar("W go   S brake   A D steer   Shift boost   E hop off at the shore", sw, sh2 - 230, 20, {0, 0, 0, 130}, {200, 235, 255, 255});
             }
             if (nearPlane >= 0) {
-                DrawRectangle(sw / 2 - 210, sh2 - 230, 420, 44, {200, 140, 30, 230});
-                textCenter("Press E to fly the seaplane", sw / 2, sh2 - 218, 22, WHITE);
+                promptBar("Press E to fly the seaplane", sw, sh2 - 230, 22, {200, 140, 30, 230}, WHITE);
             }
             if (SP.riding) {
-                DrawRectangle(sw / 2 - 330, sh2 - 230, 660, 44, {0, 0, 0, 130});
-                textCenter("W / S throttle   A D steer   Space climb   Shift dive   E climb out at the shore", sw / 2, sh2 - 218, 20, {255, 235, 200, 255});
+                promptBar("W / S throttle   A D steer   Space climb   Shift dive   E climb out at the shore", sw, sh2 - 230, 20, {0, 0, 0, 130}, {255, 235, 200, 255});
                 int bx = 16, by = sh2 - 200;
                 DrawRectangle(bx, by, 300, 96, {0, 0, 0, 130});
                 textShadow(TextFormat("ALT  %d ft", (int)(SP.altitude(W) * 3.281f)), bx + 14, by + 10, 24, WHITE);
@@ -1464,8 +1470,7 @@ int main() {
             }
             if (nearStation >= 0 && !ride.on) {
                 const char* to = nearStation == menloStation ? "San Francisco (4th & King)" : "Menlo Park";
-                DrawRectangle(sw / 2 - 260, sh2 - 230, 520, 44, {200, 30, 40, 220});
-                textCenter(TextFormat("Press E to ride Caltrain to %s", to), sw / 2, sh2 - 218, 22, WHITE);
+                promptBar(TextFormat("Press E to ride Caltrain to %s", to), sw, sh2 - 230, 22, {200, 30, 40, 220}, WHITE);
             }
             if (ride.on) {
                 static const struct { float z; const char* n; } towns[] = {

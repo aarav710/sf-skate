@@ -626,13 +626,16 @@ bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm
     return hit;
 }
 
-bool World::solidAt(Vector3 p) const {
+bool World::solidAt(Vector3 p, bool bigProps) const {
     if (terrain(p.x, p.z) > p.y - 0.25f) return true;
     int i = (int)floorf((p.x - PG_X0) / PG_CELL), j = (int)floorf((p.z - PG_Z0) / PG_CELL);
     if (i < 0 || j < 0 || i >= pgW || j >= pgH) return false;
     for (int idx : pgrid[(size_t)j * pgW + i]) {
         const Platform& pl = plats[idx];
-        if (pl.kind != PK_BUILDING && pl.kind != PK_DECK) continue;
+        // big prop boxes (gondola terminals, the ballpark wall...) count too when asked: over 3 m tall and
+        // over 2 m across both ways, which leaves out furniture, benches, planters, stair ramps and poles
+        bool big = bigProps && pl.kind == PK_PROP && std::max(pl.h0, pl.h1) - pl.base > 3.f && pl.x1 - pl.x0 > 2.f && pl.z1 - pl.z0 > 2.f;
+        if (pl.kind != PK_BUILDING && pl.kind != PK_DECK && !big) continue;
         if (pl.contains(p.x, p.z, 0.3f) && p.y < pl.top(p.x, p.z) + 0.3f && p.y > pl.base) return true;
     }
     return false;
@@ -680,6 +683,12 @@ bool World::isWater(float x, float z, float y) const {
     for (auto& pd : ponds)
         if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1 && y < terrain(x, z) + 0.2f) return true;
     return terrain(x, z) < 0.15f && y < 0.4f;
+}
+
+const char* World::waterKind(float x, float z, float y) const {
+    for (auto& pd : ponds)
+        if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1 && y < terrain(x, z) + 0.2f) return pd.kind;
+    return "bay";
 }
 
 bool Grid::edge(int i, int j, int d) const {

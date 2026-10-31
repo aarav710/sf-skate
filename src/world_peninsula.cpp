@@ -178,7 +178,7 @@ void World::addEstate(float x0, float z0, float x1, float z1, int facing, RNG& r
         groundPad(*this, px0 - 0.8f, pz0 - 0.8f, px1 + 0.8f, pz1 + 0.8f, 0.06f, col(232, 228, 216, M_GROUND));
         float y = terrain(cx, (pz0 + pz1) / 2);
         mb(cx, pz0).quad({px0, y + 0.08f, pz0}, {px1, y + 0.08f, pz0}, {px1, y + 0.08f, pz1}, {px0, y + 0.08f, pz1}, col(60, 160, 200, M_WATER));
-        ponds.push_back({px0, pz0, px1, pz1});
+        ponds.push_back({px0, pz0, px1, pz1, "pool"});
     }
     // oaks and the odd stand of redwoods
     int n = r.irange(2, 4);
@@ -355,7 +355,7 @@ void World::buildMenlo() {
                 float h = terrain(x + 60, z + 120);
                 if (h < 0.4f) continue;
                 mb(x, z).quad({x, h + 0.15f, z}, {x + 130, h + 0.15f, z}, {x + 130, h + 0.15f, z + 250}, {x, h + 0.15f, z + 250}, POND[k % 4]);
-                ponds.push_back({x, z, x + 130, z + 250});
+                ponds.push_back({x, z, x + 130, z + 250, "salt pond"});
             }
     }
 

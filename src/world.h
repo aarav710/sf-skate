@@ -155,7 +155,8 @@ struct World {
     // of a house (routeDir: the way their route runs, or zero); zero when no stoop is near
     Vector2 stoopDetour(float x, float z, Vector2 routeDir) const;
     bool isWater(float x, float z, float y) const;
-    const char* waterKind(float x, float z, float y) const;   // what isWater found there: "bay", or the pond's kind
+    const char* waterKind(float x, float z, float y) const;   // what isWater found there: "bay", "ocean", or the pond's kind
+    const Pond* pondAt(float x, float z, float y) const;      // the pond (lake, pool, ...) whose water is at this spot, if any
     bool onBridge(float x, float z) const;
     bool inPlay(float x, float z) const {
         return (x >= PX0 && x <= PX1 && z >= PZ0 && z <= PZ1) || (x >= AX0 && x <= AX1 && z >= AZ0 && z <= AZ1) ||

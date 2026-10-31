@@ -165,22 +165,33 @@ int main() {
         snprintf(b, sizeof b, "state=%d (3 = bail)", s.p.state);
         check(s.p.state == Player::BAIL, "late kickflip bails", b);
     }
-    {   // the board flies off along the skater's heading, not always east (issue #20)
-        float worst = 0, worstPos = 0;
-        for (float spd : {0.f, 8.f})
+    {   // the board flies off the way the skater travels: along the heading, not always east (issue #20),
+        // and backwards when rolling backwards (issue #72)
+        float worst = 0, worstPos = 0, worstRider = 0;
+        for (float spd : {0.f, 8.f, -1.f, -9.f})
             for (int d = 0; d < 4; d++) {
                 float yaw = d * PI / 2; // E, S, W, N
+                float travel = spd < 0 ? yaw + PI : yaw;
                 Sim s; s.spawn(1045 + 2.4f, -80, yaw, spd);
                 s.p.bail("test");
                 Vector3 bv = s.p.boardVel;
-                worst = std::max(worst, fabsf(wrapPi(atan2f(bv.z, bv.x) - yaw)));
-                Vector3 b0 = s.p.boardPos;
+                worst = std::max(worst, fabsf(wrapPi(atan2f(bv.z, bv.x) - travel)));
+                Vector3 b0 = s.p.boardPos, r0 = s.p.pos;
                 s.run(15, Input{});
-                Vector3 db = Vector3Subtract(s.p.boardPos, b0);
-                worstPos = std::max(worstPos, fabsf(wrapPi(atan2f(db.z, db.x) - yaw)));
+                Vector3 db = Vector3Subtract(s.p.boardPos, b0), dr = Vector3Subtract(s.p.pos, r0);
+                worstPos = std::max(worstPos, fabsf(wrapPi(atan2f(db.z, db.x) - travel)));
+                if (spd != 0) worstRider = std::max(worstRider, fabsf(wrapPi(atan2f(dr.z, dr.x) - travel)));
             }
-        snprintf(b, sizeof b, "worst heading error: velocity %.1f deg, travel %.1f deg", worst * RAD2DEG, worstPos * RAD2DEG);
-        check(worst < 0.02f && worstPos < 0.02f, "bail throws board along heading", b);
+        {   // boardslide: the heading is across the rail, but board and rider fall along the rail travel
+            Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 6);
+            s.p.state = Player::GRIND; s.p.boardslide = true; s.p.railTravel = {1, 0};
+            s.p.bail("test");
+            Vector3 bv = s.p.boardVel;
+            worst = std::max(worst, fabsf(wrapPi(atan2f(bv.z, bv.x))));
+        }
+        snprintf(b, sizeof b, "worst travel error: board velocity %.1f deg, board path %.1f deg, rider path %.1f deg",
+                 worst * RAD2DEG, worstPos * RAD2DEG, worstRider * RAD2DEG);
+        check(worst < 0.02f && worstPos < 0.02f && worstRider < 0.02f, "bail throws board along travel", b);
     }
     {   // slamming a building wall: the tumbling board bounces off it instead of flying inside (issue #41)
         int slams = 0, inside = 0; float deepest = 0; Vector3 worstAt = {};
@@ -263,6 +274,22 @@ int main() {
         snprintf(b, sizeof b, "state=%d speed=%.1f banked \"%s\"", s.p.state, s.p.speed, s.p.subPopup.c_str());
         check(s.p.state == Player::RIDE && s.p.speed > 0 && s.p.subPopup.find("180") != std::string::npos &&
               s.p.subPopup.find("Fakie") == std::string::npos, "fakie 180 lands forwards", b);
+    }
+    {   // ...and a forwards 180 lands fakie: keeps the yaw it landed with and rolls on backwards, no snap round (issue #92)
+        Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
+        Input in; in.ollie = true; s.run(1, in);
+        Input sp; sp.steer = 1; s.run(63, sp, [](Player& p) { return fabsf(p.spinAccum) >= PI; });
+        float jump = 0, prev = s.p.yaw;
+        bool landed = false;
+        s.run(150, Input{}, [&](Player& p) {   // touchdown, landing bounce, then rolling on
+            jump = std::max(jump, fabsf(wrapPi(p.yaw - prev)));
+            prev = p.yaw;
+            landed |= p.evLand;
+            return false;
+        });
+        snprintf(b, sizeof b, "landed=%d max yaw step %.2f rad, state=%d speed=%.1f banked \"%s\"", landed, jump, s.p.state, s.p.speed, s.p.subPopup.c_str());
+        check(landed && jump < 0.05f && s.p.state == Player::RIDE && s.p.speed < -4.f &&
+              s.p.subPopup.find("FS 180 to Fakie") != std::string::npos, "forwards 180 rolls away fakie", b);
     }
     {   // ...and ollieing fakie onto the Embarcadero Plaza Flat Bar grinds fakie, then rolls away fakie
         int ok = 0, tries = 6; float worst = 0; char last[200] = "";
@@ -400,6 +427,26 @@ int main() {
         snprintf(b, sizeof b, "air=%d x=%.1f vy=%.1f", air, s.p.pos.x, s.p.vy);
         check(air && s.p.pos.x > 1241, "kicker launches", b);
     }
+    {   // rolling off the Marina Green mega kicker (3.4 m, lip at x -468) without an ollie flies up and out,
+        // not slammed down by a slope sample read past the lip (#93)
+        int ok = 0; char got[160] = "";
+        for (float spd : {12.f, 15.f, 20.f}) {
+            Sim s; s.spawn(-495, -1046, 0, spd);
+            float vy0 = -99, x0 = 0; bool air = false, landed = false;
+            s.run(360, Input{}, [&](Player& q) {
+                if (!air && q.state == Player::AIR) { air = true; vy0 = q.vy; x0 = q.pos.x; }
+                landed |= air && (q.evLand || q.state == Player::BAIL);
+                return landed;
+            });
+            bool good = air && landed && vy0 > 0.5f && x0 > -469 && s.p.pos.x > -464 &&
+                        !(s.p.state == Player::BAIL && s.p.subPopup == "Way too much drop");
+            ok += good;
+            if (!good && !got[0]) snprintf(got, sizeof got, " (%.0f m/s: air=%d vy0 %.1f at x %.1f, ended x %.1f, state %d '%s')",
+                                           spd, air, vy0, x0, s.p.pos.x, s.p.state, s.p.subPopup.c_str());
+        }
+        snprintf(b, sizeof b, "%d of 3 roll-offs launched up and forward%s", ok, got);
+        check(ok == 3, "roll off a big kicker launches upward", b);
+    }
     {   // at rest half a metre from the Embarcadero deck's drop edge (x 1170), facing it or backed up to it: stays put
         int held = 0; char got[96] = "";
         for (float yaw : {PI, 0.f}) {
@@ -485,14 +532,27 @@ int main() {
         snprintf(b, sizeof b, "splash=%d respawned at x=%.1f y=%.1f state=%d", splash, s.p.pos.x, s.p.pos.y, s.p.state);
         check(splash && s.p.pos.y > 0.5f && s.p.state == Player::RIDE, "splash + respawn", b);
     }
-    {   // the splash message names the water: bay, fountain, lake, pool (rolling in and dropping in)
-        float sea = -1440;
+    {   // the splash message names the water: ocean, bay, fountain, lake, lagoon, pool, salt pond (rolling in and dropping in)
+        float sea = -1440;   // the Pacific, west of the city
         while (!W.isWater(sea, 0, 0) && sea > -3000) sea -= 5;
-        const Pond* pool = nullptr;   // a peninsula backyard pool, up on the hills
-        for (auto& pd : W.ponds) if (std::string(pd.kind) == "pool") { pool = &pd; break; }
+        float bay = 1500;    // the bay, out past the ends of the Embarcadero piers
+        while (!W.isWater(bay, -730, 0) && bay < 3000) bay += 5;
+        auto pondOf = [](const char* kind) -> const Pond* {
+            for (auto& pd : W.ponds) if (std::string(pd.kind) == kind) return &pd;
+            return nullptr;
+        };
+        const Pond* pool = pondOf("pool");   // a peninsula backyard pool, up on the hills
+        const Pond* lagoon = pondOf("lagoon");   // by the Palace of Fine Arts
+        const Pond* salt = pondOf("salt pond");   // past the Menlo Park bayfront
+        auto mx = [](const Pond* pd) { return pd ? (pd->x0 + pd->x1) / 2 : 0.f; };
+        auto mz = [](const Pond* pd) { return pd ? (pd->z0 + pd->z1) / 2 : 0.f; };
+        check(std::string(W.district(sea - 20, 0)) == "Pacific Ocean" && std::string(W.district(bay + 20, -730)) == "San Francisco Bay",
+              "splash test spots are in the ocean and the bay", "");
         struct { float x, z; const char* msg; } spots[] = {
-            {sea - 20, 0, "Splash! Into the bay"}, {1244.5f, -304, "Splash! Into the fountain"}, {-800, 387, "Splash! Into the lake"},
-            {pool ? (pool->x0 + pool->x1) / 2 : 0, pool ? (pool->z0 + pool->z1) / 2 : 0, "Splash! Into the pool"}};
+            {sea - 20, 0, "Splash! Into the ocean"}, {bay + 20, -730, "Splash! Into the bay"},
+            {1244.5f, -304, "Splash! Into the fountain"}, {-800, 387, "Splash! Into the lake"},
+            {mx(lagoon), mz(lagoon), "Splash! Into the lagoon"}, {mx(pool), mz(pool), "Splash! Into the pool"},
+            {mx(salt), mz(salt), "Splash! Into the salt pond"}};
         for (auto& sp : spots)
             for (int air = 0; air < 2; air++) {
                 Sim s; s.spawn(sp.x, sp.z, 0);
@@ -540,6 +600,29 @@ int main() {
             }
         }
         check(tot == 4 && ok == tot, "grind stop steps off onto the deck", det);
+    }
+    {   // a boardslide that slows to a stop on the Embarcadero Flat Bar rolls out like a 50-50, not "Landed sideways"
+        int ri = -1;
+        for (int i = 0; i < (int)W.rails.size(); i++) if (strcmp(W.rails[i].name, "Flat Bar") == 0) ri = i;
+        int ok = 0, tot = 0;
+        char det[400] = "";
+        for (int bs = 0; bs <= 1 && ri >= 0; bs++)
+            for (int dirn = -1; dirn <= 1; dirn += 2) {
+                const Rail& r = W.rails[ri];
+                SetRandomSeed(8400 + tot);
+                Sim s; s.spawn(1205, -238, 0, 0);
+                float t = 0.5f, along = atan2f((r.b.z - r.a.z) * dirn, (r.b.x - r.a.x) * dirn);
+                s.p.state = Player::GRIND; s.p.rail = ri; s.p.railT = t; s.p.railDir = dirn; s.p.railFakie = false;
+                s.p.boardslide = bs; s.p.yaw = wrapPi(along + (bs ? PI / 2 : 0.f));
+                s.p.pos = Vector3Lerp(r.a, r.b, t); s.p.speed = 0.5f; s.p.balance = s.p.balanceVel = 0;
+                s.p.combo = {bs ? "Boardslide (Flat Bar)" : "50-50 (Flat Bar)"}; s.p.comboPts = 500;
+                s.run(180, Input{}, [](Player& p) { return p.state == Player::RIDE || p.state == Player::BAIL; });
+                bool good = s.p.state == Player::RIDE && s.p.score > 0;
+                tot++; ok += good;
+                char one[120]; snprintf(one, sizeof one, "%s%s st=%d score=%lld %s; ", bs ? "board" : "50-50", dirn > 0 ? "+" : "-", s.p.state, s.p.score, s.p.subPopup.c_str());
+                strncat(det, one, sizeof det - strlen(det) - 1);
+            }
+        check(tot == 4 && ok == tot, "boardslide stop rolls out", det);
     }
     {   // ride the length of the Bay Bridge deck
         Sim s; s.spawn(1500, 335 + 4, 0, 10);
@@ -1364,6 +1447,27 @@ int main() {
         snprintf(b, sizeof b, "%d of %d walker samples (%d walkers) sunk into front steps; deepest %.2f m at (%.1f, %.1f)",
                  sunk, samples, walkers, worst, at.x, at.z);
         check(W.stoops.size() > 100 && sunk == 0, "Walkers go round front steps", b);
+    }
+    {   // the Golden Gate walkways have people on them, on the deck: not on the seabed 45 m below or walking inside
+        // the approach deck (#87). Skater standing mid-span, 30 s, every walker on a deck path checked twice a second,
+        // near (full update) and far (route only) alike
+        Traffic T; T.init(W);
+        Player pl; pl.spawn({-1100, W.ground(-1100, -1500, 1e5f), -1500}, -PI / 2);
+        int tot = 0, bad = 0, near = 0;
+        float worst = 0;
+        for (int f = 0; f <= 60 * 30; f++) {
+            if (f > 0) T.update(1.f / 60, W, pl);
+            if (f % 30) continue;
+            for (const Ped& p : T.peds) {
+                if (p.mode != 1 || !W.pedPaths[p.path].onDeck) continue;
+                float g = W.ground(p.pos.x, p.pos.z, 1e5f), d = fabsf(p.pos.y - p.evY - g);
+                tot++;
+                near += sq(p.pos.x - pl.pos.x) + sq(p.pos.z - pl.pos.z) < 120 * 120;
+                if (d > 0.3f) { bad++; worst = std::max(worst, d); }
+            }
+        }
+        snprintf(b, sizeof b, "%d of %d walkway samples (%d within 120 m) off the deck, worst %.1f m", bad, tot, near, worst);
+        check(tot > 61 * 200 && near > 61 * 10 && bad == 0, "Golden Gate walkers stay on the deck", b);
     }
     {   // a stopped vehicle is solid all the way to its ends: roll at 3 m/s into each end of each type, on the axis and
         // near a corner, on the runway (flat and open), and the skater stops at the body (or bails), not inside it

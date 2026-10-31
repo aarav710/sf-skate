@@ -98,6 +98,25 @@ static int pickGridDir(const Grid& g, int i, int j, int d, RNG& r) {
     return opts[0];
 }
 
+// A grid car's way through intersection n (j * ni + i): the heading it comes in on and the one it leaves on.
+static bool boxMove(const Car& k, int n, int* in, int* out) {
+    int ni = k.g->ni;
+    if ((k.j + DJ[k.d]) * ni + k.i + DI[k.d] == n) { *in = k.d; *out = k.nd; return true; }
+    if (k.j * ni + k.i == n) { *in = k.pd; *out = k.d; return true; }
+    return false;
+}
+
+// Do two ways through the same intersection cross? One behind the other on the same approach is just following, and
+// oncoming cars pass each other unless one turns across the other's lane; anything else (from the side, or into the
+// same street) crosses.
+static bool boxClash(int a1, int b1, int a2, int b2) {
+    if (a1 == a2) return false;
+    if (a1 < 0 || a2 < 0 || b1 < 0 || b2 < 0 || b1 == b2) return true;
+    auto across = [](int a, int b) { return b != a && !(DI[b] == -DJ[a] && DJ[b] == DI[a]); };   // not straight on or the tight turn
+    if (a2 == (a1 ^ 1)) return across(a1, b1) || across(a2, b2);
+    return true;
+}
+
 static Color carBody(int type, RNG& r) {
     if (type == CT_TAXI) return col(242, 196, 30);
     return randomCarColor(r);
@@ -121,6 +140,37 @@ void Traffic::init(World& w) {
             n--;
         }
     };
+    // intersections close to a main road (Market St, the Embarcadero, the highways), or within 70 m up a block
+    // that one crosses: crossing traffic there goes by the main road's rules (see Traffic::update), not by taking
+    // turns, or a queue waiting its turn backs up across the main road and holds up the very cars the one ahead of
+    // it is waiting on
+    const Grid* grids[3] = {&w.sf, &w.oak, &w.mp};
+    for (int gi = 0; gi < 3; gi++) {
+        const Grid& g = *grids[gi];
+        nearMain[gi].assign((size_t)g.ni * g.nj, 0);
+        auto mark = [&](int i, int j) { if (g.in(i, j)) nearMain[gi][(size_t)j * g.ni + i] = 1; };
+        for (auto& P : w.carPaths)
+            for (float s = 0; s <= P.len; s += 4) {
+                Vector2 q = P.at(s);
+                float fi = (q.x - g.x0) / g.sp, fj = (q.y - g.z0) / g.sp;
+                int i = (int)floorf(fi), j = (int)floorf(fj);
+                float u = (fi - i) * g.sp, v = (fj - j) * g.sp;   // where in the block, from its (i, j) corner
+                const float NEAR = 20, UP = 70;
+                // on (or by) one of the block's four streets: the ends of it within UP
+                for (int e = 0; e < 4; e++) {
+                    bool alongX = e < 2;   // the streets along x (at v = 0 and v = sp), then along z (u = 0, u = sp)
+                    float off = alongX ? (e == 0 ? v : g.sp - v) : (e == 2 ? u : g.sp - u), at = alongX ? u : v;
+                    if (off >= NEAR) continue;
+                    int i0 = alongX ? i : i + (e == 3), j0 = alongX ? j + (e == 1) : j;
+                    if (at < UP) mark(i0, j0);
+                    if (g.sp - at < UP) mark(i0 + alongX, j0 + !alongX);
+                }
+                for (int dj = 0; dj < 2; dj++)
+                    for (int di = 0; di < 2; di++)
+                        if (sq(u - di * g.sp) + sq(v - dj * g.sp) < 50 * 50) mark(i + di, j + dj);
+            }
+        exitTail[gi].assign((size_t)g.ni * g.nj * 4, 1e9f);
+    }
     spawnGrid(&w.sf, 1300, true);
     spawnGrid(&w.oak, 170, false);
     spawnGrid(&w.mp, 190, false);
@@ -451,6 +501,28 @@ void Traffic::update(float dt, World& w, const Player& pl) {
         float u = k.pdir > 0 ? (k.uturn >= 0 ? L + k.uturn : k.s) : (k.uturn >= 0 ? 2 * L + Lu + k.uturn : L + Lu + L - k.s);
         return u;
     };
+    // who's cleared through, or waiting at, each grid intersection
+    auto gridIdx = [&](const Car& k) { return k.g == &w.sf ? 0 : k.g == &w.oak ? 1 : 2; };
+    auto boxKey = [&](const Car& k, int n) { return gridIdx(k) << 20 | n; };
+    auto setBox = [&](Car& k, int box, int want) {
+        int idx = (int)(&k - cars.data());
+        for (int n : {k.box, k.wantBox})
+            if (n >= 0 && n != box && n != want) {
+                auto& v = boxUsers[boxKey(k, n)];
+                v.erase(std::remove(v.begin(), v.end(), idx), v.end());
+            }
+        for (int n : {box, want})
+            if (n >= 0 && n != k.box && n != k.wantBox) boxUsers[boxKey(k, n)].push_back(idx);
+        if (want != k.wantBox) k.boxSince = clock;
+        k.box = box; k.wantBox = want;
+    };
+    // where the road out of each grid intersection is backed up to (so nobody drives in with nowhere to go)
+    for (int gi = 0; gi < 3; gi++) std::fill(exitTail[gi].begin(), exitTail[gi].end(), 1e9f);
+    for (auto& k : cars)
+        if (k.mode == 0 && (k.speed < 2 || (k.speed < 5 && k.braking))) {   // (stopped, or slowing into a jam)
+            float& e = exitTail[gridIdx(k)][((size_t)k.j * k.g->ni + k.i) * 4 + k.d];
+            e = std::min(e, k.t * k.g->sp - carModel(k.type).halfLen);
+        }
     for (auto& c : cars) {
         float distP = sqrtf(sq(c.pos.x - pp.x) + sq(c.pos.z - pp.z));
         // target speed: stop for the skater and for cars ahead
@@ -468,6 +540,18 @@ void Traffic::update(float dt, World& w, const Player& pl) {
         }
         c.honkCD -= dt;
         float backOff = 0;   // how far this car's body is into the one ahead of it
+        // intersections: a grid car only drives into one once it's clear of anyone else's way through it and
+        // there's room for it in the road out. It asks as it comes up to the line; whoever's been waiting there
+        // longest goes next (ties: earlier in the list), and a car that's through never waits on one that isn't, so
+        // nobody ends up waiting on each other in a ring.
+        int next = -1;   // the intersection ahead, if this car takes turns there
+        if (c.mode == 0 && c.nd >= 0 && c.pd >= 0) {
+            const Grid& g = *c.g;
+            next = (c.j + DJ[c.d]) * g.ni + c.i + DI[c.d];
+            bool through = c.box == c.j * g.ni + c.i && c.t * g.sp > 10 + carModel(c.type).halfLen;
+            if (through || (c.box != next && c.box != c.j * g.ni + c.i)) setBox(c, -1, c.wantBox);
+            if (nearMain[gridIdx(c)][next]) next = -1;   // not taking turns there
+        }
         if (c.placed) {
             int cx = (int)floorf(c.pos.x / CELL), cz = (int)floorf(c.pos.z / CELL);
             for (int zz = cz - 1; zz <= cz + 1; zz++)
@@ -489,13 +573,26 @@ void Traffic::update(float dt, World& w, const Player& pl) {
                             along = fmodf(loopPos(o, &loop) - uc + loop, loop);   // how far round the lane it is ahead
                             lat = 0; of = 1;
                         }
+                        // the street grid: one further up our block, or just off it and still in the intersection or
+                        // gone our way, is ahead of us in the lane even halfway round a corner (by the road between us,
+                        // or less where a corner cuts it short; not across a dead end's U-turn, though)
+                        if (c.mode == 0 && o.mode == 0 && o.g == c.g) {
+                            float sp = c.g->sp, road = -1;
+                            if (o.i == c.i && o.j == c.j && o.d == c.d && o.t > c.t) road = (o.t - c.t) * sp;
+                            else if (o.i == c.i + DI[c.d] && o.j == c.j + DJ[c.d] && o.pd == c.d &&
+                                     (o.d == c.nd || o.t * sp < 10 + carModel(o.type).halfLen)) road = (1 - c.t + o.t) * sp;
+                            if (road >= 0) { along = road < 30 ? std::min(road, sqrtf(rx * rx + rz * rz)) : road; lat = 0; of = 1; }
+                        }
                         // the car ahead in the lane (two cars level with each other: the later one in the list waits)
                         bool ahead = along > 0 || (along == 0 && &o < &c);
                         // brake in time to stop short of it, even coming up on a queue at bridge speeds
                         bool cross = c.mode != o.mode && c.mode <= 1 && o.mode <= 1;   // main road against grid: see below
-                        if (!cross && of > 0.3f && ahead && along < gap + c.speed * 1.4f && lat < 1.6f) {
+                        // (on the street grid, also one partway round a corner, or crossing just ahead: one that isn't
+                        // going our way counts as standing still)
+                        bool grid2 = c.mode == 0 && o.mode == 0;
+                        if (!cross && (of > 0.3f || (grid2 && of > -0.3f)) && ahead && along < gap + c.speed * 1.4f && lat < 1.6f) {
                             float room = std::max(0.f, along - gap - c.speed * 0.4f);
-                            target = std::min(target, along < gap ? 0.f : sqrtf(sq(o.speed) + 24 * room));
+                            target = std::min(target, along < gap ? 0.f : sqrtf(sq(of > 0.3f ? o.speed : 0.f) + 24 * room));
                             backOff = std::max(backOff, gap - 2.f - along);
                         }
                         // crossing paths (Market St and the Embarcadero against the street grid): the main road has
@@ -530,13 +627,61 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             target = std::min(target, cap);
         }
         // traffic lights: stop at the line on red, and on yellow unless too close to stop
+        bool sigHold = false;
         if (c.mode == 0 && c.g == &w.sf && !w.signals.empty()) {
             int ni = c.i + DI[c.d], nj = c.j + DJ[c.d];
             if (c.g->in(ni, nj) && w.signals[(size_t)nj * c.g->ni + ni]) {
                 int st = signalState(nj * c.g->ni + ni, c.d < 2 ? 0 : 1, clock);
                 float dist = c.g->sp - 11.5f - c.t * c.g->sp - carModel(c.type).halfLen;
-                if (st != 0 && dist > -0.3f && !(st == 1 && dist < c.speed * 1.1f))
+                if (st != 0 && dist > -0.3f && !(st == 1 && dist < c.speed * 1.1f)) {
                     target = std::min(target, dist > 0.4f ? sqrtf(2 * 4.5f * dist) - 0.6f : 0.f);
+                    sigHold = true;
+                }
+            }
+        }
+        if (c.mode == 0) {
+            float hl = carModel(c.type).halfLen;
+            float dist = c.g->sp - 11.5f - c.t * c.g->sp - hl;   // to the line
+            bool canStop = dist > c.speed * c.speed / 28 + 0.3f;
+            auto stopAtLine = [&] { target = std::min(target, dist > 0.4f ? sqrtf(2 * 4.5f * dist) - 0.6f : 0.f); };
+            bool exitFull = next >= 0 && exitTail[gridIdx(c)][(size_t)next * 4 + c.nd] < 10 + 2 * hl + 2.5f;
+            if (next >= 0 && c.box == next) {
+                // cleared but not there yet: give the turn back if it's caught by a red, the road out has filled
+                // up, or it's been stood short of the line for a while (behind someone who can't go)
+                if (c.speed > 0.3f || !canStop) c.boxSince = clock;   // (for a cleared car: when it last got anywhere)
+                if (canStop && (sigHold || exitFull || clock - c.boxSince > 3)) { setBox(c, -1, -1); stopAtLine(); }
+            } else if (next < 0 || sigHold || dist > 4 + c.speed * c.speed / 9) setBox(c, c.box, -1);   // not there yet
+            else {
+                // held up by anyone cleared through it across our way, by anyone who's been waiting longer to cross
+                // our way, by whoever's ahead of us in the lane waiting their turn, and by a full road out. But if
+                // someone behind us in the lane is already cleared, we go on their turn (they can't go until we do).
+                bool held = exitFull, waitedOn = false, laneCleared = false;
+                float since = c.wantBox == next && c.boxSince < 1e8f ? c.boxSince : clock;
+                auto it = boxUsers.find(boxKey(c, next));
+                // over the line already, or out across a main road holding it up: just clear it (see above)
+                bool goAnyway = dist <= -0.3f || clock - c.acrossT < 0.25f;
+                if (goAnyway) held = false;
+                else if (it != boxUsers.end())
+                    for (int k : it->second) {
+                        const Car& o = cars[k];
+                        int oi, oo;
+                        if (&o == &c || !boxMove(o, next, &oi, &oo)) continue;
+                        bool lane = o.i == c.i && o.j == c.j && o.d == c.d;   // on the way up to it in our lane
+                        if (o.box == next) {
+                            if (lane && o.t < c.t) laneCleared = true;
+                            else if (boxClash(c.d, c.nd, oi, oo)) held = true;
+                        } else if (lane) {
+                            if (o.t > c.t) held = true;
+                        } else if ((o.boxSince < since || (o.boxSince == since && &o < &c)) && boxClash(c.d, c.nd, oi, oo)) waitedOn = true;
+                    }
+                if (!held && !(waitedOn && !laneCleared)) { setBox(c, next, -1); c.boxSince = clock; }
+                else {
+                    setBox(c, c.box, next);
+                    // waiting on a full road out: keeps its place in the lane but holds up nobody else's turn
+                    if (exitFull) c.boxSince = 1e9f;
+                    else if (c.boxSince >= 1e8f) c.boxSince = clock;
+                    stopAtLine();
+                }
             }
         }
         float dv = target - c.speed;

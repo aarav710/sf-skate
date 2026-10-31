@@ -3,6 +3,7 @@
 #include "common.h"
 #include "world.h"
 #include "player.h"
+#include <unordered_map>
 
 struct Car {
     int type = 0;
@@ -24,6 +25,9 @@ struct Car {
     bool braking = false, placed = false;
     float pedal = 0;            // crank angle (pedal buses)
     float acrossT = -1;         // grid cars: when a car on a main road last stopped for this one (Traffic::clock)
+    int box = -1, wantBox = -1; // grid cars: the intersection (node j * ni + i) this one is cleared through / waiting at
+    float boxSince = 0;         // (Traffic::clock) waiting: since when (the longest wait goes first; 1e9 while it's only
+                                // waiting for room in the road out); cleared: when it last got anywhere
 };
 
 struct Ped {
@@ -86,6 +90,10 @@ struct Traffic {
     float clock = 0;            // drives the traffic signals
     Vector3 view = {1e6f, 0, 1e6f};   // the camera, as of last frame: people near it get the full update too
     int farTurn = 0;            // which slice of the far-away people gets its catch-up update this frame
+    std::unordered_map<int, std::vector<int>> boxUsers;   // grid intersection -> cars cleared through or waiting there
+    std::vector<uint8_t> nearMain[3];   // per node of the SF, Oakland and Menlo Park grids: 1 close to a main road
+    std::vector<float> exitTail[3];     // per node and heading on those grids: the back of the last car stopped (or all
+                                        // but) in the road leaving it, in m from the node; rebuilt every frame
     std::vector<uint64_t> carCells;   // (40 m cell << 32 | car index), sorted: who's near whom, for every car each frame
 
     void init(World& w);

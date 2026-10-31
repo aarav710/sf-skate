@@ -3,8 +3,9 @@
 
 static const Color HULL[5] = {{240, 196, 40, 255}, {220, 60, 50, 255}, {50, 130, 210, 255}, {60, 190, 150, 255}, {236, 236, 240, 255}};
 
+// open water inside the playable area: moorings and rides both stay where the skater is allowed to be
 static bool openWater(const World& w, float x, float z) {
-    return x > WX0 + 80 && x < WX1 - 80 && z > WZ0 + 80 && z < WZ1 - 80 && w.terrain(x, z) < 0.05f && !w.solidAt({x, 0.7f, z});
+    return w.inPlay(x, z) && x > WX0 + 80 && x < WX1 - 80 && z > WZ0 + 80 && z < WZ1 - 80 && w.terrain(x, z) < 0.05f && !w.solidAt({x, 0.7f, z});
 }
 
 void JetSkis::place(const World& w) {
@@ -67,7 +68,7 @@ bool JetSkis::dismount(Player& p, World& w) {
         for (int k = 0; k < 16; k++) {
             float a = k * TAU_F / 16, x = p.pos.x + cosf(a) * d, z = p.pos.z + sinf(a) * d;
             float h = w.terrain(x, z);
-            if (h < 0.5f || w.isWater(x, z, h) || w.solidAt({x, h + 1.2f, z})) continue;
+            if (h < 0.5f || !w.inPlay(x, z) || w.isWater(x, z, h) || w.solidAt({x, h + 1.2f, z})) continue;
             if (d < bd) { bd = d; best = {x, h, z}; }
         }
     if (bd > 1e8f) return false;
@@ -98,12 +99,11 @@ void JetSkis::update(float dt, const Input& in, bool boost, Player& p, const Wor
     Vector3 np = {p.pos.x + vel.x * dt, 0, p.pos.z + vel.z * dt};
     if (!openWater(w, np.x, np.z)) {
         bool xOK = openWater(w, np.x, p.pos.z), zOK = openWater(w, p.pos.x, np.z);
-        float hit = sqrtf(vel.x * vel.x + vel.z * vel.z);
-        if (xOK) { np.z = p.pos.z; vel.z *= -0.3f; }
-        else if (zOK) { np.x = p.pos.x; vel.x *= -0.3f; }
-        else { np.x = p.pos.x; np.z = p.pos.z; vel.x *= -0.3f; vel.z *= -0.3f; }
+        float hit;   // speed into whatever stopped us, so scraping along a shore or the edge of the map stays quiet
+        if (xOK) { hit = fabsf(vel.z); np.z = p.pos.z; vel.z *= -0.3f; }
+        else if (zOK) { hit = fabsf(vel.x); np.x = p.pos.x; vel.x *= -0.3f; }
+        else { hit = sqrtf(vel.x * vel.x + vel.z * vel.z); np.x = p.pos.x; np.z = p.pos.z; vel.x *= -0.3f; vel.z *= -0.3f; }
         if (hit > 6 && hitCD <= 0) { evCrash = true; hitCD = 0.6f; }
-        vf *= 0.35f;
     }
     // the visible speed along the ski
     speed = vel.x * fwdX + vel.z * fwdZ;

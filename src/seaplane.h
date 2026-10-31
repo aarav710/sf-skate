@@ -24,7 +24,11 @@ struct Seaplanes {
     void place(const World& w);                       // three moorings, in particular places
     int nearest(const Vector3& p, float maxD) const;
     void mount(int i, Player& p);
-    bool dismount(Player& p, World& w);               // only on the water, close to the shore
+    bool dismount(Player& p, World& w);               // only on the water, slow, close to a shore inside the play area
+    // why the last dismount() said no, and what to tell the rider
+    enum Refusal { REF_NONE, REF_FLYING, REF_TOO_FAST, REF_NO_SHORE, REF_OUT_OF_PLAY };
+    Refusal refusal = REF_NONE;
+    const char* refusalMsg() const;
     void update(float dt, const Input& in, bool climb, bool dive, Player& p, World& w);
     float altitude(const World& w) const;
     void draw(float now, const Vector3& cam) const;   // moored planes, the one being flown and the ones circling overhead

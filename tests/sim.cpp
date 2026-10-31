@@ -4,6 +4,7 @@
 #include "../src/chase.h"
 #include "../src/traffic.h"
 #include "../src/models.h"
+#include "../src/seaplane.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -1476,6 +1477,46 @@ int main() {
         }
         snprintf(b, sizeof b, "%d of %d ledges grindable", grinds, ledges);
         check(ledges == 3 && grinds == ledges, "Union Square ledges grindable", b);
+    }
+    {   // seaplane: climbing out says why it can't (#68) -- next to a shore outside the play area it must not say "slow down"
+        Seaplanes SP;
+        SP.place(W);
+        check(SP.moored.size() == 3, "seaplanes moored", "");
+        auto tryAt = [&](float x, float z, float spd, bool water, Player& q) {
+            Seaplanes t = SP;
+            t.mount(0, q);
+            t.pos = {x, 0, z}; t.speed = spd; t.onWater = water;
+            if (!water) t.pos.y = 80;
+            bool ok = t.dismount(q, W);
+            return std::make_pair(ok, t);
+        };
+        // the moored plane's own spot: slow climbs out onto the play area, fast is told to slow down, airborne to land
+        Player q;
+        Vector3 m = SP.moored.empty() ? Vector3{} : SP.moored[0].pos;
+        auto fast = tryAt(m.x, m.z, 12, true, q);
+        auto air = tryAt(m.x, m.z, 30, false, q);
+        auto slow = tryAt(m.x, m.z, 2, true, q);
+        snprintf(b, sizeof b, "fast=%d/%d air=%d/%d slow=%d at %.0f,%.0f in play=%d", fast.first, fast.second.refusal, air.first,
+                 air.second.refusal, slow.first, q.pos.x, q.pos.z, W.inPlay(q.pos.x, q.pos.z));
+        check(!fast.first && fast.second.refusal == Seaplanes::REF_TOO_FAST && !air.first && air.second.refusal == Seaplanes::REF_FLYING &&
+              slow.first && slow.second.refusal == Seaplanes::REF_NONE && W.inPlay(q.pos.x, q.pos.z), "seaplane climb-out at moorings", b);
+        // all over the bay: slow, on the water, by a shore that's only outside the play area -> "can't go ashore here"
+        int oob = 0, oobFast = 0, slowDown = 0, wrong = 0;
+        for (float x = WX0 + 120; x < WX1 - 120; x += 40)
+            for (float z = WZ0 + 120; z < WZ1 - 120; z += 40) {
+                if (W.terrain(x, z) >= 0.05f || W.solidAt({x, 0.8f, z})) continue;
+                Player r;
+                auto res = tryAt(x, z, 2, true, r);
+                if (res.first) { if (!W.inPlay(r.pos.x, r.pos.z)) wrong++; continue; }
+                const char* msg = res.second.refusalMsg();
+                if (strstr(msg, "Slow down")) slowDown++;   // slow already: telling them to slow down is the bug
+                if (res.second.refusal != Seaplanes::REF_OUT_OF_PLAY) continue;
+                oob++;
+                if (!strstr(msg, "Can't go ashore")) wrong++;
+                if (tryAt(x, z, 12, true, r).second.refusal == Seaplanes::REF_OUT_OF_PLAY) oobFast++;   // slowing down wouldn't help
+            }
+        snprintf(b, sizeof b, "%d out-of-play shores (%d fast), %d slow-down, %d wrong", oob, oobFast, slowDown, wrong);
+        check(oob > 20 && oobFast == oob && slowDown == 0 && wrong == 0, "seaplane: no shore leave outside play", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

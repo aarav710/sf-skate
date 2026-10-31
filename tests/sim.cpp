@@ -772,12 +772,16 @@ int main() {
         };
         struct { const char* n; float x, z; } spots[] = {{"Golden Gate", -1100, -2000}, {"Bay Bridge end", 1265, 335}, {"Market St", 1100, -80}};
         float sameOv = 0, crossOv = 0, longestStop = 0;
+        // embOv: crossing overlap at the Embarcadero (roadway x 1258..1272), which the path ends' U-turns keep clear of.
+        // slowest: the lowest average speed of the Market St / Bay Bridge cars at a spot (are they moving?)
+        float embOv = 0, slowest = 1e9f;
         for (auto& sp : spots) {
             Traffic T; T.init(W);
             Player pl; pl.spawn({sp.x, W.ground(sp.x, sp.z, 1000), sp.z}, 0);
             bool onBridge = &sp == &spots[0];
             if (!onBridge) pl.pos.y += 200;   // the skater out of everyone's way
             std::vector<float> still(T.cars.size(), 0);
+            float mainV = 0; int mainN = 0;
             for (int f = 0; f < 60 * 70; f++) {
                 T.update(1.f / 60, W, pl);
                 for (size_t i = 0; i < T.cars.size(); i++) {
@@ -785,17 +789,21 @@ int main() {
                     if (a.mode > 1 || sq(a.pos.x - sp.x) + sq(a.pos.z - sp.z) > 300 * 300) continue;
                     still[i] = a.speed < 0.3f ? still[i] + 1.f / 60 : 0;
                     if (!onBridge) longestStop = std::max(longestStop, still[i]);
+                    if (!onBridge && a.mode == 1) { mainV += a.speed; mainN++; }
                     if (f < 60 * 10 || sq(a.pos.x - sp.x) + sq(a.pos.z - sp.z) > 150 * 150) continue;
                     for (size_t j = i + 1; j < T.cars.size(); j++) {
                         const Car& b = T.cars[j];
                         if (b.mode > 1 || (a.mode == 0 && b.mode == 0) || fabsf(a.pos.x - b.pos.x) > 25 || fabsf(a.pos.z - b.pos.z) > 25) continue;
                         if (overlap(a, b)) (a.mode == b.mode ? sameOv : crossOv) += 1.f / 60;
+                        if (a.mode != b.mode && std::max(a.pos.x, b.pos.x) > 1235 && overlap(a, b)) embOv += 1.f / 60;
                     }
                 }
             }
+            if (!onBridge) slowest = std::min(slowest, mainV / std::max(mainN, 1));
         }
-        snprintf(b, sizeof b, "overlapping: same road %.1f s, crossing %.1f s; longest stop %.0f s", sameOv, crossOv, longestStop);
-        check(sameOv == 0 && crossOv < 20 && longestStop < 60, "Traffic keeps out of itself", b);
+        snprintf(b, sizeof b, "overlapping: same road %.1f s, crossing %.1f s (Embarcadero %.1f s); longest stop %.0f s; main roads avg %.1f m/s",
+                 sameOv, crossOv, embOv, longestStop, slowest);
+        check(sameOv == 0 && crossOv < 20 && embOv == 0 && longestStop < 60 && slowest > 5, "Traffic keeps out of itself", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

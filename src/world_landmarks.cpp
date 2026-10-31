@@ -297,7 +297,9 @@ void World::buildBayBridge() {
             m.box({x - 2, g, Z + sd * 9 - 2}, {x + 2, y - 6, Z + sd * 9 + 2}, conc, conc, 0.8f);
     }
     Path P;
-    P.p = {{1265, Z}, {4080, Z}};
+    // cars U-turn at the city end up on the approach ramp, the loop (9.5 m outer lane) clear of the Embarcadero
+    // roadway (x < 1272), rather than out across its cross traffic
+    P.p = {{1288, Z}, {4080, Z}};
     P.onDeck = true;
     P.finish();
     carPaths.push_back(P);

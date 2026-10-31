@@ -150,7 +150,7 @@ struct World {
     // collide() along the move from `from` to p in short steps, so a fast mover can't skip through a thin wall or pole;
     // after a hit the rest of the move slides along the wall. p ends at the resolved position
     bool collideSwept(Vector3 from, Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr) const;
-    bool solidAt(Vector3 p, bool bigProps = false) const;      // buildings/decks (+ big prop boxes: the camera)
+    bool solidAt(Vector3 p, bool bigProps = false, bool piers = false) const;   // buildings/decks (+ big prop boxes: the camera; + piers: boats)
     float ceiling(float x, float z, float feetY) const;        // lowest underside above the feet (1e9 if open sky)
     int houseAt(float x, float z, float y) const;              // index into houses if inside one, else -1
     bool doorBlocked(float x, float z, float pad) const;       // is (x,z) on the way from the sidewalk to a front door?
@@ -256,6 +256,7 @@ private:
     int addPlat(const Platform& p);
     void addBox(float x0, float z0, float x1, float z1, float base, float top, uint8_t kind,
                 Color side, Color topC, float ao = 0.8f);
+    void addBridgePier(MeshBuilder& m, float x0, float z0, float x1, float z1, float lo, float hi, Color c);
     void addBuilding(float x0, float z0, float x1, float z1, float height, Color side, Color roof, int style, int facing, RNG& r);
     void addTower(float x0, float z0, float x1, float z1, float H, RNG& r);
     // geo null: collision only (the city build); otherwise the mesh only, into geo

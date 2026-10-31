@@ -127,6 +127,13 @@ static float bbDeck(float s) {
     return gBB.back().y;
 }
 
+// a bridge pier: drawn always, and solid where it stands in the water so boats can't pass through it (#63);
+// the ones on land stay mesh-only, as before, so nothing that drives or walks there changes
+void World::addBridgePier(MeshBuilder& m, float x0, float z0, float x1, float z1, float lo, float hi, Color c) {
+    m.box({x0, lo, z0}, {x1, hi, z1}, c, c, 0.8f);
+    if (terrain((x0 + x1) / 2, (z0 + z1) / 2) < 0.05f) addPlat({x0, x1, z0, z1, hi, hi, lo, 0, PK_BUILDING});
+}
+
 void World::buildGoldenGate() {
     const float X = -1100, HW = 14;
     Color orange = col(192, 58, 40), conc = col(160, 158, 152);
@@ -150,8 +157,8 @@ void World::buildGoldenGate() {
     // towers
     for (float tz : {-1250.f, -2130.f}) {
         m.box({X - 30, -10, tz - 14}, {X + 30, 5, tz + 14}, conc, conc, 0.8f);
-        addPlat({X - 30, X + 30, tz - 14, tz - 9, 5, 5, -10, 0, PK_BUILDING});
-        addPlat({X - 30, X + 30, tz + 9, tz + 14, 5, 5, -10, 0, PK_BUILDING});
+        // the whole concrete base is solid (not just its two ends), so boats can't run through between the legs (#63)
+        addPlat({X - 30, X + 30, tz - 14, tz + 14, 5, 5, -10, 0, PK_BUILDING});
         for (int sd = -1; sd <= 1; sd += 2) {
             float lx = X + sd * 19.5f;
             m.box({lx - 4.5f, 5, tz - 5.5f}, {lx + 4.5f, 85, tz + 5.5f}, orange, orange, 0.85f);
@@ -185,12 +192,12 @@ void World::buildGoldenGate() {
     for (float z = -1060; z > -1240; z -= 45) {
         float y = ggDeck(z);
         for (int sd = -1; sd <= 1; sd += 2)
-            m.box({X + sd * 10 - 2, terrain(X, z) - 2, z - 2}, {X + sd * 10 + 2, y - 6, z + 2}, orange, orange, 0.8f);
+            addBridgePier(m, X + sd * 10 - 2, z - 2, X + sd * 10 + 2, z + 2, terrain(X, z) - 2, y - 6, orange);
     }
     for (float z = -2150; z > -2320; z -= 45) {
         float y = ggDeck(z);
         for (int sd = -1; sd <= 1; sd += 2)
-            m.box({X + sd * 10 - 2, std::min(terrain(X, z), 0.f) - 2, z - 2}, {X + sd * 10 + 2, y - 6, z + 2}, orange, orange, 0.8f);
+            addBridgePier(m, X + sd * 10 - 2, z - 2, X + sd * 10 + 2, z + 2, std::min(terrain(X, z), 0.f) - 2, y - 6, orange);
     }
     // Vista Point plaza on the Marin side
     {
@@ -240,6 +247,7 @@ void World::buildBayBridge() {
     float towers[] = {1580, 1820, 2030, 2270};
     for (float tx : towers) {
         m.box({tx - 10, -10, Z - 28}, {tx + 10, 4, Z + 28}, conc, conc, 0.8f);
+        addPlat({tx - 10, tx + 10, Z - 28, Z + 28, 4, 4, -10, 0, PK_BUILDING});   // the base in the water (#63)
         for (int sd = -1; sd <= 1; sd += 2) {
             float lz = Z + sd * 19.5f;
             m.box({tx - 3.5f, 4, lz - 3.5f}, {tx + 3.5f, 142, lz + 3.5f}, steel, steel, 0.85f);
@@ -258,6 +266,7 @@ void World::buildBayBridge() {
         float y = bbDeck(ax);
         float top = ax == 1925 ? y + 22 : y + 5;
         m.box({ax - 20, -10, Z - 25}, {ax + 20, y - 6, Z + 25}, conc, conc, 0.8f);
+        addPlat({ax - 20, ax + 20, Z - 25, Z + 25, y - 6, y - 6, -10, 0, PK_BUILDING});   // solid down to the water (#63)
         for (int sd = -1; sd <= 1; sd += 2)
             m.box({ax - 20, y - 6, sd > 0 ? Z + 15.5f : Z - 25}, {ax + 20, top, sd > 0 ? Z + 25 : Z - 15.5f}, conc, conc, 0.85f);
     }
@@ -275,6 +284,7 @@ void World::buildBayBridge() {
     {
         float tx = 3050;
         m.box({tx - 12, -10, Z - 30}, {tx + 12, 4, Z + 30}, conc, conc, 0.8f);
+        addPlat({tx - 12, tx + 12, Z - 30, Z + 30, 4, 4, -10, 0, PK_BUILDING});
         for (int sd = -1; sd <= 1; sd += 2) {
             float lz = Z + sd * 19.0f;
             m.box({tx - 3.0f, 4, lz - 3.0f}, {tx + 3.0f, 160, lz + 3.0f}, white, white, 0.9f);
@@ -296,7 +306,7 @@ void World::buildBayBridge() {
         float y = bbDeck(x);
         float g = std::min(terrain(x, Z), 0.f) - 2;
         for (int sd = -1; sd <= 1; sd += 2)
-            m.box({x - 2, g, Z + sd * 9 - 2}, {x + 2, y - 6, Z + sd * 9 + 2}, conc, conc, 0.8f);
+            addBridgePier(m, x - 2, Z + sd * 9 - 2, x + 2, Z + sd * 9 + 2, g, y - 6, conc);
     }
     Path P;
     // cars U-turn at the city end up on the approach ramp, the loop (9.5 m outer lane) clear of the Embarcadero
@@ -632,6 +642,8 @@ void World::buildWaterfront() {
         MeshBuilder& m = mb(495, -1200);
         m.obox({495, 1.5f, -1200}, {35, 3.5f, 5.5f}, -PI / 2, 0, col(28, 28, 30));
         m.obox({495, 5.1f, -1200}, {34, 0.2f, 5.2f}, -PI / 2, 0, col(150, 120, 90));
+        // the hull is solid (it ran 489.5..500.5 x -1235..-1165, keel underwater, deck at 5.3): boats bump it (#63)
+        addPlat({489.5f, 500.5f, -1235, -1165, 5.3f, 5.3f, -2, 0, PK_BUILDING});
         for (int k = -1; k <= 1; k++) {
             float mz = -1200 + k * 18;
             m.beam({495, 5, mz}, {495, 40, mz}, 0.6f, 0.6f, col(110, 85, 60));

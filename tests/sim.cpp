@@ -509,6 +509,51 @@ int main() {
         snprintf(b, sizeof b, "%d bad of %d", bad, (int)W.tokens.size());
         check(bad == 0, "tokens are not inside walls", b);
     }
+    {   // tourists stand on the ground at their landmark: on the terrain (or a kerb a step up from it), or on a deck
+        // or pier (SFO's departures level, out over the water) -- never up on a roof or a monument, never inside
+        // one, and never out in the traffic on a car path or a city street
+        auto road = [](float x, float z, bool deck) {
+            for (size_t k = 0; k < W.carPaths.size(); k++) {
+                const Path& P = W.carPaths[k];
+                if (P.onDeck != deck) continue;
+                for (size_t s = 0; s + 1 < P.p.size(); s++)
+                    if (distToSeg2D(x, z, P.p[s].x, P.p[s].y, P.p[s + 1].x, P.p[s + 1].y) < W.carPathLanes[k] * 4.f) return true;
+            }
+            if (deck) return false;
+            for (const Grid* g : {&W.sf, &W.oak, &W.mp})
+                for (int j = 0; j < g->nj; j++)
+                    for (int i = 0; i < g->ni; i++)
+                        for (int d : {0, 2}) {
+                            if (!g->edge(i, j, d)) continue;
+                            Vector2 m = g->node(i, j), e = g->node(i + DI[d], j + DJ[d]);
+                            if (distToSeg2D(x, z, m.x, m.y, e.x, e.y) < g->roadHalf) return true;
+                        }
+            return false;
+        };
+        int bad = 0, roof = 0, inside = 0, floating = 0, inRoad = 0, decks = 0;
+        for (const Vector3& t : W.tourists) {
+            float terr = W.terrain(t.x, t.z), g = W.ground(t.x, t.z, t.y);
+            bool deck = false;
+            for (const Platform& pl : W.plats)
+                deck |= (pl.kind == PK_PIER || pl.kind == PK_DECK) && pl.contains(t.x, t.z) && std::min(pl.x1 - pl.x0, pl.z1 - pl.z0) > 4.f &&
+                        fabsf(pl.top(t.x, t.z) - t.y) < 0.05f && t.y <= std::max(terr, 0.f) + 10.f;
+            bool over = !deck && (terr < 0.15f || t.y - terr > STEP_UP + 0.1f);
+            Vector3 q = t;
+            Vector2 n;
+            bool in = W.collide(q, 0.3f, t.y, 1.7f, &n) || W.solidAt({t.x, t.y + 0.6f, t.z}, true);
+            bool fl = fabsf(g - t.y) > 0.05f || t.y < terr - 0.05f || W.isWater(t.x, t.z, t.y);
+            bool rd = road(t.x, t.z, deck);
+            if (over || in || fl || rd) {
+                if (bad++ < 6) printf("      tourist at %.0f,%.0f (%s) y %.2f, ground %.2f, terrain %.2f%s%s%s%s\n", t.x, t.z, W.district(t.x, t.z),
+                                      t.y, g, terr, over ? " up high" : "", in ? " inside a solid" : "", fl ? " not on a surface" : "",
+                                      rd ? " in a roadway" : "");
+            }
+            roof += over; inside += in; floating += fl; inRoad += rd; decks += deck;
+        }
+        snprintf(b, sizeof b, "%d of %d tourists misplaced (%d up high, %d inside a solid, %d off a surface, %d in a roadway; %d on decks)",
+                 bad, (int)W.tourists.size(), roof, inside, floating, inRoad, decks);
+        check(W.tourists.size() > 100 && bad == 0, "Tourists stand on the ground", b);
+    }
     {   // streetcar lines exist and run through the city
         std::string names;
         float total = 0;

@@ -5,6 +5,7 @@
 #include "../src/traffic.h"
 #include "../src/models.h"
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 
 static World W;
@@ -217,6 +218,37 @@ int main() {
         s.run(120, Input{}, [](Player& p) { return p.state == Player::RIDE || p.state == Player::BAIL; });
         snprintf(b, sizeof b, "state=%d score=%lld", s.p.state, s.p.score);
         check(s.p.score > 0 || s.p.state == Player::BAIL, "grind ends (banked or bailed)", b);
+    }
+    {   // coping only on real lips: never a seam where a ramp meets a deck/box at its own height (issue #38)
+        int coping = 0, flat = 0; char where[96] = "";
+        for (const Rail& r : W.rails) {
+            if (strcmp(r.name, "Coping") != 0) continue;
+            coping++;
+            bool alongZ = fabsf(r.b.z - r.a.z) > fabsf(r.b.x - r.a.x);
+            for (float t : {0.25f, 0.5f, 0.75f}) {
+                float x = lerpf(r.a.x, r.b.x, t), z = lerpf(r.a.z, r.b.z, t), y = lerpf(r.a.y, r.b.y, t);
+                float g0 = alongZ ? W.ground(x - 0.3f, z, y + 0.2f) : W.ground(x, z - 0.3f, y + 0.2f);
+                float g1 = alongZ ? W.ground(x + 0.3f, z, y + 0.2f) : W.ground(x, z + 0.3f, y + 0.2f);
+                if (std::min(g0, g1) > y - 0.3f) {   // ground at rail height on both sides: mid-surface
+                    if (!flat++) snprintf(where, sizeof where, " first at %.1f,%.2f,%.1f (ground %.2f/%.2f)", x, y, z, g0, g1);
+                    break;
+                }
+            }
+        }
+        snprintf(b, sizeof b, "%d of %d Coping rails lie mid-surface%s", flat, coping, where);
+        check(coping > 0 && flat == 0, "coping only along real lips", b);
+        // ride along each Embarcadero seam (deck/bank, funbox top/ramps) and ollie: no grind on flat ground
+        int snaps = 0; char got[96] = "";
+        for (Vector2 sp : {Vector2{1205, -309}, Vector2{1226, -261.5f}, Vector2{1232, -261.5f}}) {
+            Sim s; s.spawn(sp.x, sp.y, PI / 2, 6);
+            s.run(8, Input{});
+            Input in; in.ollie = true; s.run(1, in);
+            if (s.run(90, Input{}, [](Player& p) { return p.state == Player::GRIND && strcmp(W.rails[p.rail].name, "Coping") == 0; })) {
+                if (!snaps++) snprintf(got, sizeof got, " first at x=%.1f (%.1f,%.2f,%.1f)", sp.x, s.p.pos.x, s.p.pos.y, s.p.pos.z);
+            }
+        }
+        snprintf(b, sizeof b, "%d of 3 Embarcadero seams gave a Coping grind%s", snaps, got);
+        check(snaps == 0, "no grind on Embarcadero flat tops", b);
     }
     {   // kicker ramp launches you
         Sim s; s.spawn(1233, -241, 0, 9);

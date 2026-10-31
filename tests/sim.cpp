@@ -354,6 +354,55 @@ int main() {
         snprintf(b, sizeof b, "%d enterable houses, rolled in %d of %d, ollie inside peak %.2f m stayed=%d", n, enteredOk, tried, maxY - y0, stayed);
         check(n > 300 && enteredOk >= tried - 1 && stayed, "walk into houses", b);
     }
+    {   // furniture indoors stops you (sofa back, floor lamp, potted plant, TV), and the TV leaves the way to the
+        // back room open. Positions follow the room layout in World::addHouseInterior (u along the facade, d inward).
+        int tried = 0, bad[5] = {0}, runs[5] = {0};
+        for (int k = 0; k < (int)W.houses.size() && tried < 16; k += 37) {
+            const House& h = W.houses[k];
+            const float t = 0.35f;
+            float fu0 = h.facing < 2 ? h.x0 : h.z0, fu1 = h.facing < 2 ? h.x1 : h.z1;
+            float D = h.facing < 2 ? h.z1 - h.z0 : h.x1 - h.x0, iu0 = fu0 + t, iu1 = fu1 - t;
+            if (iu1 - iu0 < 6.3f) continue;
+            tried++;
+            auto toW = [&](float u, float d) -> Vector2 {
+                switch (h.facing) { case 0: return {u, h.z0 + d}; case 1: return {u, h.z1 - d}; case 2: return {h.x0 + d, u}; default: return {h.x1 - d, u}; }
+            };
+            auto toU = [&](Vector3 p) { return h.facing < 2 ? p.x : p.z; };
+            auto toD = [&](Vector3 p) { switch (h.facing) { case 0: return p.z - h.z0; case 1: return h.z1 - p.z; case 2: return p.x - h.x0; default: return h.x1 - p.x; } };
+            // ride from (u, d) along (du, dd) for 3 s; returns how far it got along that direction
+            auto ride = [&](float u, float d, float du, float dd) {
+                Vector2 s0 = toW(u, d), s1 = toW(u + du, d + dd);
+                Sim s; s.p.spawn({s0.x, h.floorY, s0.y}, atan2f(s1.y - s0.y, s1.x - s0.x)); s.p.speed = 3;
+                float best = 0;
+                for (int f = 0; f < 180; f++) {
+                    Input in; in.push = s.p.speed < 3;
+                    s.p.update(1.f / 60, in, W);
+                    best = std::max(best, (toU(s.p.pos) - u) * du + (toD(s.p.pos) - d) * dd);
+                }
+                return best;
+            };
+            float doorU = h.facing < 2 ? h.doorIn.x : h.doorIn.y;
+            bool doorLeft = doorU < (fu0 + fu1) * 0.5f;
+            float dp = std::clamp(D * 0.42f, 5.5f, 9.f), sofaD = t + 3.2f, gapC = doorLeft ? iu0 + 1.5f : iu1 - 1.5f;
+            float farU0 = doorLeft ? iu1 - 2.4f : iu0, farU1 = doorLeft ? iu1 : iu0 + 2.4f, sgn = doorLeft ? 1.f : -1.f;
+            float plantU = farU0 + 0.45f;   // plant: ride at it from 2 m out, toward the side wall behind it
+            runs[0]++; if (ride(plantU - 2.f * sgn, sofaD - 0.75f, sgn, 0) > 1.5f) bad[0]++;
+            float span0 = doorLeft ? gapC + 0.7f : farU1, span1 = doorLeft ? farU0 : gapC - 0.7f;
+            if (span1 - span0 >= 1.7f) {   // TV: ride at it toward the partition; it stops you in front of the screen
+                runs[1]++; if (ride((span0 + span1) * 0.5f, dp - 2.2f, 0, 1) > 1.79f) bad[1]++;
+            }
+            runs[2]++; if (ride(gapC, dp - 2.2f, 0, 1) < 2.8f) bad[2]++;   // the doorway in the partition stays open
+            if (doorLeft) {
+                runs[3]++; if (ride(iu1 - 0.35f, sofaD - 1.5f, 0, 1) > 1.3f) bad[3]++;   // along the wall into the sofa back
+                float ld = sofaD + 2.625f;
+                if (fabsf(ld - (dp + 0.1f)) > 0.9f) { runs[4]++; if (ride(iu1 - 2.235f, ld, 1, 0) > 1.6f) bad[4]++; } // lamp
+            }
+        }
+        snprintf(b, sizeof b, "%d rooms; rode through plant %d/%d, TV %d/%d, sofa back %d/%d, lamp %d/%d; doorway blocked %d/%d",
+                 tried, bad[0], runs[0], bad[1], runs[1], bad[3], runs[3], bad[4], runs[4], bad[2], runs[2]);
+        check(tried >= 8 && runs[1] > 0 && runs[3] > 0 && runs[4] > 0 && !bad[0] && !bad[1] && !bad[2] && !bad[3] && !bad[4],
+              "Furniture indoors is solid", b);
+    }
     {   // police chase: cops show up, stand still and you get busted, outrun them and you escape
         Chase c; Player p;
         Vector3 start = W.spots[0].pos;

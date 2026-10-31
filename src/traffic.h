@@ -50,6 +50,9 @@ struct Ped {
     uint8_t pet = 0;            // 0 none, 1 a dog on a leash
     Color petC{}, petC2{};      // coat and the darker ears / patches
     float petS = 1;             // dog size
+    Vector3 dog{};              // where the dog stands: on the ground there and clear of walls (see dogSpot in traffic.cpp)
+    Vector2 dogOff{};           // its offset from the walker, eased so it trots over rather than jumping when the spot moves
+    float dogSide = 1;          // which side of the walker it keeps to (+1 / -1); it only switches when that side is blocked
     // looks: hair style, what they carry, what they do while standing, build, and the bag / hat color
     uint8_t hairStyle = 0, carry = 0, idle = 0;
     float build = 1;

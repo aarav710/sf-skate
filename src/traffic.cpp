@@ -371,6 +371,32 @@ void Traffic::farPedUpdate(Ped& p, float dt, World& w, RNG& r) {
     p.phase += dt * p.gait * 5.2f;
 }
 
+// Where a walker's dog goes: a little ahead and off to one side (beside them when they stop), standing on the
+// ground right there rather than at the walker's height, and never inside a wall or a pole. A blocked side sends
+// it round to the other; if both are blocked (a narrow gap, a doorway) it's pulled in close, and failing that it
+// takes the spot the wall pushes it out to. Usually one ground and one wall query per dog.
+static Vector3 dogSpot(Ped& p, const World& w) {
+    float s = p.petS, cy = cosf(p.yaw), sy = sinf(p.yaw), feet = p.pos.y - p.evY;
+    bool sit = p.mode == 2 || p.knock > 0;
+    float ax = sit ? 0.15f : 0.95f, az = sit ? 0.65f : 0.5f;
+    // the wall check is a circle round the middle of the body (it runs from the tail to the nose along x)
+    float r = 0.3f * s + 0.05f, mid = 0.15f * s, h = 0.8f * s;
+    const float tries[4][2] = {{ax, az * p.dogSide}, {ax, -az * p.dogSide}, {ax * 0.45f, 0.3f * p.dogSide}, {ax * 0.45f, -0.3f * p.dogSide}};
+    Vector3 pushed = {0, 0, 0};
+    for (int k = 0; k < 4; k++) {
+        float x = p.pos.x + tries[k][0] * cy - tries[k][1] * sy, z = p.pos.z + tries[k][0] * sy + tries[k][1] * cy;
+        float y = w.ground(x, z, std::max(w.terrain(x, z), feet));
+        Vector3 c = {x + mid * cy, y, z + mid * sy};
+        if (!w.collide(c, r, y, h, nullptr)) {
+            if (tries[k][1] * p.dogSide < 0) p.dogSide = -p.dogSide;   // stays on its new side until that's blocked too
+            return {x, y, z};
+        }
+        if (k == 0) pushed = {c.x - mid * cy, 0, c.z - mid * sy};
+    }
+    pushed.y = w.ground(pushed.x, pushed.z, std::max(w.terrain(pushed.x, pushed.z), feet));
+    return pushed;
+}
+
 void Traffic::update(float dt, World& w, const Player& pl) {
     RNG& r = gR;
     evHonk = false;
@@ -615,7 +641,8 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             if (p.evT >= p.evDur) { p.evade = EV_NONE; p.evTilt = 0; }
         } else if (Vector2Length(p.dodge) > 0.01f) {
             // back to their route at a walk once the skater has gone by (they turn and walk it, see the facing below)
-            bool clear = dP2 > 6 * 6 || skSp < 1.f;
+            // (a skater stopped right beside them is still in the way: they keep their step round until past)
+            bool clear = dP2 > 6 * 6 || (skSp < 1.f && dP2 > 2.5f * 2.5f);
             if (clear) {
                 float L = Vector2Length(p.dodge), step = std::min(L, 1.0f * dt);
                 p.dodge = Vector2Subtract(p.dodge, Vector2Scale(p.dodge, step / L));
@@ -645,7 +672,37 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             p.idleTurn -= dt;
             if (p.idleTurn < 0 && p.gait < 0.2f && !evading) { p.idleTurn = r.range(2, 7); p.yaw += r.range(-1.2f, 1.2f); }
         }
+        // a skater standing or rolling slowly (too slow to set off the dodges above) is walked round like
+        // anyone else on the sidewalk: drift sideways off the route while they're in the way ahead, to the
+        // side already favoured, or the other side if a wall or the water is there
+        bool slowSk = pl.hspeed() < 2.f && fabsf(pl.pos.y - p.pos.y) < 1.4f;
+        if (slowSk && !evading && dP2 < 4.f * 4.f && (routeDir.x != 0 || routeDir.y != 0)) {
+            const float R = 0.8f;   // how wide a berth they give the skater
+            Vector2 at = {base.x + p.dodge.x - pp.x, base.y + p.dodge.y - pp.z};   // skater to where they're headed
+            Vector2 side = {-routeDir.y, routeDir.x};
+            float ahead = -Vector2DotProduct(at, routeDir), lat = Vector2DotProduct(at, side);
+            if (ahead > -0.3f && ahead < 2.5f && fabsf(lat) < R) {
+                float sg = fabsf(lat) > 0.05f ? (lat > 0 ? 1.f : -1.f) : ((hashu((int)(p.phase * 1000.f), (int)pi, 43) & 1) ? 1.f : -1.f);
+                Vector2 to = {pp.x + side.x * sg * (R + 0.3f), pp.z + side.y * sg * (R + 0.3f)};
+                float g = w.terrain(to.x, to.y);
+                if (w.solidAt({to.x, std::max(prevGround, g) + 0.6f, to.y}) || w.isWater(to.x, to.y, g)) sg = -sg;
+                float need = sg * lat > 0 ? R - fabsf(lat) : R + fabsf(lat);
+                p.dodge = Vector2Add(p.dodge, Vector2Scale(side, sg * std::min(need, 1.4f * dt)));
+            }
+        }
         float x = base.x + p.dodge.x, z = base.y + p.dodge.y;
+        // and never in the same spot as a slow skater (anyone faster knocks them down, in interact):
+        // a soft push out, kept in the sidestep so it lasts and the walls below still win
+        if (slowSk && p.evade != EV_DIVE) {
+            const float BODY = 0.6f;
+            float ox = x - pp.x, oz = z - pp.z, d = sqrtf(ox * ox + oz * oz);
+            if (d < BODY) {
+                Vector2 n = d > 0.01f ? Vector2{ox / d, oz / d} : (routeDir.x != 0 || routeDir.y != 0) ? Vector2{-routeDir.y, routeDir.x} : Vector2{1, 0};
+                Vector2 push = Vector2Scale(n, BODY - d);
+                p.dodge = Vector2Add(p.dodge, push);
+                x += push.x; z += push.y;
+            }
+        }
         // climb steps one at a time from where they stood last frame, like the skater does,
         // instead of reading the ground from street level and walking through a stoop
         float yRef = std::max(w.terrain(x, z), prevGround);
@@ -703,6 +760,20 @@ void Traffic::update(float dt, World& w, const Player& pl) {
                 p.yaw = lerpAngle(p.yaw, atan2f(v.y, v.x), 1 - expf(-dt * (evading ? 12.f : 6.f)));
             p.phase += dt * vs * 5.2f;
         }
+    }
+    // dogs: worked out here, where the world is to hand, so drawDog can stand them on the ground clear of walls.
+    // Only the ones that can be drawn (within 150 m of the camera); they ease over when the spot changes
+    // (sitting down, switching sides) and jump straight there when far off (just come into range).
+    for (auto& p : peds) {
+        if (!p.pet) continue;
+        if (std::min(sq(p.pos.x - pp.x) + sq(p.pos.z - pp.z), sq(p.pos.x - view.x) + sq(p.pos.z - view.z)) > 160 * 160) continue;
+        Vector3 to = dogSpot(p, w);
+        Vector2 off = {to.x - p.pos.x, to.z - p.pos.z}, go = Vector2Subtract(off, p.dogOff);
+        if (sq(to.x - p.dog.x) + sq(to.z - p.dog.z) > 3 * 3 || Vector2LengthSqr(go) < 1e-4f) { p.dogOff = off; p.dog = to; continue; }
+        // ease the offset from the walker, not the position, so a walking dog keeps up instead of trailing
+        p.dogOff = Vector2Add(p.dogOff, Vector2Scale(go, 1 - expf(-dt * 10)));
+        float x = p.pos.x + p.dogOff.x, z = p.pos.z + p.dogOff.y;
+        p.dog = {x, w.ground(x, z, std::max(w.terrain(x, z), to.y)), z};
     }
     // Caltrain: accelerate, brake for the next station, dwell, reverse at the ends
     float lineEnd = w.railLen() - 25, lineStart = w.stations.empty() ? 0 : w.stations[0].s;
@@ -835,7 +906,7 @@ static void drawDog(const Ped& p, float now) {
     float s = p.petS, cy = cosf(p.yaw), sy = sinf(p.yaw);
     bool sit = p.mode == 2 || p.knock > 0;
     auto W = [&](float x, float y, float z) { return Vector3{p.pos.x + x * cy - z * sy, p.pos.y + y, p.pos.z + x * sy + z * cy}; };
-    Vector3 at = sit ? W(0.15f, 0, 0.65f) : W(0.95f, 0, 0.5f);
+    Vector3 at = p.dog;   // on the ground there and clear of walls: see dogSpot
     inst::push();
     inst::translate(at.x, at.y, at.z);
     inst::rotate(-p.yaw * RAD2DEG, 0, 1, 0);
@@ -863,7 +934,7 @@ static void drawDog(const Ped& p, float now) {
     // the leash, from the walker's hand to the collar, sagging a little
     float ps = p.scale;
     Vector3 hand = W(0.12f * ps, 0.86f * ps, 0.27f * ps);
-    Vector3 collar = sit ? W(0.15f + 0.3f * s, 0.62f * s, 0.65f) : W(0.95f + 0.3f * s, 0.6f * s, 0.5f);
+    Vector3 collar = {at.x + 0.3f * s * cy, at.y + (sit ? 0.62f : 0.6f) * s, at.z + 0.3f * s * sy};
     Vector3 mid = Vector3Lerp(hand, collar, 0.5f);
     mid.y -= 0.12f;
     DrawLine3D(hand, mid, {150, 30, 40, 255});

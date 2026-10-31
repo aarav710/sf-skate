@@ -165,22 +165,33 @@ int main() {
         snprintf(b, sizeof b, "state=%d (3 = bail)", s.p.state);
         check(s.p.state == Player::BAIL, "late kickflip bails", b);
     }
-    {   // the board flies off along the skater's heading, not always east (issue #20)
-        float worst = 0, worstPos = 0;
-        for (float spd : {0.f, 8.f})
+    {   // the board flies off the way the skater travels: along the heading, not always east (issue #20),
+        // and backwards when rolling backwards (issue #72)
+        float worst = 0, worstPos = 0, worstRider = 0;
+        for (float spd : {0.f, 8.f, -1.f, -9.f})
             for (int d = 0; d < 4; d++) {
                 float yaw = d * PI / 2; // E, S, W, N
+                float travel = spd < 0 ? yaw + PI : yaw;
                 Sim s; s.spawn(1045 + 2.4f, -80, yaw, spd);
                 s.p.bail("test");
                 Vector3 bv = s.p.boardVel;
-                worst = std::max(worst, fabsf(wrapPi(atan2f(bv.z, bv.x) - yaw)));
-                Vector3 b0 = s.p.boardPos;
+                worst = std::max(worst, fabsf(wrapPi(atan2f(bv.z, bv.x) - travel)));
+                Vector3 b0 = s.p.boardPos, r0 = s.p.pos;
                 s.run(15, Input{});
-                Vector3 db = Vector3Subtract(s.p.boardPos, b0);
-                worstPos = std::max(worstPos, fabsf(wrapPi(atan2f(db.z, db.x) - yaw)));
+                Vector3 db = Vector3Subtract(s.p.boardPos, b0), dr = Vector3Subtract(s.p.pos, r0);
+                worstPos = std::max(worstPos, fabsf(wrapPi(atan2f(db.z, db.x) - travel)));
+                if (spd != 0) worstRider = std::max(worstRider, fabsf(wrapPi(atan2f(dr.z, dr.x) - travel)));
             }
-        snprintf(b, sizeof b, "worst heading error: velocity %.1f deg, travel %.1f deg", worst * RAD2DEG, worstPos * RAD2DEG);
-        check(worst < 0.02f && worstPos < 0.02f, "bail throws board along heading", b);
+        {   // boardslide: the heading is across the rail, but board and rider fall along the rail travel
+            Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 6);
+            s.p.state = Player::GRIND; s.p.boardslide = true; s.p.railTravel = {1, 0};
+            s.p.bail("test");
+            Vector3 bv = s.p.boardVel;
+            worst = std::max(worst, fabsf(wrapPi(atan2f(bv.z, bv.x))));
+        }
+        snprintf(b, sizeof b, "worst travel error: board velocity %.1f deg, board path %.1f deg, rider path %.1f deg",
+                 worst * RAD2DEG, worstPos * RAD2DEG, worstRider * RAD2DEG);
+        check(worst < 0.02f && worstPos < 0.02f && worstRider < 0.02f, "bail throws board along travel", b);
     }
     {   // slamming a building wall: the tumbling board bounces off it instead of flying inside (issue #41)
         int slams = 0, inside = 0; float deepest = 0; Vector3 worstAt = {};

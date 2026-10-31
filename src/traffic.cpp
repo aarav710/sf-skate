@@ -708,9 +708,9 @@ void Traffic::update(float dt, World& w, const Player& pl) {
                             // main road that's waited a long while for a grid car that's stood still too gives up and
                             // eases past it: whatever's wrong, it's better than everyone waiting for good.)
                             const float ACROSS = 12;
-                                                        if (c.mode == 1) {
+                            if (c.mode == 1) {
                                 if (inWay(c, o, false, o.queued && o.speed < 0.3f ? 0 : ACROSS)) {
-                                    if (c.still > 20 && o.still > 20) c.passing = true;
+                                    if (c.still > 12 && o.still > 12) c.passing = true;
                                     if (!c.passing || o.still < 5) { target = 0; o.acrossT = clock; }
                                     else { target = std::min(target, 2.f); passing = true; }
                                 }

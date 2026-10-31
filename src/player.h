@@ -57,11 +57,13 @@ struct Player {
     int rail = -1; float railT = 0; int railDir = 1; float balance = 0, balanceVel = 0;
     bool boardslide = false;
     bool railFakie = false;   // 50-50 riding backwards along the rail
+    Vector2 railTravel{1, 0}; // unit xz direction the grind is moving along the rail
 
     // respawn
     Vector3 safePos{}; float safeYaw = 0; float safeT = 0;
 
     void spawn(Vector3 p, float yaw);
+    void respawnSafe(World& w);   // back to safePos, turned so the board stays at rest there
     void update(float dt, const Input& in, World& w);
     void bail(const char* why);
     Vector3 fwd() const { return {cosf(yaw), 0, sinf(yaw)}; }

@@ -740,22 +740,26 @@ void World::buildSkateSpots() {
         };
         ledge(cx - 25, cz - 15, cx - 10, cz - 14.2f, 0.55f);
         ledge(cx + 10, cz + 14.2f, cx + 25, cz + 15, 0.55f);
-        ledge(cx - 15, cz + 20, cx - 14.2f, cz + 34, 0.5f);
+        ledge(cx - 15, cz + 20, cx - 14.2f, cz + 34, 0.55f);   // (over STEP_UP, so it takes an ollie to get on)
         // a terrace dug into the hill: level with the ground on its uphill (west) side, with stairs and handrails
-        // running down its downhill (east) face to the plaza below
+        // running down its downhill (east) face to the plaza below. The ground keeps falling under the stairs, so the
+        // bottom step is set just above the highest ground under it (its face then stands only ~0.3 m over the plaza
+        // where you ride into it) and the rest share the climb from there to the deck evenly.
         float dx0 = cx + 12, dx1 = cx + 20, sx1 = cx + 30, dz0 = cz - 27, dz1 = cz - 15;
-        float dLo, dHi, fLo, fHi;
+        float dLo, dHi;
         lowHigh(dx0, dz0, dx1, dz1, dLo, dHi);
-        lowHigh(sx1, dz0, sx1, dz1, fLo, fHi);
         float deck = dHi;
         addBox(dx0, dz0, dx1, dz1, dLo - 0.3f, deck, PK_PROP, conc, C_PLAZA);
         Color stone = col(186, 180, 170);
-        const int steps = 8;
+        const int steps = 10;
+        float bLo, bHi;
+        lowHigh(lerpf(dx1, sx1, (float)(steps - 1) / steps), dz0, sx1, dz1, bLo, bHi);
+        float bottom = bHi + 0.05f;
         for (int k = 0; k < steps; k++) {
             float a0 = lerpf(dx1, sx1, (float)k / steps), a1 = lerpf(dx1, sx1, (float)(k + 1) / steps);
             float sLo, sHi;
             lowHigh(a0, dz0, a1, dz1, sLo, sHi);
-            float top = std::max(lerpf(deck, fHi, (float)(k + 1) / (steps + 1)), sHi + 0.05f);
+            float top = std::max(lerpf(deck, bottom, (float)(k + 1) / steps), sHi + 0.05f);
             addBox(a0, dz0, a1, dz1, sLo - 0.3f, top, PK_PROP, stone, stone, 0.9f);
         }
         float hr = 0.95f;

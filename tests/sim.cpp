@@ -6,6 +6,7 @@
 #include "../src/models.h"
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <algorithm>
 
 static World W;
@@ -1030,6 +1031,8 @@ int main() {
         check(gridOv < 15 && longest < 120 && longestIn < 30 && avg > 6.5f, "Grid traffic takes turns", b);
     }
     {   // Union Square's skate props sit on its sloping plaza: nothing floats over it or sinks into it
+        // (assumes the square fills the block gx(19)..gx(20) x gz(6)..gz(7) and every PK_PROP platform in it is one of
+        // its props; the largest of them is the deck, and props under 1 m wide are the ledges)
         const float X0 = gx(19), X1 = gx(20), Z0 = gz(6), Z1 = gz(7);
         int props = 0, floating = 0, buried = 0, badLedge = 0;
         float worstGap = 0, worstSink = 0;
@@ -1070,9 +1073,9 @@ int main() {
         snprintf(b, sizeof b, "%d rails, %d under the ground or off their ledge (worst %.2f m above the ground)", rails, badRail, worst);
         check(rails >= 8 && badRail == 0, "Union Square rails above the ground", b);
 
-        // walk from the plaza below up the stairs, across the deck and off its uphill side
+        // walk from the plaza below up the stairs and onto the deck; its uphill (west) edge meets the ground
         bool onDeck = false;
-        float maxDrop = 0, endOff = 99;
+        float maxDrop = 0, westLip = 99;
         if (deck) {
             float z = (deck->z0 + deck->z1) / 2, h = W.terrain(deck->x1 + 15, z);
             for (float x = deck->x1 + 15; x >= deck->x0 - 3; x -= 0.1f) {
@@ -1081,10 +1084,32 @@ int main() {
                 h = nh;
                 onDeck |= deck->contains(x, z) && fabsf(h - deck->top(x, z)) < 0.01f;
             }
-            endOff = fabsf(h - W.terrain(deck->x0 - 3, z));
+            westLip = 0;
+            for (float zz = deck->z0; zz <= deck->z1; zz += 0.5f) westLip = std::max(westLip, deck->top(deck->x0, zz) - W.terrain(deck->x0 - 0.05f, zz));
         }
-        snprintf(b, sizeof b, "reached deck=%d, biggest drop %.2f m, off the far side %.2f m from the ground", onDeck, maxDrop, endOff);
-        check(onDeck && maxDrop < STEP_UP && endOff < 0.01f, "Union Square stairs reach the deck", b);
+        snprintf(b, sizeof b, "reached deck=%d, biggest drop %.2f m, west lip %.2f m above the ground", onDeck, maxDrop, westLip);
+        check(onDeck && maxDrop < STEP_UP && westLip < 0.3f, "Union Square stairs reach the deck", b);
+
+        // ride up the stairs from the plaza below, pushing, in the middle and along both edges
+        int rides = 0, upOk = 0;
+        std::string why;
+        for (float v : {4.f, 6.f, 9.f, 12.f})
+            for (int lane = 0; deck && lane < 3; lane++) {
+                float z = lane == 0 ? deck->z0 + 1 : lane == 1 ? (deck->z0 + deck->z1) / 2 : deck->z1 - 1;
+                Sim s; s.spawn(deck->x1 + 16, z, PI, v);
+                Input in; in.push = true;
+                bool bailed = false, on = false;
+                s.run(60 * 8, in, [&](Player& q) {
+                    bailed |= q.state == Player::BAIL;
+                    on |= deck->contains(q.pos.x, q.pos.z) && fabsf(q.pos.y - deck->top(q.pos.x, q.pos.z)) < 0.05f;
+                    return bailed || on;
+                });
+                rides++;
+                if (on && !bailed) upOk++;
+                else if (why.empty()) { char w[96]; snprintf(w, sizeof w, " (first miss: %.0f m/s at z %.0f, bailed=%d, stopped at x %.1f)", v, z, bailed, s.p.pos.x); why = w; }
+            }
+        snprintf(b, sizeof b, "%d of %d pushes up the stairs reached the deck%s", upOk, rides, why.c_str());
+        check(rides == 12 && upOk == rides, "Union Square stairs ride up", b);
 
         // ollie onto each ledge while rolling along it
         int ledges = 0, grinds = 0;

@@ -5,7 +5,7 @@ Pressing a number key (1–0) while riding a jet ski, a seaplane or Caltrain cal
 
 - **Jet ski:** teleport to Twin Peaks while riding. You stay "riding" at **y = 0, 158 m inside the hill**. The jet ski moves there too and is left buried inside Twin Peaks after you hop off.
 - **Seaplane:** the next `SP.update` puts the player back at the plane's position, so the teleport is silently undone. The game still shows "Teleported".
-- **Caltrain:** same pattern; the ride keeps overriding the position.
+- **Caltrain:** probably the same (not tested). The ride code keeps setting the position while `ride.on` is true.
 
 ## How to reproduce
 Headless, using the real `JetSkis`/`Seaplanes` code: mount ski 0, then `P.spawn(W.spots[2])`, then `JS.update`. Result: `riding=1 pos=-282.0,0.0,878.0 terrain=157.7 ski0 at -282.0,0.0,878.0`. With the seaplane, one frame after the teleport: `riding=1 pos=339.8,0.0,-1152.4`, i.e. back at the plane.

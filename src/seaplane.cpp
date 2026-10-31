@@ -74,22 +74,38 @@ void Seaplanes::mount(int i, Player& p) {
 }
 
 bool Seaplanes::dismount(Player& p, World& w) {
-    if (!onWater || speed > 6) return false;
+    refusal = REF_NONE;
+    if (!onWater) { refusal = REF_FLYING; return false; }
+    // nearest bit of solid shore within a short hop; note too whether there's shore here at all, just outside the
+    // play area (East Bay, Peninsula, Marin), so the rider is told why they can't climb out rather than to slow down
     Vector3 best{};
     float bd = 1e9f;
+    bool outShore = false;
     for (float d = 4; d <= 24; d += 1.5f)
         for (int k = 0; k < 16; k++) {
             float a = k * TAU_F / 16, x = pos.x + cosf(a) * d, z = pos.z + sinf(a) * d;
             float h = w.terrain(x, z);
-            if (h < 0.5f || !w.inPlay(x, z) || w.isWater(x, z, h) || w.solidAt({x, h + 1.2f, z})) continue;
+            if (h < 0.5f || w.isWater(x, z, h) || w.solidAt({x, h + 1.2f, z})) continue;
+            if (!w.inPlay(x, z)) { outShore = true; continue; }
             if (d < bd) { bd = d; best = {x, h, z}; }
         }
-    if (bd > 1e8f) return false;
+    if (bd > 1e8f) { refusal = outShore ? REF_OUT_OF_PLAY : REF_NO_SHORE; return false; }
+    if (speed > 6) { refusal = REF_TOO_FAST; return false; }
     moored[cur].pos = {pos.x, 0, pos.z};
     moored[cur].yaw = yaw;
     riding = false; cur = -1;
     p.spawn({best.x, w.ground(best.x, best.z, best.y + 2), best.z}, atan2f(best.z - pos.z, best.x - pos.x));
     return true;
+}
+
+const char* Seaplanes::refusalMsg() const {
+    switch (refusal) {
+    case REF_FLYING: return "Land on the water first";
+    case REF_TOO_FAST: return "Slow down to climb out";
+    case REF_NO_SHORE: return "Get closer to the shore to climb out";
+    case REF_OUT_OF_PLAY: return "Can't go ashore here - head back toward the city";
+    default: return "";
+    }
 }
 
 float Seaplanes::altitude(const World& w) const { return pos.y - std::max(w.terrain(pos.x, pos.z), 0.f); }

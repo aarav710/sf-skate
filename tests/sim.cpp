@@ -1,9 +1,11 @@
 // Headless gameplay checks: drives the skater with scripted input and checks the outcome.
 #include "../src/world.h"
+#include "../src/world_internal.h"
 #include "../src/player.h"
 #include "../src/chase.h"
 #include "../src/traffic.h"
 #include "../src/models.h"
+#include "../src/seaplane.h"
 #include "../src/jetski.h"
 #include "../src/gondola.h"
 #include "../src/jetski.h"
@@ -1602,6 +1604,7 @@ int main() {
         snprintf(b, sizeof b, "overlapping: same road %.1f s, crossing %.1f s (Embarcadero %.1f s); longest stop %.0f s; main roads avg %.1f m/s",
                  sameOv, crossOv, embOv, longestStop, slowest);
         check(sameOv == 0 && crossOv < 20 && embOv == 0 && longestStop < 60 && slowest > 5, "Traffic keeps out of itself", b);
+        W.vehicleTops.clear();   // T.update published the roofs of the cars near pl
     }
     {   // street-grid cars take turns at intersections instead of driving through each other, and nobody gets
         // gridlocked waiting on everyone else: the whole city, a few minutes of traffic. Crossings of a main road
@@ -1673,6 +1676,7 @@ int main() {
         snprintf(b, sizeof b, "%d grid cars, off the main roads: overlapping %.1f s, longest stop %.0f s (%.0f s in an intersection); average speed %.1f m/s",
                  (int)grid.size(), gridOv, longest, longestIn, avg);
         check(gridOv < 15 && longest < 120 && longestIn < 30 && avg > 6.5f, "Grid traffic takes turns", b);
+        W.vehicleTops.clear();   // T.update published the roofs of the cars near pl
     }
     {   // and where the main roads cross the grid, and at their ends, nobody waits on anybody for minutes (#47): the
         // whole city for ten minutes (those lockups mostly started after three), every car on the main roads and the
@@ -1699,6 +1703,7 @@ int main() {
         snprintf(b, sizeof b, "%d cars stood over a minute; longest stop %.0f s on the grid, %.0f s on the main roads",
                  stuck, longGrid, longMain);
         check(std::max(longGrid, longMain) < 90 && longMain < 60, "Main-road crossings don't lock up", b);
+        W.vehicleTops.clear();   // T.update published the roofs of the cars near pl
     }
     {   // sidewalk walkers go round the front of a house's steps, not through them (#86): the walking line runs ~2 m
         // out from the house fronts and a stoop reaches up to 3 m out, so following it put them inside the step boxes,
@@ -1758,6 +1763,7 @@ int main() {
         }
         snprintf(b, sizeof b, "%d of %d walkway samples (%d within 120 m) off the deck, worst %.1f m", bad, tot, near, worst);
         check(tot > 61 * 200 && near > 61 * 10 && bad == 0, "Golden Gate walkers stay on the deck", b);
+        W.vehicleTops.clear();   // T.update published the roofs of the cars near pl
     }
     {   // a stopped vehicle is solid all the way to its ends: roll at 3 m/s into each end of each type, on the axis and
         // near a corner, on the runway (flat and open), and the skater stops at the body (or bails), not inside it
@@ -1792,6 +1798,45 @@ int main() {
         }
         snprintf(b, sizeof b, "%d of %d rides got inside; closest stop, m outside the body: %s", bad, tot, det.c_str());
         check(bad == 0, "Vehicles are solid to their ends", b);
+    }
+    {   // the roof of a vehicle stopped in traffic is ground: drop onto it from 1 m up at 3 and 5 m/s (along it, from
+        // just inside its back end) and the skater lands on top and rides, rather than sinking into it or bailing
+        int bad = 0, tot = 0;
+        std::string det;
+        struct { int type; const char* n; } kinds[] = {{CT_SEDAN, "car"}, {CT_BUS, "bus"}, {CT_CABLECAR, "cable car"},
+                                                       {CT_STREETCAR, "streetcar"}, {CT_LRV, "LRV"}, {CT_PEDALBUS, "pedal bus"}};
+        for (auto& k : kinds)
+            for (float spd : {3.f, 5.f}) {
+                const CarModel& m = carModel(k.type);
+                Traffic T;
+                Car c; c.type = k.type; c.speed = 0; c.stopT = 1e9f; c.placed = true;
+                c.pos = {1950, W.ground(1950, 2262, 500), 2262};
+                T.cars.push_back(c);
+                float roof = c.pos.y + m.height - 0.1f;
+                Sim s; s.spawn(1950 - m.halfLen + 0.3f, 2262, 0, spd);
+                s.p.pos.y = roof + 1; s.p.state = Player::AIR; s.p.vel = {spd, 0, 0}; s.p.vy = 0;
+                bool rode = false;
+                float low = 1e9f;
+                for (int f = 0; f < 60 && s.p.state != Player::BAIL; f++) {
+                    T.publishRoofs(W, s.p.pos);
+                    s.run(1, Input{});
+                    T.interact(s.p);
+                    if (fabsf(s.p.pos.x - 1950) < m.halfLen - 0.3f) low = std::min(low, s.p.pos.y);
+                    if (s.p.state == Player::RIDE && fabsf(s.p.pos.y - roof) < 0.05f) rode = true;
+                }
+                tot++;
+                bool ok = rode && s.p.state != Player::BAIL && low > roof - 0.05f;
+                if (!ok) {
+                    char one[96];
+                    snprintf(one, sizeof one, "%s%s at %.0f m/s: %s, lowest %+.2f", det.empty() ? "" : "; ", k.n, spd,
+                             s.p.state == Player::BAIL ? s.p.popup.c_str() : rode ? "rode" : "never rode on top", low - roof);
+                    det += one;
+                    bad++;
+                }
+            }
+        W.vehicleTops.clear();
+        snprintf(b, sizeof b, "%d of %d drops onto a stopped vehicle missed the roof%s%s", bad, tot, det.empty() ? "" : ": ", det.c_str());
+        check(bad == 0, "Stopped vehicles have a roof to land on", b);
     }
     {   // the "SFO Airport" label covers the airport fill, and not the East Bay shore and hills beyond it
         int wrong = 0, land = 0, missed = 0, fill = 0;
@@ -1909,6 +1954,86 @@ int main() {
         snprintf(b, sizeof b, "%d of %d ledges grindable", grinds, ledges);
         check(ledges == 3 && grinds == ledges, "Union Square ledges grindable", b);
     }
+    {   // seaplane: climbing out says why it can't (#68) -- next to a shore outside the play area it must not say "slow down"
+        Seaplanes SP;
+        SP.place(W);
+        check(SP.moored.size() == 3, "seaplanes moored", "");
+        auto tryAt = [&](float x, float z, float spd, bool water, Player& q) {
+            Seaplanes t = SP;
+            t.mount(0, q);
+            t.pos = {x, 0, z}; t.speed = spd; t.onWater = water;
+            if (!water) t.pos.y = 80;
+            bool ok = t.dismount(q, W);
+            return std::make_pair(ok, t);
+        };
+        // the moored plane's own spot: slow climbs out onto the play area, fast is told to slow down, airborne to land
+        Player q;
+        Vector3 m = SP.moored.empty() ? Vector3{} : SP.moored[0].pos;
+        auto fast = tryAt(m.x, m.z, 12, true, q);
+        auto air = tryAt(m.x, m.z, 30, false, q);
+        auto slow = tryAt(m.x, m.z, 2, true, q);
+        snprintf(b, sizeof b, "fast=%d/%d air=%d/%d slow=%d at %.0f,%.0f in play=%d", fast.first, fast.second.refusal, air.first,
+                 air.second.refusal, slow.first, q.pos.x, q.pos.z, W.inPlay(q.pos.x, q.pos.z));
+        check(!fast.first && fast.second.refusal == Seaplanes::REF_TOO_FAST && !air.first && air.second.refusal == Seaplanes::REF_FLYING &&
+              slow.first && slow.second.refusal == Seaplanes::REF_NONE && W.inPlay(q.pos.x, q.pos.z), "seaplane climb-out at moorings", b);
+        // all over the bay: slow, on the water, by a shore that's only outside the play area -> "can't go ashore here"
+        int oob = 0, oobFast = 0, slowDown = 0, wrong = 0;
+        for (float x = WX0 + 120; x < WX1 - 120; x += 40)
+            for (float z = WZ0 + 120; z < WZ1 - 120; z += 40) {
+                if (W.terrain(x, z) >= 0.05f || W.solidAt({x, 0.8f, z})) continue;
+                Player r;
+                auto res = tryAt(x, z, 2, true, r);
+                if (res.first) { if (!W.inPlay(r.pos.x, r.pos.z)) wrong++; continue; }
+                const char* msg = res.second.refusalMsg();
+                if (strstr(msg, "Slow down")) slowDown++;   // slow already: telling them to slow down is the bug
+                if (res.second.refusal != Seaplanes::REF_OUT_OF_PLAY) continue;
+                oob++;
+                if (!strstr(msg, "Can't go ashore")) wrong++;
+                if (tryAt(x, z, 12, true, r).second.refusal == Seaplanes::REF_OUT_OF_PLAY) oobFast++;   // slowing down wouldn't help
+            }
+        snprintf(b, sizeof b, "%d out-of-play shores (%d fast), %d slow-down, %d wrong", oob, oobFast, slowDown, wrong);
+        check(oob > 20 && oobFast == oob && slowDown == 0 && wrong == 0, "seaplane: no shore leave outside play", b);
+    }
+    {   // Telegraph Hill: the asphalt lies on the ground mesh all over (no grass breaking up through it on the steep
+        // climb), and no street runs into Coit Tower's base
+        int tris = 0, under = 0;
+        float worst = 1e9f;
+        for (auto& kv : W.builders) {
+            const MeshBuilder& m = kv.second;
+            size_t r = 0;
+            for (size_t t = 0; t + 2 < m.count(); t += 3) {
+                while (r < m.c.size() && m.c[r].end <= t) r++;
+                if (r == m.c.size() || memcmp(m.c[r].d, &C_ASPHALT, 4)) continue;
+                Vector3 P[3];
+                for (int k = 0; k < 3; k++) P[k] = {m.v[3 * (t + k)], m.v[3 * (t + k) + 1], m.v[3 * (t + k) + 2]};
+                float cx = (P[0].x + P[1].x + P[2].x) / 3, cz = (P[0].z + P[1].z + P[2].z) / 3;
+                if (cx < 770 || cx > 990 || cz < -990 || cz > -760) continue;
+                tris++;
+                for (int a = 0; a <= 4; a++)
+                    for (int c = 0; a + c <= 4; c++) {   // points spread over the triangle
+                        float u = a / 4.f, v = c / 4.f, w0 = 1 - u - v;
+                        Vector3 q = {P[0].x * w0 + P[1].x * u + P[2].x * v, P[0].y * w0 + P[1].y * u + P[2].y * v,
+                                     P[0].z * w0 + P[1].z * u + P[2].z * v};
+                        float d = q.y - W.terrain(q.x, q.z);
+                        worst = std::min(worst, d);
+                        if (d < 0.03f) under++;
+                    }
+            }
+        }
+        int intoBase = 0;   // street centerline samples within a half street width of the base block (880, -880) +-14
+        for (int j = 0; j < W.sf.nj; j++)
+            for (int i = 0; i < W.sf.ni; i++)
+                for (int d = 0; d < 4; d += 2) {
+                    if (!W.sf.nodeOk(i, j) || !W.sf.edge(i, j, d)) continue;
+                    Vector2 a = W.sf.node(i, j), e = W.sf.node(i + DI[d], j + DJ[d]);
+                    for (int k = 0; k <= 20; k++) {
+                        float x = a.x + (e.x - a.x) * k / 20, z = a.y + (e.y - a.y) * k / 20;
+                        if (fabsf(x - 880) < 14 + W.sf.roadHalf && fabsf(z + 880) < 14 + W.sf.roadHalf) intoBase++;
+                    }
+                }
+        snprintf(b, sizeof b, "%d tris, %d samples under, lowest %.3f m; %d into Coit base", tris, under, worst, intoBase);
+        check(tris > 100 && under == 0 && intoBase == 0, "Telegraph Hill road on the ground", b);
+    }
     {   // City Hall: riding south from Civic Center, the front columns and the portico behind them stop the skater
         // (they were mesh only, so the skater rode through the column line at z 351 into the portico at z 352..358)
         float cx = (gx(14) + gx(15)) / 2, cz = (gz(13) + gz(14)) / 2;
@@ -1953,6 +2078,44 @@ int main() {
         snprintf(b, sizeof b, "%d piers, %d decks above the water, %d of %d rides from the promenade onto the deck (least x %.1f)", piers, dry,
                  rode, rides, worstX);
         check(piers == 7 && dry == piers && rode == rides, "Embarcadero piers skateable from shore", b);
+    }
+    {   // roads far from the origin are draped whole: strips laid in Menlo Park (El Camino Real), Oakland and out east,
+        // straight and diagonal, wide and paint-thin, cover their full area on the ground (float rounding in world
+        // coordinates once dropped pieces there). Runs last: it adds geometry to the world.
+        struct Strip { Vector2 a, b; float half; };
+        const float ecr = W.mp.node(6, 0).x;
+        const Strip strips[] = {{{ecr, 8800}, {ecr, 10400}, 11}, {{ecr - 300, 9000}, {ecr + 500, 9700}, 11},
+                                {{4093, 0}, {4093, 900}, 0.06f}, {{4080, 500}, {4600, 820}, 7}, {{6000, 3000}, {6300, 3000}, 0.06f},
+                                {{4088.5f, 500}, {4091.1f, 500}, 0.3f}};
+        int bad = 0;
+        char det[96] = "";
+        for (int k = 0; k < (int)(sizeof strips / sizeof strips[0]); k++) {
+            const Strip& st = strips[k];
+            Color mark = col(1, 2, 3 + k, M_GROUND);   // a color nothing else uses
+            roadStrip(W, st.a, st.b, st.half, st.half, 0, 0.08f, mark);
+            double area = 0;
+            int under = 0;
+            for (auto& kv : W.builders) {
+                const MeshBuilder& m = kv.second;
+                size_t r = 0;
+                for (size_t t = 0; t + 2 < m.count(); t += 3) {
+                    while (r < m.c.size() && m.c[r].end <= t) r++;
+                    if (r == m.c.size() || memcmp(m.c[r].d, &mark, 4)) continue;
+                    double ax = m.v[3 * t], az = m.v[3 * t + 2];
+                    double ux = m.v[3 * (t + 1)] - ax, uz = m.v[3 * (t + 1) + 2] - az, vx = m.v[3 * (t + 2)] - ax, vz = m.v[3 * (t + 2) + 2] - az;
+                    area += (ux * vz - vx * uz) / 2;
+                    for (int q = 0; q < 3; q++)
+                        if (m.v[3 * (t + q) + 1] - W.terrain(m.v[3 * (t + q)], m.v[3 * (t + q) + 2]) < 0.05f) under++;
+                }
+            }
+            double want = Vector2Distance(st.a, st.b) * 2 * st.half;
+            if (fabs(area - want) > want * 0.002 + 0.01 || under) {
+                bad++;
+                snprintf(det, sizeof det, " (strip %d: %.2f of %.2f m2, %d under)", k, area, want, under);
+            }
+        }
+        snprintf(b, sizeof b, "%d of %d strips short%s", bad, (int)(sizeof strips / sizeof strips[0]), det);
+        check(bad == 0, "far-off roads draped whole", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

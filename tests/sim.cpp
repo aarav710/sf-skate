@@ -485,14 +485,27 @@ int main() {
         snprintf(b, sizeof b, "splash=%d respawned at x=%.1f y=%.1f state=%d", splash, s.p.pos.x, s.p.pos.y, s.p.state);
         check(splash && s.p.pos.y > 0.5f && s.p.state == Player::RIDE, "splash + respawn", b);
     }
-    {   // the splash message names the water: bay, fountain, lake, pool (rolling in and dropping in)
-        float sea = -1440;
+    {   // the splash message names the water: ocean, bay, fountain, lake, lagoon, pool, salt pond (rolling in and dropping in)
+        float sea = -1440;   // the Pacific, west of the city
         while (!W.isWater(sea, 0, 0) && sea > -3000) sea -= 5;
-        const Pond* pool = nullptr;   // a peninsula backyard pool, up on the hills
-        for (auto& pd : W.ponds) if (std::string(pd.kind) == "pool") { pool = &pd; break; }
+        float bay = 1500;    // the bay, out past the ends of the Embarcadero piers
+        while (!W.isWater(bay, -730, 0) && bay < 3000) bay += 5;
+        auto pondOf = [](const char* kind) -> const Pond* {
+            for (auto& pd : W.ponds) if (std::string(pd.kind) == kind) return &pd;
+            return nullptr;
+        };
+        const Pond* pool = pondOf("pool");   // a peninsula backyard pool, up on the hills
+        const Pond* lagoon = pondOf("lagoon");   // by the Palace of Fine Arts
+        const Pond* salt = pondOf("salt pond");   // past the Menlo Park bayfront
+        auto mx = [](const Pond* pd) { return pd ? (pd->x0 + pd->x1) / 2 : 0.f; };
+        auto mz = [](const Pond* pd) { return pd ? (pd->z0 + pd->z1) / 2 : 0.f; };
+        check(std::string(W.district(sea - 20, 0)) == "Pacific Ocean" && std::string(W.district(bay + 20, -730)) == "San Francisco Bay",
+              "splash test spots are in the ocean and the bay", "");
         struct { float x, z; const char* msg; } spots[] = {
-            {sea - 20, 0, "Splash! Into the bay"}, {1244.5f, -304, "Splash! Into the fountain"}, {-800, 387, "Splash! Into the lake"},
-            {pool ? (pool->x0 + pool->x1) / 2 : 0, pool ? (pool->z0 + pool->z1) / 2 : 0, "Splash! Into the pool"}};
+            {sea - 20, 0, "Splash! Into the ocean"}, {bay + 20, -730, "Splash! Into the bay"},
+            {1244.5f, -304, "Splash! Into the fountain"}, {-800, 387, "Splash! Into the lake"},
+            {mx(lagoon), mz(lagoon), "Splash! Into the lagoon"}, {mx(pool), mz(pool), "Splash! Into the pool"},
+            {mx(salt), mz(salt), "Splash! Into the salt pond"}};
         for (auto& sp : spots)
             for (int air = 0; air < 2; air++) {
                 Sim s; s.spawn(sp.x, sp.z, 0);

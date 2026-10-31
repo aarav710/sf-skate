@@ -305,7 +305,9 @@ void Player::air(float dt, const Input& in, World& w) {
     // walls
     Vector2 n;
     float hitSize;
-    if (w.collideSwept(prevPos, pos, 0.35f, pos.y, 1.7f, &n, &hitSize)) {
+    // feet height: the higher of the frame's start and end, so a fast drop past a deck edge isn't read as a wall
+    // on the earlier, higher sub-steps of the sweep
+    if (w.collideSwept(prevPos, pos, 0.35f, std::max(prevY, pos.y), 1.7f, &n, &hitSize)) {
         bool pole = hitSize < 1.2f;
         float into = -(vel.x * n.x + vel.z * n.y);
         if (into > 9.f) { bail(pole ? "Hit a pole" : "Flew into a wall"); return; }

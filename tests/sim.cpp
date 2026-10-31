@@ -1103,6 +1103,40 @@ int main() {
                  (int)grid.size(), gridOv, longest, longestIn, avg);
         check(gridOv < 15 && longest < 120 && longestIn < 30 && avg > 6.5f, "Grid traffic takes turns", b);
     }
+    {   // a stopped vehicle is solid all the way to its ends: roll at 3 m/s into each end of each type, on the axis and
+        // near a corner, on the runway (flat and open), and the skater stops at the body (or bails), not inside it
+        int bad = 0, tot = 0;
+        std::string det;
+        struct { int type; const char* n; } kinds[] = {{CT_SEDAN, "car"}, {CT_BUS, "bus"}, {CT_CABLECAR, "cable car"},
+                                                       {CT_STREETCAR, "streetcar"}, {CT_LRV, "LRV"}, {CT_PEDALBUS, "pedal bus"}};
+        for (auto& k : kinds) {
+            int type = k.type;
+            const CarModel& m = carModel(type);
+            float worst = 1e9f;
+            for (int end = -1; end <= 1; end += 2)
+                for (float lat : {0.f, m.halfWid - 0.2f}) {
+                    Traffic T;
+                    Car c; c.type = type; c.speed = 0; c.stopT = 1e9f; c.placed = true;
+                    c.pos = {1950, W.ground(1950, 2262, 500), 2262};
+                    T.cars.push_back(c);
+                    Sim s; s.spawn(1950 + end * (m.halfLen + 2.5f), 2262 + lat, end > 0 ? PI : 0, 3);
+                    float reach = 1e9f;
+                    for (int f = 0; f < 60 * 3 && s.p.state != Player::BAIL; f++) {
+                        s.run(1, Input{});
+                        T.interact(s.p);
+                        reach = std::min(reach, fabsf(s.p.pos.x - 1950));
+                    }
+                    tot++;
+                    if (s.p.state != Player::BAIL && reach < m.halfLen + 0.2f) bad++;
+                    if (s.p.state != Player::BAIL) worst = std::min(worst, reach - m.halfLen);
+                }
+            char one[64];
+            snprintf(one, sizeof one, "%s%s %+.2f", det.empty() ? "" : ", ", k.n, worst);
+            det += one;
+        }
+        snprintf(b, sizeof b, "%d of %d rides got inside; closest stop, m outside the body: %s", bad, tot, det.c_str());
+        check(bad == 0, "Vehicles are solid to their ends", b);
+    }
     {   // the "SFO Airport" label covers the airport fill, and not the East Bay shore and hills beyond it
         int wrong = 0, land = 0, missed = 0, fill = 0;
         for (float x = AX0 + 10; x < WX1; x += 40)

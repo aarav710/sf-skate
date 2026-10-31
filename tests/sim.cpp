@@ -797,6 +797,64 @@ int main() {
         snprintf(b, sizeof b, "overlapping: same road %.1f s, crossing %.1f s; longest stop %.0f s", sameOv, crossOv, longestStop);
         check(sameOv == 0 && crossOv < 20 && longestStop < 60, "Traffic keeps out of itself", b);
     }
+    {   // street-grid cars take turns at intersections instead of driving through each other, and nobody gets
+        // gridlocked waiting on everyone else: the whole city, a few minutes of traffic. Crossings of a main road
+        // (Market St, the bridges and highways) go by its rules, checked above, so this looks at the rest of the grid.
+        auto overlap = [](const Car& a, const Car& b) {   // oriented boxes, a little inside the drawn bodies
+            const CarModel &ma = carModel(a.type), &mb = carModel(b.type);
+            if (fabsf(a.pos.y - b.pos.y) > 3) return false;
+            Vector2 ax[4] = {{cosf(a.yaw), sinf(a.yaw)}, {-sinf(a.yaw), cosf(a.yaw)}, {cosf(b.yaw), sinf(b.yaw)}, {-sinf(b.yaw), cosf(b.yaw)}};
+            Vector2 d = {b.pos.x - a.pos.x, b.pos.z - a.pos.z};
+            for (auto& n : ax) {
+                float ra = (ma.halfLen - 0.15f) * fabsf(Vector2DotProduct(ax[0], n)) + (ma.halfWid - 0.15f) * fabsf(Vector2DotProduct(ax[1], n));
+                float rb = (mb.halfLen - 0.15f) * fabsf(Vector2DotProduct(ax[2], n)) + (mb.halfWid - 0.15f) * fabsf(Vector2DotProduct(ax[3], n));
+                if (fabsf(Vector2DotProduct(d, n)) > ra + rb) return false;
+            }
+            return true;
+        };
+        // 20 m cells within 120 m of a main road
+        const float MC = 20, MR = 120;
+        std::vector<int64_t> nearMain;
+        auto cellOf = [&](float x, float z) { return (int64_t)floorf(x / MC) << 32 ^ (int64_t)(uint32_t)(int)floorf(z / MC); };
+        for (auto& P : W.carPaths)
+            for (float s = 0; s <= P.len; s += 4) {
+                Vector2 q = P.at(s);
+                for (float dz = -MR; dz <= MR; dz += MC)
+                    for (float dx = -MR; dx <= MR; dx += MC)
+                        if (dx * dx + dz * dz <= MR * MR) nearMain.push_back(cellOf(q.x + dx, q.y + dz));
+            }
+        std::sort(nearMain.begin(), nearMain.end());
+        nearMain.erase(std::unique(nearMain.begin(), nearMain.end()), nearMain.end());
+        auto away = [&](const Car& c) { return !std::binary_search(nearMain.begin(), nearMain.end(), cellOf(c.pos.x, c.pos.z)); };
+        Traffic T; T.init(W);
+        Player pl; pl.spawn({0, W.ground(0, 0, 1000) + 200, 0}, 0);   // the skater out of everyone's way
+        std::vector<int> grid;
+        for (size_t i = 0; i < T.cars.size(); i++) if (T.cars[i].mode == 0) grid.push_back((int)i);
+        std::vector<float> still(T.cars.size(), 0);
+        float gridOv = 0, longest = 0, dist = 0;
+        const int SECS = 240;
+        for (int f = 0; f < 60 * SECS; f++) {
+            T.update(1.f / 60, W, pl);
+            std::sort(grid.begin(), grid.end(), [&](int a, int b) { return T.cars[a].pos.x < T.cars[b].pos.x; });
+            bool counting = f >= 60 * 10;   // after everyone's settled in from where they were dropped
+            for (size_t k = 0; k < grid.size(); k++) {
+                const Car& a = T.cars[grid[k]];
+                if (!counting) continue;
+                dist += a.speed / 60;
+                if (!away(a)) { still[grid[k]] = 0; continue; }
+                still[grid[k]] = a.speed < 0.3f ? still[grid[k]] + 1.f / 60 : 0;
+                longest = std::max(longest, still[grid[k]]);
+                for (size_t m = k + 1; m < grid.size() && T.cars[grid[m]].pos.x - a.pos.x < 25; m++) {
+                    const Car& b = T.cars[grid[m]];
+                    if (fabsf(a.pos.z - b.pos.z) < 25 && overlap(a, b)) gridOv += 1.f / 60;
+                }
+            }
+        }
+        float avg = dist / ((SECS - 10) * (float)grid.size());
+        snprintf(b, sizeof b, "%d grid cars, off the main roads: overlapping %.1f s, longest stop %.0f s; average speed %.1f m/s",
+                 (int)grid.size(), gridOv, longest, avg);
+        check(gridOv < 5 && longest < 120 && avg > 6.5f, "Grid traffic takes turns", b);
+    }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;
 }

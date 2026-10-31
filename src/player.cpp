@@ -11,6 +11,22 @@ static float groundRate(World& w, Vector3 p, Vector3 f, float speed) {
     return clampf(speed * (hF - hB), -30, 30);
 }
 
+// How high a board at p can roll to going dist along dir: steps along over each surface it can ride onto from
+// where it is (a curb-sized lip, the low edge of a ramp, on up the ramp and onto the deck it tops out on) and
+// returns the highest point reached. A stair riser or a ledge stops the climb.
+static float rollReach(World& w, Vector3 p, Vector3 dir, float dist) {
+    int n = std::max(1, (int)ceilf(dist / 0.1f));
+    Vector2 prev = {p.x, p.z};
+    float y = p.y, top = p.y;
+    for (int i = 1; i <= n; i++) {
+        Vector2 q = {p.x + dir.x * dist * i / n, p.z + dir.z * dist * i / n};
+        y = w.skaterGround(q.x, q.y, y, ROLL_UP, &prev);   // (each lip measured at the previous step)
+        top = std::max(top, y);
+        prev = q;
+    }
+    return top;
+}
+
 // rise per metre of the ground under a board at p heading along f, as the ride physics feels it
 static float boardSlope(World& w, Vector3 p, Vector3 f) {
     float hF = w.skaterGround(p.x + f.x * 0.7f, p.z + f.z * 0.7f, p.y + 0.2f);
@@ -206,9 +222,13 @@ void Player::ride(float dt, const Input& in, World& w) {
     speed = clampf(speed, std::max(-40.f, std::min(-9.f, speed0)), 40);
     crouch = lerpf(crouch, in.tuck ? 0.85f : (in.ollieHeld ? 0.6f : 0.12f), 1 - expf(-dt * 10));
 
+    // a rolling board only rides up curb-sized lips (ROLL_UP): stair risers and ledges are walls until you ollie.
+    // `feet` is how high it can roll to over this frame's move and the collision radius beyond it (up a ramp, onto
+    // the deck or step a ramp tops out on); anything standing over that by more than a curb is a wall
     Vector3 np = Vector3Add(pos, Vector3Scale(f, speed * dt));
-    Vector2 n;
-    if (w.collideSwept(pos, np, 0.35f, pos.y, 1.7f, &n)) {
+    Vector2 n, from = {pos.x, pos.z};
+    float feet = rollReach(w, pos, speed < 0 ? Vector3Negate(f) : f, fabsf(speed) * dt + 0.35f);
+    if (w.collideSwept(pos, np, 0.35f, feet, 1.7f, &n, nullptr, ROLL_UP, true)) {
         Vector3 v = Vector3Scale(f, speed);
         float into = -(v.x * n.x + v.z * n.y);
         if (into > 8.5f) { pos = np; bail("Slammed into a wall"); return; }
@@ -223,7 +243,7 @@ void Player::ride(float dt, const Input& in, World& w) {
             speed = copysignf(s * perFrame60(0.85f, dt), speed);   // scraping along a wall
         }
     }
-    float g = w.skaterGround(np.x, np.z, pos.y);
+    float g = w.skaterGround(np.x, np.z, feet, ROLL_UP, &from);
     float predicted = pos.y + rideVy * dt - 0.5f * GRAVITY * dt * dt;
     if (g < predicted - 0.06f && (fabsf(speed) > 1.5f || g < pos.y - STEP_UP)) {
         // the ground dropped away: we're flying (ramp lip, stairs, crest, or rolling slowly off a real drop)
@@ -238,8 +258,9 @@ void Player::ride(float dt, const Input& in, World& w) {
         return;
     }
     Vector3 f2 = fwd();
-    float hF2 = w.skaterGround(np.x + f2.x * 0.5f, np.z + f2.z * 0.5f, g + 0.2f);
-    float hB2 = w.skaterGround(np.x - f2.x * 0.5f, np.z - f2.z * 0.5f, g + 0.2f);
+    Vector2 at = {np.x, np.z};   // (the slope the board is on: a lip ahead it can't roll up isn't a climb)
+    float hF2 = w.skaterGround(np.x + f2.x * 0.5f, np.z + f2.z * 0.5f, g, ROLL_UP, &at);
+    float hB2 = w.skaterGround(np.x - f2.x * 0.5f, np.z - f2.z * 0.5f, g, ROLL_UP, &at);
     // same edge rule as the slope above: a sample past a lip reads the ground far below, which would make
     // the climb off a kicker a huge plunge (and the roll-off a "Way too much drop" bail). Continue the surface instead
     bool edgeF2 = hF2 < g - STEP_UP, edgeB2 = hB2 < g - STEP_UP;

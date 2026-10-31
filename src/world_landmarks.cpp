@@ -602,17 +602,19 @@ void World::buildWaterfront() {
     // Piers along the Embarcadero
     for (float zc : {-800.f, -660.f, -520.f, -380.f, 50.f, 180.f, 480.f}) {
         float root = 1290, x1 = 1480;   // the shed and the piles stand from the root out
-        float x0 = root, y = terrain(root, zc) + 0.02f;
+        auto lowest = [&](float x) {
+            float h = 1e9f;
+            for (float z = zc - 15; z <= zc + 15; z += 2.5f) h = std::min(h, terrain(x, z));
+            return h;
+        };
+        // level with the lowest point of the promenade across its root, so nowhere along it is there a lip a
+        // rolling board can't ride up (the promenade falls across the width)
+        float x0 = root, y = lowest(root) + 0.02f;
         if (y < 2.4f) {
             // The north end of the promenade runs out past the seawall: at z -800 the shore has already dropped into
             // the bay at the root. Run the deck back west over the shore to where the promenade is still up at its
             // height across the whole width, and build it at that height, so you roll straight off the promenade
             // onto it (never under the bay, and no step up out of the water at its end).
-            auto lowest = [&](float x) {
-                float h = 1e9f;
-                for (float z = zc - 15; z <= zc + 15; z += 2.5f) h = std::min(h, terrain(x, z));
-                return h;
-            };
             while (x0 > root - 40 && lowest(x0) < 2.4f) x0 -= 1;
             y = std::max(lowest(x0), 2.0f) + 0.02f;
         }
@@ -811,7 +813,7 @@ void World::buildSkateSpots() {
         };
         ledge(cx - 25, cz - 15, cx - 10, cz - 14.2f, 0.55f);
         ledge(cx + 10, cz + 14.2f, cx + 25, cz + 15, 0.55f);
-        ledge(cx - 15, cz + 20, cx - 14.2f, cz + 34, 0.55f);   // (over STEP_UP, so it takes an ollie to get on)
+        ledge(cx - 15, cz + 20, cx - 14.2f, cz + 34, 0.55f);   // (like every ledge, over ROLL_UP: it takes an ollie to get on)
         // a terrace dug into the hill: level with the ground on its uphill (west) side, with stairs and handrails
         // running down its downhill (east) face to the plaza below. The ground keeps falling under the stairs, so the
         // bottom step is set just above the highest ground under it (its face then stands only ~0.3 m over the plaza

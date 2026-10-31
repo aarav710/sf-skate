@@ -13,7 +13,8 @@ constexpr float AIRPORT_Y = 6.0f; // SFO sits on a raised plateau above the bay
 constexpr float AX0 = 1300, AX1 = 2720, AZ0 = 1550, AZ1 = 2540;
 // Menlo Park, at the south end of the Caltrain line down the Peninsula
 constexpr float MX0 = 1350, MX1 = 3700, MZ0 = 8750, MZ1 = 10450;
-constexpr float STEP_UP = 0.5f;   // tallest ledge you can roll onto without jumping
+constexpr float STEP_UP = 0.5f;   // tallest step you can walk up (or land on and skim onto) without jumping
+constexpr float ROLL_UP = 0.15f;  // tallest lip a rolling board rides up (a curb): stair risers and ledges take an ollie
 constexpr float ROAD_HALF = 7.0f;
 constexpr float BLOCK_INSET = 11.0f; // road half width + sidewalk
 
@@ -160,14 +161,21 @@ struct World {
     // ---- queries ----
     float terrain(float x, float z) const;                    // bare ground height, exactly as the ground mesh draws it
     float terrainRaw(float x, float z) const;                 // the 4 m heightfield itself (what the mesh is built from)
-    float ground(float x, float z, float yRef) const;         // highest walkable surface <= yRef+STEP_UP
+    // highest walkable surface <= yRef+stepUp. lipAt (a rolling board: where it is now): each surface's step is
+    // measured there instead, so a ramp or sloped deck the board is on (or enters at its low edge) never reads as a
+    // step however far it rises in one frame, while a box's lip, or a ramp's side, still does
+    float ground(float x, float z, float yRef, float stepUp = STEP_UP, const Vector2* lipAt = nullptr) const;
     // ground for the skater: the same, plus the roofs of the vehicles in vehicleTops (the cars' own placement and
     // everyone else keep to ground(), or a car on a bridge deck would climb onto its own roof)
-    float skaterGround(float x, float z, float yRef) const;
-    bool collide(Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr) const; // push out of walls; size = widest box hit
+    float skaterGround(float x, float z, float yRef, float stepUp = STEP_UP, const Vector2* lipAt = nullptr) const;
+    // push out of walls: anything standing over feetY+stepUp (measured at lipAt if given, as for ground); size = widest box hit
+    bool collide(Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr,
+                 float stepUp = STEP_UP, const Vector2* lipAt = nullptr) const;
     // collide() along the move from `from` to p in short steps, so a fast mover can't skip through a thin wall or pole;
-    // after a hit the rest of the move slides along the wall. p ends at the resolved position
-    bool collideSwept(Vector3 from, Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr) const;
+    // after a hit the rest of the move slides along the wall. p ends at the resolved position.
+    // lipAtFrom: measure each surface's step at `from` (a rolling board, as for ground's lipAt)
+    bool collideSwept(Vector3 from, Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr,
+                      float stepUp = STEP_UP, bool lipAtFrom = false) const;
     bool solidAt(Vector3 p, bool bigProps = false, bool piers = false) const;   // buildings/decks (+ big prop boxes: the camera; + piers: boats)
     float ceiling(float x, float z, float feetY) const;        // lowest underside above the feet (1e9 if open sky)
     int houseAt(float x, float z, float y) const;              // index into houses if inside one, else -1

@@ -1,5 +1,56 @@
 #include "birds.h"
 
+// How far a gull's circle can reach from its home: the center wanders up to 25 m each way and the radius swells by a
+// quarter (see update).
+static float gullReach(const Bird& b) { return 25.f * 1.415f + b.radius * 1.25f + 2.f; }
+
+// Lift each gull's circle clear of anything it would cut through: the hills under it, and any building or deck in
+// the band it flies in (it rises and dips 3 m). Decks well above the band (a bridge it wheels under) stay overhead.
+static void clearGulls(std::vector<Bird>& birds, const World& w) {
+    std::vector<std::vector<int>> near(birds.size());
+    for (int k = 0; k < (int)w.plats.size(); k++) {
+        const Platform& pl = w.plats[k];
+        if (pl.kind != PK_BUILDING && pl.kind != PK_DECK) continue;
+        if (std::max(pl.h0, pl.h1) < 8.f) continue;   // lower than any gull flies
+        for (size_t i = 0; i < birds.size(); i++) {
+            const Bird& b = birds[i];
+            if (!b.gull) continue;
+            float cx = clampf(b.home.x, pl.x0, pl.x1), cz = clampf(b.home.z, pl.z0, pl.z1);
+            if (sq(cx - b.home.x) + sq(cz - b.home.z) < sq(gullReach(b))) near[i].push_back(k);
+        }
+    }
+    for (size_t i = 0; i < birds.size(); i++) {
+        Bird& b = birds[i];
+        if (!b.gull) continue;
+        float R = gullReach(b), hill = -1e9f;
+        for (float x = -R; x <= R; x += 8)
+            for (float z = -R; z <= R; z += 8)
+                if (x * x + z * z <= R * R) hill = std::max(hill, w.terrain(b.home.x + x, b.home.z + z));
+        b.alt = std::max(b.alt, hill + 6.f);
+        for (bool moved = true; moved;) {   // raising it can bring the next roof into its band
+            moved = false;
+            for (int k : near[i]) {
+                const Platform& pl = w.plats[k];
+                float top = std::max(pl.h0, pl.h1);
+                if (pl.base < b.alt + 5.f && top > b.alt - 5.f) { b.alt = top + 5.f; moved = true; }
+            }
+        }
+    }
+}
+
+// Can a pigeon fly from a to b and wheel round b (it loops about 8 m out) without going through a wall?
+static bool clearFlight(const World& w, Vector3 a, Vector3 b) {
+    int n = (int)(Vector3Distance(a, b) / 2.f) + 1;
+    for (int s = 1; s <= n; s++)
+        if (w.solidAt(Vector3Lerp(a, b, (float)s / n))) return false;
+    for (int s = 0; s < 8; s++) {
+        float t = s * TAU_F / 8;
+        for (float r : {5.f, 10.f})
+            if (w.solidAt({b.x + cosf(t) * r, b.y, b.z + sinf(t) * r})) return false;
+    }
+    return true;
+}
+
 void Birds::init(const World& w) {
     RNG r(8080);
     // gulls: a few over each stretch of waterfront (Pier 39 and its sea lions, the Wharf, the Ferry Building, the
@@ -48,6 +99,7 @@ void Birds::init(const World& w) {
             b.t = ar.range(0, 100);
             birds.push_back(b);
         }
+    clearGulls(birds, w);
 }
 
 void Birds::update(float dt, const World& w, Vector3 sk, float skSpeed) {
@@ -81,10 +133,19 @@ void Birds::update(float dt, const World& w, Vector3 sk, float skSpeed) {
                             o.state = 1;
                             o.t = 0;
                             Vector3 away = Vector3Normalize({o.pos.x - sk.x + 0.01f, 0, o.pos.z - sk.z});
-                            float a = atan2f(away.z, away.x) + sinf(o.phase * 13) * 0.7f;
+                            float a0 = atan2f(away.z, away.x) + sinf(o.phase * 13) * 0.7f;
+                            float far0 = 35 + 20 * fabsf(sinf(o.phase * 3)), up = 10 + 4 * sinf(o.phase);
+                            // away from the skater if the way is open, else the nearest heading (then a shorter hop)
+                            // that clears the buildings round the plaza; failing all that, straight up over home
+                            Vector3 from = Vector3Add(o.home, {0, 1.5f, 0});
+                            float a = a0;
+                            o.target = Vector3Add(o.home, {0, up, 0});
+                            for (int tr = 0; tr < 27; tr++) {
+                                float aa = a0 + ((tr % 9 + 1) / 2) * (tr % 2 ? 0.7f : -0.7f), far = far0 * (1 - 0.3f * (tr / 9));
+                                Vector3 t = {o.home.x + cosf(aa) * far, o.home.y + up, o.home.z + sinf(aa) * far};
+                                if (clearFlight(w, from, t)) { a = aa; o.target = t; break; }
+                            }
                             o.vel = {cosf(a) * 6.f, 5.5f + 1.5f * sinf(o.phase * 5), sinf(a) * 6.f};
-                            float far = 35 + 20 * fabsf(sinf(o.phase * 3));
-                            o.target = {o.home.x + cosf(a) * far, o.home.y + 10 + 4 * sinf(o.phase), o.home.z + sinf(a) * far};
                         }
                     evScatter = true;
                 }
@@ -97,7 +158,25 @@ void Birds::update(float dt, const World& w, Vector3 sk, float skSpeed) {
             float L = Vector3Length(want);
             Vector3 dv = L > 0.1f ? Vector3Scale(want, (back > 0 ? 7.f : 9.f) / L) : Vector3Zero();
             if (back == 0 && L < 8) { dv = {-want.z, 0, want.x}; dv = Vector3Scale(Vector3Normalize(dv), 8.f); } // circle the target
-            b.vel = Vector3Lerp(b.vel, dv, 1 - expf(-dt * 1.6f));
+            float turn = 1.6f;
+            // something solid half a second ahead (a column, the corner of a building as it loops round): bank
+            // hard to whichever side is open, or pull up over it
+            auto blocked = [&](Vector3 v) {
+                for (float s : {0.1f, 0.25f, 0.5f})
+                    if (w.solidAt(Vector3Add(b.pos, Vector3Scale(v, s)))) return true;
+                return false;
+            };
+            if (blocked(b.vel)) {
+                float v = std::max(Vector3Length({b.vel.x, 0, b.vel.z}), 6.f), h = atan2f(b.vel.z, b.vel.x);
+                float side = b.vel.x * want.z - b.vel.z * want.x >= 0 ? 1.f : -1.f;   // the side its goal is on first
+                dv = {0, 7.f, 0};
+                for (float da : {1.1f, -1.1f, 1.9f, -1.9f}) {
+                    Vector3 sw = {cosf(h + side * da) * v, b.vel.y, sinf(h + side * da) * v};
+                    if (!blocked(sw)) { dv = sw; break; }
+                }
+                turn = 8.f;
+            }
+            b.vel = Vector3Lerp(b.vel, dv, 1 - expf(-dt * turn));
             b.pos = Vector3Add(b.pos, Vector3Scale(b.vel, dt));
             b.yaw = atan2f(b.vel.z, b.vel.x);
             if (back > 0 && L < 3.f) { b.state = 2; b.t = 0; }

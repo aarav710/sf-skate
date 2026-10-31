@@ -113,7 +113,8 @@ void JetSkis::update(float dt, const Input& in, bool boost, Player& p, const Wor
     float tl = -in.steer * clampf(fabsf(speed) / 18.f, 0.15f, 1.f) * 0.4f;
     lean = lerpf(lean, tl, 1 - expf(-dt * 5));
     pitch = lerpf(pitch, clampf(speed / 22.f, 0, 1) * 0.16f - (in.brake ? 0.05f : 0), 1 - expf(-dt * 3));
-    p.safePos = {np.x, 0, np.z}; p.safeT = 0;
+    // p.safePos is deliberately left alone: it still holds the last safe spot on land from before boarding,
+    // so a reset (R) or a bust while riding puts you back ashore rather than onto the open water
     // wake and spray
     static RNG sr(31);
     if (speed > 4) {

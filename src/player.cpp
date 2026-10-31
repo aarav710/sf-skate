@@ -202,7 +202,7 @@ void Player::ride(float dt, const Input& in, World& w) {
 
     Vector3 np = Vector3Add(pos, Vector3Scale(f, speed * dt));
     Vector2 n;
-    if (w.collide(np, 0.35f, pos.y, 1.7f, &n)) {
+    if (w.collideSwept(pos, np, 0.35f, pos.y, 1.7f, &n)) {
         Vector3 v = Vector3Scale(f, speed);
         float into = -(v.x * n.x + v.z * n.y);
         if (into > 8.5f) { pos = np; bail("Slammed into a wall"); return; }
@@ -264,6 +264,7 @@ void Player::air(float dt, const Input& in, World& w) {
     if (bouncing && w.skaterGround(pos.x, pos.z, pos.y + 0.2f) < bounceY + bounceRate * airTime - 1.0f) bouncing = ollieQueued = false;
     pitch = lerpf(pitch, 0.f, 1 - expf(-dt * 3));
     float prevY = pos.y;
+    Vector3 prevPos = pos;   // walls are checked along the whole move, not just where it ends
     vy -= GRAVITY * dt;
     pos.x += vel.x * dt;
     pos.z += vel.z * dt;
@@ -306,7 +307,9 @@ void Player::air(float dt, const Input& in, World& w) {
     // walls
     Vector2 n;
     float hitSize;
-    if (w.collide(pos, 0.35f, pos.y, 1.7f, &n, &hitSize)) {
+    // feet height: the higher of the frame's start and end, so a fast drop past a deck edge isn't read as a wall
+    // on the earlier, higher sub-steps of the sweep
+    if (w.collideSwept(prevPos, pos, 0.35f, std::max(prevY, pos.y), 1.7f, &n, &hitSize)) {
         bool pole = hitSize < 1.2f;
         float into = -(vel.x * n.x + vel.z * n.y);
         if (into > 9.f) { bail(pole ? "Hit a pole" : "Flew into a wall"); return; }
@@ -522,7 +525,7 @@ void Player::bailUpdate(float dt, World& w) {
     if (!splashed) {
         Vector3 np = Vector3Add(pos, Vector3Scale(fwd(), speed * dt));
         Vector2 n;
-        w.collide(np, 0.35f, pos.y, 1.7f, &n);
+        w.collideSwept(pos, np, 0.35f, pos.y, 1.7f, &n);
         float g = w.skaterGround(np.x, np.z, pos.y);
         vy -= GRAVITY * dt;
         np.y = pos.y + vy * dt;

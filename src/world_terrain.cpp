@@ -644,6 +644,35 @@ bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm
     return hit;
 }
 
+bool World::collideSwept(Vector3 from, Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size) const {
+    // collide() only looks at where the mover ends up: one step longer than the radius can put the centre past the
+    // middle of a thin box, and the push-out then goes out the far side. Steps shorter than the radius never get the
+    // centre inside a box it wasn't already overlapping, so every hit is caught from the side it was approached from.
+    float dx = p.x - from.x, dz = p.z - from.z;
+    float len = sqrtf(dx * dx + dz * dz);
+    float maxStep = clampf(r * 0.7f, 0.05f, 0.25f);
+    int steps = std::min(std::max((int)ceilf(len / maxStep), 1), 256);
+    if (size) *size = 0;
+    bool hit = false;
+    Vector3 q = {from.x, p.y, from.z};
+    float sx = dx / steps, sz = dz / steps;
+    for (int k = 0; k < steps; k++) {
+        q.x += sx;
+        q.z += sz;
+        Vector2 n;
+        float s;
+        if (!collide(q, r, feetY, height, &n, &s)) continue;
+        hit = true;
+        if (nrm) *nrm = n;
+        if (size) *size = std::max(*size, s);
+        float into = sx * n.x + sz * n.y;   // < 0: the rest of the move heads into the wall, keep only the slide
+        if (into < 0) { sx -= n.x * into; sz -= n.y * into; }
+    }
+    p.x = q.x;
+    p.z = q.z;
+    return hit;
+}
+
 bool World::solidAt(Vector3 p, bool bigProps) const {
     if (terrain(p.x, p.z) > p.y - 0.25f) return true;
     int i = (int)floorf((p.x - PG_X0) / PG_CELL), j = (int)floorf((p.z - PG_Z0) / PG_CELL);
@@ -683,6 +712,36 @@ bool World::doorBlocked(float x, float z, float pad) const {
                 if (distToSeg2D(x, z, it->second.x, it->second.y, it->second.z, it->second.w) < pad) return true;
         }
     return false;
+}
+
+Vector2 World::stoopDetour(float x, float z, Vector2 routeDir) const {
+    // The walking line runs ~2 m out from the house fronts, and a tall stoop reaches up to 3 m out: a walker
+    // following it would go straight through the steps (too tall to step onto from the side, and far from the
+    // skater nothing pushes them out of a wall). So they swing out round the front of each stoop, easing over
+    // in the few metres before it and back after, with room for their body.
+    if (stoops.empty()) return {0, 0};
+    const float R = 0.45f, L = 1.8f;   // clearance for the body; how long the swing out and back takes
+    float best = 0;
+    Vector2 bestN = {0, 0};
+    static_assert(0.45f + 1.8f <= STOOP_REACH, "stoops are registered in every cell within STOOP_REACH");
+    auto r = stoops.equal_range(doorCell(x, z));   // (each stoop is listed in every cell within STOOP_REACH of it)
+    for (auto it = r.first; it != r.second; ++it) {
+        const Stoop& st = it->second;
+        Vector2 n = st.out, t = {-n.y, n.x};
+        // a route heading toward or away from the house (the cross street at a corner) passes beside it
+        if ((routeDir.x != 0 || routeDir.y != 0) && fabsf(routeDir.x * n.x + routeDir.y * n.y) > 0.7f) continue;
+        float sa = n.x * st.x0 + n.y * st.z0, sb = n.x * st.x1 + n.y * st.z1;
+        float ta = t.x * st.x0 + t.y * st.z0, tb = t.x * st.x1 + t.y * st.z1;
+        float s0 = std::min(sa, sb), s1 = std::max(sa, sb), t0 = std::min(ta, tb), t1 = std::max(ta, tb);
+        float ps = n.x * x + n.y * z, pt = t.x * x + t.y * z;
+        if (ps >= s1 + R || ps < s0 - 0.5f) continue;   // already clear in front, or beside the house itself
+        float off = std::max(std::max(t0 - R - pt, pt - t1 - R), 0.f);   // how far before / after the steps
+        if (off >= L) continue;
+        float k = 1.f - off / L, ease = k * k * (3 - 2 * k);
+        float d = (s1 + R - ps) * ease;
+        if (d > best) { best = d; bestN = n; }
+    }
+    return {bestN.x * best, bestN.y * best};
 }
 
 // Street furniture asks this before it goes down, so no lamp, tree or bin ends up inside a building or landmark

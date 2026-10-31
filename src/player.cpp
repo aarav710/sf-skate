@@ -84,7 +84,7 @@ void Player::update(float dt, const Input& in, World& w) {
     popupT -= dt;
     evPop = evLand = evBail = evSplash = evGrindStart = false;
     Vector3 before = pos;
-    if (state != AIR) bouncing = ollieQueued = false;
+    if (state != AIR) bouncing = ollieQueued = grabbing = false;
     switch (state) {
     case RIDE: ride(dt, in, w); break;
     case AIR: air(dt, in, w); break;
@@ -237,7 +237,8 @@ void Player::air(float dt, const Input& in, World& w) {
         shoveAngle = 180.f * clampf(shoveT / shoveDur, 0, 1);
         if (shoveT >= shoveDur) { shoveT = -1; shoveAngle = 0; }
     }
-    if (in.grab && flipT < 0 && shoveT < 0 && !bouncing) {
+    grabbing = in.grab && flipT < 0 && shoveT < 0 && !bouncing;
+    if (grabbing) {
         if (!grabbed) { grabbed = true; addTrick("Indy Grab", 300); }
         grabT += dt;
         comboPts += 500 * dt;
@@ -440,6 +441,11 @@ void Player::bailUpdate(float dt, World& w) {
     // board tumbles away
     boardVel.y -= GRAVITY * dt;
     boardPos = Vector3Add(boardPos, Vector3Scale(boardVel, dt));
+    Vector2 bn;   // walls: bounce off them (damped) rather than tumbling into the building
+    if (w.collide(boardPos, 0.3f, boardPos.y, 0.3f, &bn)) {
+        float into = -(boardVel.x * bn.x + boardVel.z * bn.y);
+        if (into > 0) { boardVel.x += bn.x * into * 1.4f; boardVel.z += bn.y * into * 1.4f; }
+    }
     float bg = w.ground(boardPos.x, boardPos.z, boardPos.y + 0.3f);
     if (boardPos.y < bg) { boardPos.y = bg; boardVel = Vector3Scale(boardVel, 0.6f); boardVel.y = fabsf(boardVel.y) * 0.3f; }
     boardYaw += dt * 6 * clampf(Vector3Length(boardVel) / 5, 0, 1);
@@ -578,7 +584,7 @@ void Player::draw() const {
     Vector3 shF = {chest.x + 0.16f, chest.y - 0.02f, chest.z}, shB = {chest.x - 0.16f, chest.y - 0.02f, chest.z};
     Vector3 handF = {0.55f, chest.y - 0.3f + armWave + lean * 0.2f, 0.12f};
     Vector3 handB = {-0.55f, chest.y - 0.25f - armWave - lean * 0.2f, 0.05f};
-    if (state == AIR && grabbed && flipT < 0 && shoveT < 0) handF = {0.08f, 0.16f + lift, 0.11f};
+    if (state == AIR && grabbing && flipT < 0 && shoveT < 0) handF = {0.08f, 0.16f + lift, 0.11f};
     if (pushAmt > 0.05f && state == RIDE) handB = {-0.35f, chest.y - 0.45f, 0.25f};
     limb(shF, handF, 0.05f, shirt);
     limb(shB, handB, 0.05f, shirt);

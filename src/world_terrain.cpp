@@ -635,6 +635,35 @@ bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm
     return hit;
 }
 
+bool World::collideSwept(Vector3 from, Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size) const {
+    // collide() only looks at where the mover ends up: one step longer than the radius can put the centre past the
+    // middle of a thin box, and the push-out then goes out the far side. Steps shorter than the radius never get the
+    // centre inside a box it wasn't already overlapping, so every hit is caught from the side it was approached from.
+    float dx = p.x - from.x, dz = p.z - from.z;
+    float len = sqrtf(dx * dx + dz * dz);
+    float maxStep = clampf(r * 0.7f, 0.05f, 0.25f);
+    int steps = std::min(std::max((int)ceilf(len / maxStep), 1), 256);
+    if (size) *size = 0;
+    bool hit = false;
+    Vector3 q = {from.x, p.y, from.z};
+    float sx = dx / steps, sz = dz / steps;
+    for (int k = 0; k < steps; k++) {
+        q.x += sx;
+        q.z += sz;
+        Vector2 n;
+        float s;
+        if (!collide(q, r, feetY, height, &n, &s)) continue;
+        hit = true;
+        if (nrm) *nrm = n;
+        if (size) *size = std::max(*size, s);
+        float into = sx * n.x + sz * n.y;   // < 0: the rest of the move heads into the wall, keep only the slide
+        if (into < 0) { sx -= n.x * into; sz -= n.y * into; }
+    }
+    p.x = q.x;
+    p.z = q.z;
+    return hit;
+}
+
 bool World::solidAt(Vector3 p, bool bigProps, bool piers) const {
     if (terrain(p.x, p.z) > p.y - 0.25f) return true;
     int i = (int)floorf((p.x - PG_X0) / PG_CELL), j = (int)floorf((p.z - PG_Z0) / PG_CELL);

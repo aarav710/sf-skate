@@ -147,6 +147,9 @@ struct World {
     float terrainRaw(float x, float z) const;                 // the 4 m heightfield itself (what the mesh is built from)
     float ground(float x, float z, float yRef) const;         // highest walkable surface <= yRef+STEP_UP
     bool collide(Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr) const; // push out of walls; size = widest box hit
+    // collide() along the move from `from` to p in short steps, so a fast mover can't skip through a thin wall or pole;
+    // after a hit the rest of the move slides along the wall. p ends at the resolved position
+    bool collideSwept(Vector3 from, Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr) const;
     bool solidAt(Vector3 p, bool bigProps = false, bool piers = false) const;   // buildings/decks (+ big prop boxes: the camera; + piers: boats)
     float ceiling(float x, float z, float feetY) const;        // lowest underside above the feet (1e9 if open sky)
     int houseAt(float x, float z, float y) const;              // index into houses if inside one, else -1

@@ -6,6 +6,7 @@
 #include "../src/models.h"
 #include "../src/jetski.h"
 #include "../src/gondola.h"
+#include "../src/jetski.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -526,6 +527,43 @@ int main() {
             check(s2.p.pos.x < tgt->x0, "buildings are solid", b);
         }
     }
+    {   // fast riding into thin solids (poles, house side walls) stops on the near side instead of tunnelling through (issue #83)
+        int tried = 0, through = 0;
+        std::string first;
+        for (const Platform& pl : W.plats) {
+            if (pl.kind != PK_POLE && pl.kind != PK_BUILDING) continue;
+            bool alongX = pl.x1 - pl.x0 < 0.5f;   // thin across x: ride along +x into it, else thin across z: ride along +z
+            if (!alongX && pl.z1 - pl.z0 >= 0.5f) continue;
+            float cx = (pl.x0 + pl.x1) / 2, cz = (pl.z0 + pl.z1) / 2;
+            float sx = alongX ? pl.x0 - 1.5f : cx, sz = alongX ? cz : pl.z0 - 1.5f;
+            float ex = alongX ? pl.x1 + 1.5f : cx, ez = alongX ? cz : pl.z1 + 1.5f;
+            float g0 = W.ground(sx, sz, 500), g1 = W.ground(ex, ez, 500);
+            if (fabsf(g1 - g0) > 0.1f || fabsf(W.terrain(sx, sz) - g0) > 0.1f) continue;   // flat street, nothing to ride up or onto
+            float top = pl.top(cx, cz);
+            if (top < g0 + 2.5f || pl.base > g0 + 0.5f) continue;   // a solid the skater can't hop or pass under
+            Vector3 q = {sx, g0, sz};
+            Vector2 n;
+            if (W.collide(q, 0.6f, g0, 1.7f, &n)) continue;   // start spot clear
+            for (float dt : {1.f / 60, 1.f / 30}) {
+                tried++;
+                Player p;
+                p.spawn({sx, g0, sz}, alongX ? 0 : PI / 2);
+                p.speed = 36;
+                Input in; in.tuck = true;
+                for (int f = 0; f < (int)(0.3f / dt) && p.state != Player::BAIL; f++) {
+                    p.update(dt, in, W);
+                    if ((alongX ? p.pos.x > pl.x1 : p.pos.z > pl.z1) && p.pos.y < top) {
+                        through++;
+                        if (first.empty()) { char w[96]; snprintf(w, sizeof w, " (first: %s at %.1f,%.1f, dt 1/%.0f)", pl.kind == PK_POLE ? "pole" : "wall", cx, cz, 1 / dt); first = w; }
+                        break;
+                    }
+                }
+            }
+            if (tried >= 800) break;
+        }
+        snprintf(b, sizeof b, "%d of %d runs at 36 m/s passed through%s", through, tried, first.c_str());
+        check(tried > 100 && through == 0, "fast rides don't tunnel thin walls", b);
+    }
     {   // Oracle Park's grandstand, scoreboard, Coke bottle and glove are solid (issue #67): push across the field into each
         struct Run { const char* name; float x, z, yaw; bool alongX; float wall; int dir; };
         const Run runs[] = {
@@ -610,6 +648,44 @@ int main() {
         }
         snprintf(b, sizeof b, "%d/%d shores re-splashed%s", bad, tried, worst.c_str());
         check(tried > 0 && bad == 0, "splash respawn stays out of water", b);
+    }
+    {   // R while riding a jet ski puts you back on land, not on the water where the ski is (issue #69)
+        JetSkis js; js.place(W);
+        bool found = false;
+        Vector3 land{};
+        if (!js.skis.empty()) {
+            const Vector3 sk = js.skis[0].pos;
+            for (float d = 2; d <= 40 && !found; d += 1)
+                for (int k = 0; k < 16 && !found; k++) {
+                    float a = k * TAU_F / 16, x = sk.x + cosf(a) * d, z = sk.z + sinf(a) * d, h = W.terrain(x, z);
+                    if (h < 1.0f || h > 4.f || !W.inPlay(x, z) || W.isWater(x, z, h) || W.solidAt({x, h + 1.2f, z})) continue;
+                    bool dry = true;   // clear of water for 6 m around, like a spot the game itself would save
+                    for (int j = 0; j < 12 && dry; j++)
+                        for (float r = 2; r <= 6 && dry; r += 2) {
+                            float qx = x + cosf(j * PI / 6) * r, qz = z + sinf(j * PI / 6) * r;
+                            if (W.isWater(qx, qz, W.ground(qx, qz, h + 1.f))) dry = false;
+                        }
+                    if (dry) { land = {x, W.ground(x, z, h + 2), z}; found = true; }
+                }
+        }
+        Sim s; s.spawn(land.x, land.z, 0);              // on the shore by a moored ski (spawn records it as the safe spot)
+        int ski = found ? js.nearest(s.p.pos, 50.f) : -1;
+        bool onWater = false;
+        if (ski >= 0) {
+            js.mount(ski, s.p);
+            Input in; in.push = true; in.steer = 0.3f;
+            for (int f = 0; f < 60 * 4; f++) js.update(1.f / 60, in, false, s.p, W);
+            onWater = js.riding && W.terrain(s.p.pos.x, s.p.pos.z) < 0.05f;
+            // what main does on R: leave the ski where it is, then back to the safe spot
+            js.skis[js.cur].pos = s.p.pos; js.riding = false; js.cur = -1;
+            s.p.respawnSafe(W);
+        }
+        Vector3 r = s.p.pos;
+        float h = W.terrain(r.x, r.z);
+        Input hold; hold.brake = true;                   // stand still: a sloped shore mustn't roll you in
+        bool splash = s.run(120, hold, [](Player& p) { return p.splashed; });
+        snprintf(b, sizeof b, "ski=%d onWater=%d reset to %.0f,%.1f,%.0f terrain=%.1f splash=%d", ski, onWater, r.x, r.y, r.z, h, splash);
+        check(ski >= 0 && onWater && h > 0.5f && !W.isWater(r.x, r.z, r.y) && !splash && s.p.state == Player::RIDE, "R on a jet ski resets to land", b);
     }
     {   // the splash message names the water: ocean, bay, fountain, lake, lagoon, pool, salt pond (rolling in and dropping in)
         float sea = -1440;   // the Pacific, west of the city

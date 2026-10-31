@@ -615,7 +615,8 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             if (p.evT >= p.evDur) { p.evade = EV_NONE; p.evTilt = 0; }
         } else if (Vector2Length(p.dodge) > 0.01f) {
             // back to their route at a walk once the skater has gone by (they turn and walk it, see the facing below)
-            bool clear = dP2 > 6 * 6 || skSp < 1.f;
+            // (a skater stopped right beside them is still in the way: they keep their step round until past)
+            bool clear = dP2 > 6 * 6 || (skSp < 1.f && dP2 > 2.5f * 2.5f);
             if (clear) {
                 float L = Vector2Length(p.dodge), step = std::min(L, 1.0f * dt);
                 p.dodge = Vector2Subtract(p.dodge, Vector2Scale(p.dodge, step / L));
@@ -645,7 +646,37 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             p.idleTurn -= dt;
             if (p.idleTurn < 0 && p.gait < 0.2f && !evading) { p.idleTurn = r.range(2, 7); p.yaw += r.range(-1.2f, 1.2f); }
         }
+        // a skater standing or rolling slowly (too slow to set off the dodges above) is walked round like
+        // anyone else on the sidewalk: drift sideways off the route while they're in the way ahead, to the
+        // side already favoured, or the other side if a wall or the water is there
+        bool slowSk = pl.hspeed() < 2.f && fabsf(pl.pos.y - p.pos.y) < 1.4f;
+        if (slowSk && !evading && dP2 < 4.f * 4.f && (routeDir.x != 0 || routeDir.y != 0)) {
+            const float R = 0.8f;   // how wide a berth they give the skater
+            Vector2 at = {base.x + p.dodge.x - pp.x, base.y + p.dodge.y - pp.z};   // skater to where they're headed
+            Vector2 side = {-routeDir.y, routeDir.x};
+            float ahead = -Vector2DotProduct(at, routeDir), lat = Vector2DotProduct(at, side);
+            if (ahead > -0.3f && ahead < 2.5f && fabsf(lat) < R) {
+                float sg = fabsf(lat) > 0.05f ? (lat > 0 ? 1.f : -1.f) : ((hashu((int)(p.phase * 1000.f), (int)pi, 43) & 1) ? 1.f : -1.f);
+                Vector2 to = {pp.x + side.x * sg * (R + 0.3f), pp.z + side.y * sg * (R + 0.3f)};
+                float g = w.terrain(to.x, to.y);
+                if (w.solidAt({to.x, std::max(prevGround, g) + 0.6f, to.y}) || w.isWater(to.x, to.y, g)) sg = -sg;
+                float need = sg * lat > 0 ? R - fabsf(lat) : R + fabsf(lat);
+                p.dodge = Vector2Add(p.dodge, Vector2Scale(side, sg * std::min(need, 1.4f * dt)));
+            }
+        }
         float x = base.x + p.dodge.x, z = base.y + p.dodge.y;
+        // and never in the same spot as a slow skater (anyone faster knocks them down, in interact):
+        // a soft push out, kept in the sidestep so it lasts and the walls below still win
+        if (slowSk && p.evade != EV_DIVE) {
+            const float BODY = 0.6f;
+            float ox = x - pp.x, oz = z - pp.z, d = sqrtf(ox * ox + oz * oz);
+            if (d < BODY) {
+                Vector2 n = d > 0.01f ? Vector2{ox / d, oz / d} : (routeDir.x != 0 || routeDir.y != 0) ? Vector2{-routeDir.y, routeDir.x} : Vector2{1, 0};
+                Vector2 push = Vector2Scale(n, BODY - d);
+                p.dodge = Vector2Add(p.dodge, push);
+                x += push.x; z += push.y;
+            }
+        }
         // climb steps one at a time from where they stood last frame, like the skater does,
         // instead of reading the ground from street level and walking through a stoop
         float yRef = std::max(w.terrain(x, z), prevGround);

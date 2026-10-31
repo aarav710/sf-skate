@@ -4,10 +4,17 @@
 static const Color C_GOLD = {255, 205, 60, 255};
 static const Color C_RED = {255, 80, 70, 255};
 
+// how fast the ground under a board at p rolling at speed along f rises (+) or falls (-), m/s
+static float groundRate(World& w, Vector3 p, Vector3 f, float speed) {
+    float hF = w.ground(p.x + f.x * 0.5f, p.z + f.z * 0.5f, p.y + 0.2f);
+    float hB = w.ground(p.x - f.x * 0.5f, p.z - f.z * 0.5f, p.y + 0.2f);
+    return clampf(speed * (hF - hB), -30, 30);
+}
+
 void Player::spawn(Vector3 p, float y) {
     pos = p; yaw = y; speed = 0; vel = {0, 0, 0}; vy = 0; rideVy = 0;
     state = RIDE; flipT = shoveT = -1; flipAngle = shoveAngle = 0; combo.clear(); comboPts = 0;
-    rail = -1; splashed = false; bailT = 0; pitch = 0;
+    rail = -1; splashed = false; airClip = false; bailT = 0; pitch = 0;
     safePos = p; safeYaw = y;
 }
 
@@ -39,6 +46,7 @@ void Player::bankCombo() {
 
 void Player::bail(const char* why) {
     if (state == BAIL) return;
+    airClip = false;
     Vector3 f = state == AIR ? vel : Vector3Scale(fwd(), speed);
     if (state == AIR) {
         float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
@@ -75,6 +83,7 @@ void Player::update(float dt, const Input& in, World& w) {
     popupT -= dt;
     evPop = evLand = evBail = evSplash = evGrindStart = false;
     Vector3 before = pos;
+    if (state != AIR) bouncing = ollieQueued = false;
     switch (state) {
     case RIDE: ride(dt, in, w); break;
     case AIR: air(dt, in, w); break;
@@ -183,6 +192,8 @@ void Player::ride(float dt, const Input& in, World& w) {
 
 void Player::air(float dt, const Input& in, World& w) {
     airTime += dt;
+    // bounced off an edge into a real drop: controls back. Hills are fine: the ground is expected to keep its slope under the hop
+    if (bouncing && w.ground(pos.x, pos.z, pos.y + 0.2f) < bounceY + bounceRate * airTime - 1.0f) bouncing = ollieQueued = false;
     pitch = lerpf(pitch, 0.f, 1 - expf(-dt * 3));
     float prevY = pos.y;
     vy -= GRAVITY * dt;
@@ -195,13 +206,13 @@ void Player::air(float dt, const Input& in, World& w) {
         pos.y = cl - 1.75f;
         if (vy > 0) vy = -vy * 0.25f;
     }
-    float spin = in.steer * 6.0f * dt;
+    float spin = bouncing ? 0.f : in.steer * 6.0f * dt;
     yaw = wrapPi(yaw + spin);
     spinAccum += spin;
     crouch = lerpf(crouch, in.grab ? 1.0f : 0.55f, 1 - expf(-dt * 10));
 
     // flip tricks
-    if (flipT < 0 && shoveT < 0) {
+    if (flipT < 0 && shoveT < 0 && !bouncing) {
         if (in.kickflip) { flipT = 0; flipDir = 1; addTrick("Kickflip", 500); }
         else if (in.heelflip) { flipT = 0; flipDir = -1; addTrick("Heelflip", 500); }
         else if (in.shove) { shoveT = 0; addTrick("Pop Shove-it", 400); }
@@ -216,7 +227,7 @@ void Player::air(float dt, const Input& in, World& w) {
         shoveAngle = 180.f * clampf(shoveT / shoveDur, 0, 1);
         if (shoveT >= shoveDur) { shoveT = -1; shoveAngle = 0; }
     }
-    if (in.grab && flipT < 0 && shoveT < 0) {
+    if (in.grab && flipT < 0 && shoveT < 0 && !bouncing) {
         if (!grabbed) { grabbed = true; addTrick("Indy Grab", 300); }
         grabT += dt;
         comboPts += 500 * dt;
@@ -225,10 +236,21 @@ void Player::air(float dt, const Input& in, World& w) {
 
     // walls
     Vector2 n;
-    if (w.collide(pos, 0.35f, pos.y, 1.7f, &n)) {
+    float hitSize;
+    if (w.collide(pos, 0.35f, pos.y, 1.7f, &n, &hitSize)) {
+        bool pole = hitSize < 1.2f;
         float into = -(vel.x * n.x + vel.z * n.y);
-        if (into > 9.f) { bail("Flew into a wall"); return; }
-        if (into > 0) { vel.x += n.x * into; vel.z += n.y * into; }
+        if (into > 9.f) { bail(pole ? "Hit a pole" : "Flew into a wall"); return; }
+        if (into > 0) {
+            float before = atan2f(vel.z, vel.x);
+            vel.x += n.x * into; vel.z += n.y * into;
+            float turn = wrapPi(atan2f(vel.z, vel.x) - before);
+            // slamming a wall at a steep angle is a crash; brushing a pole or glancing off a wall just knocks you aside
+            if (!pole && into > 2.f && fabsf(turn) > 0.7f) { bail("Flew into a wall"); return; }
+            // turn the board with the deflection (keeping any spin/fakie offset), or the landing reads it as sideways
+            if (vel.x * vel.x + vel.z * vel.z > 1.f) yaw = wrapPi(yaw + turn);
+            airClip = true;
+        }
     }
 
     // grind snapping: falling onto a rail or ledge edge
@@ -255,6 +277,7 @@ void Player::air(float dt, const Input& in, World& w) {
             balance = 0;
             balanceVel = (GetRandomValue(0, 1) ? 1 : -1) * 0.3f;
             state = GRIND;
+            airClip = false;
             std::string nm = boardslide ? "Boardslide" : "50-50";
             if (r.name) nm += std::string(" (") + r.name + ")";
             addTrick(nm, 250);
@@ -270,8 +293,19 @@ void Player::air(float dt, const Input& in, World& w) {
 
     // landing
     float g = w.ground(pos.x, pos.z, std::max(prevY, pos.y));
-    if (pos.y <= g && vy <= 0) land(w, g);
+    if (pos.y <= g && vy <= 0) {
+        bool pop = bouncing && (ollieQueued || in.ollie); // Space during a landing bounce pops as it touches down
+        bouncing = ollieQueued = false;
+        land(w, g);
+        if (pop && (state == RIDE || bouncing)) { // (on a steep downhill the touchdown may start another bounce: pop anyway)
+            bouncing = false;
+            float up = groundRate(w, pos, fwd(), speed);
+            ollie(7.4f + clampf(fabsf(speed) * 0.03f, 0, 0.6f));
+            vy += std::max(up, 0.f); // uphill: keep the climb, as ride() does
+        }
+    }
     else if (pos.y < g) pos.y = g;   // still rising into a steeper hillside: skim along it rather than through it
+    if (bouncing && in.ollie) ollieQueued = true;
 }
 
 void Player::land(World& w, float g) {
@@ -297,7 +331,8 @@ void Player::land(World& w, float g) {
     // how clean was it? lined up and gentle is a stomp, crooked or from a height is sketchy
     float impact = -vy;
     float quality = 1.f - clampf(fabsf(fabsf(diff) > PI / 2 ? fabsf(diff) - PI : diff) / 0.5f, 0.f, 1.f) * 0.7f - clampf((impact - 9.f) / 12.f, 0.f, 1.f) * 0.5f;
-    bool stomp = quality > 0.85f && impact > 3.f, sketchy = quality < 0.45f;
+    bool stomp = quality > 0.85f && impact > 3.f && !airClip, sketchy = quality < 0.45f;
+    airClip = false;
     // spins and Big Air are part of the combo too, so add them before the landing scales it
     int halves = (int)roundf(fabsf(spinAccum) / PI);
     if (halves > 0) addTrick(std::string(spinAccum > 0 ? "FS " : "BS ") + std::to_string(halves * 180), 300.f * halves);
@@ -328,6 +363,9 @@ void Player::land(World& w, float g) {
         airTime = 0;
         spinAccum = 0;
         grabbed = false;
+        bouncing = true;
+        bounceY = g;
+        bounceRate = groundRate(w, pos, fwd(), speed);
     }
 }
 

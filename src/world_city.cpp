@@ -27,6 +27,75 @@ void World::addRailObj(Vector3 a, Vector3 b, const char* name) {
     }
 }
 
+// Lays the convex polygon q (x, z, counter-clockwise like the ground mesh's triangles) onto the ground mesh `off`
+// above it: cut along every ground triangle it covers, so each piece lies in that triangle's plane. A strip drawn as
+// flat quads between samples cuts the chords of a curved hill (the 10 m ground triangles fold along their edges and
+// diagonals), and on steep ground like Telegraph Hill the grass broke up through the asphalt.
+static void drapePoly(World& w, MeshBuilder& m, const Vector2* q, int nq, float off, Color c) {
+    float ox, oz, S;
+    Vector2 ctr = {0, 0};
+    for (int k = 0; k < nq; k++) ctr = Vector2Add(ctr, q[k]);
+    ctr = Vector2Scale(ctr, 1.f / nq);
+    if (!groundMeshGrid(ctr.x, ctr.y, &ox, &oz, &S)) {   // no ground mesh here: follow terrain() at the corners
+        for (int k = 1; k + 1 < nq; k++)
+            m.tri({q[0].x, w.terrain(q[0].x, q[0].y) + off, q[0].y}, {q[k].x, w.terrain(q[k].x, q[k].y) + off, q[k].y},
+                  {q[k + 1].x, w.terrain(q[k + 1].x, q[k + 1].y) + off, q[k + 1].y}, c);
+        return;
+    }
+    float x0 = q[0].x, x1 = q[0].x, z0 = q[0].y, z1 = q[0].y;
+    for (int k = 1; k < nq; k++) {
+        x0 = std::min(x0, q[k].x); x1 = std::max(x1, q[k].x);
+        z0 = std::min(z0, q[k].y); z1 = std::max(z1, q[k].y);
+    }
+    int i0 = (int)floorf((x0 - ox) / S), i1 = (int)floorf((x1 - ox) / S);
+    int j0 = (int)floorf((z0 - oz) / S), j1 = (int)floorf((z1 - oz) / S);
+    // Clipping and plane lookup run in coordinates local to each square: in world coordinates (x up to ~6000, z up to
+    // ~10000) the products in the edge tests and the area lose metres squared to float rounding and real pieces of
+    // road far from the origin came out with a negative area and were dropped
+    Vector2 buf[2][16];
+    for (int j = j0; j <= j1; j++)
+        for (int i = i0; i <= i1; i++) {
+            float cx = ox + i * S, cz = oz + j * S;
+            float h00 = w.terrainRaw(cx, cz), h10 = w.terrainRaw(cx + S, cz);
+            float h01 = w.terrainRaw(cx, cz + S), h11 = w.terrainRaw(cx + S, cz + S);
+            // the two triangles of the square, as the ground mesh splits it (see terrain())
+            static const Vector2 TRI[2][3] = {{{0, 0}, {1, 0}, {1, 1}}, {{0, 0}, {1, 1}, {0, 1}}};
+            for (int t = 0; t < 2; t++) {
+                int n = nq, cur = 0;
+                for (int k = 0; k < nq; k++) buf[0][k] = {q[k].x - cx, q[k].y - cz};
+                for (int e = 0; e < 3 && n >= 3; e++) {   // Sutherland-Hodgman against each triangle edge
+                    Vector2 a = Vector2Scale(TRI[t][e], S), b = Vector2Scale(TRI[t][(e + 1) % 3], S);
+                    auto side = [&](Vector2 p) { return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x); };
+                    const Vector2* in = buf[cur];
+                    Vector2* out = buf[cur ^ 1];
+                    int no = 0;
+                    for (int k = 0; k < n && no < 14; k++) {
+                        Vector2 p = in[k], r = in[(k + 1) % n];
+                        float sp = side(p), sr = side(r);
+                        if (sp >= 0) out[no++] = p;
+                        if ((sp >= 0) != (sr >= 0)) out[no++] = Vector2Lerp(p, r, sp / (sp - sr));
+                    }
+                    n = no;
+                    cur ^= 1;
+                }
+                if (n < 3) continue;
+                const Vector2* p = buf[cur];
+                float area = 0;
+                for (int k = 1; k + 1 < n; k++)
+                    area += (p[k].x - p[0].x) * (p[k + 1].y - p[0].y) - (p[k + 1].x - p[0].x) * (p[k].y - p[0].y);
+                if (area < 1e-6f) continue;
+                // height on this triangle's plane (the same plane terrain() reads there)
+                auto at = [&](Vector2 v) -> Vector3 {
+                    float tx = v.x / S, tz = v.y / S;
+                    float y = t == 0 ? h00 + (h10 - h00) * tx + (h11 - h10) * tz : h00 + (h11 - h01) * tx + (h01 - h00) * tz;
+                    return {cx + v.x, y + off, cz + v.y};
+                };
+                Vector3 v0 = at(p[0]);
+                for (int k = 1; k + 1 < n; k++) m.tri(v0, at(p[k]), at(p[k + 1]), c);
+            }
+        }
+}
+
 void roadStrip(World& w, Vector2 a, Vector2 b, float halfL, float halfR, float ext, float off, Color c, float step) {
     Vector2 d = Vector2Subtract(b, a);
     float L = Vector2Length(d);
@@ -34,20 +103,16 @@ void roadStrip(World& w, Vector2 a, Vector2 b, float halfL, float halfR, float e
     Vector2 dir = Vector2Scale(d, 1.f / L), right = {-dir.y, dir.x};
     Vector2 s = Vector2Subtract(a, Vector2Scale(dir, ext));
     float total = L + 2 * ext;
-    int n = std::max(1, (int)ceilf(total / step));
-    float lat[3] = {-halfL, (halfR - halfL) * 0.5f, halfR};
+    // drapePoly cuts each piece to the ground triangles, so `step` no longer shapes the strip: pieces only need to be
+    // short enough to keep the strip spread over the mesh chunks it crosses (at least 30 m, longer if step asks)
+    int n = std::max(1, (int)ceilf(total / std::max(step, 30.f)));
     for (int k = 0; k < n; k++) {
         float s0 = total * k / n, s1 = total * (k + 1) / n;
-        Vector3 P[2][3];
-        for (int e = 0; e < 2; e++)
-            for (int q = 0; q < 3; q++) {
-                float ss = e ? s1 : s0;
-                float x = s.x + dir.x * ss + right.x * lat[q], z = s.y + dir.y * ss + right.y * lat[q];
-                P[e][q] = {x, w.terrain(x, z) + off, z};
-            }
-        MeshBuilder& m = w.mb(P[0][1].x, P[0][1].z);
-        m.quad(P[0][0], P[1][0], P[1][1], P[0][1], c);
-        m.quad(P[0][1], P[1][1], P[1][2], P[0][2], c);
+        Vector2 p0 = Vector2Add(s, Vector2Scale(dir, s0)), p1 = Vector2Add(s, Vector2Scale(dir, s1));
+        Vector2 q[4] = {Vector2Subtract(p0, Vector2Scale(right, halfL)), Vector2Subtract(p1, Vector2Scale(right, halfL)),
+                        Vector2Add(p1, Vector2Scale(right, halfR)), Vector2Add(p0, Vector2Scale(right, halfR))};
+        Vector2 mid = Vector2Add(p0, Vector2Scale(right, (halfR - halfL) * 0.5f));
+        drapePoly(w, w.mb(mid.x, mid.y), q, 4, off, c);
     }
 }
 
@@ -705,13 +770,23 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
         Facade F{m, x0, z0, x1, z1, facing};
         Vector3 po = F.P(fi.cDoor, 0, fi.side ? 0.8f : fi.ns * fi.tread + 0.7f), pi = F.P(fi.cDoor, 0, -1.6f), pf = F.P(fi.uA, 0, 0.7f);
         Vector2 doorOut = {po.x, po.z}, doorIn = {pi.x, pi.z}, foot = {pf.x, pf.z};
+        // remember each step box, so sidewalk walkers can go round the front of it instead of through it
+        Vector2 toStreet = facing == 0 ? Vector2{0, -1} : facing == 1 ? Vector2{0, 1} : facing == 2 ? Vector2{-1, 0} : Vector2{1, 0};
+        // (in every cell its reach touches, the box grown by STOOP_REACH, so a lookup needs only the walker's cell)
+        auto addStoop = [&](float sx0, float sx1, float sz0, float sz1) {
+            for (int ci = (int)floorf((sx0 - STOOP_REACH) / 16.f); ci <= (int)floorf((sx1 + STOOP_REACH) / 16.f); ci++)
+                for (int cj = (int)floorf((sz0 - STOOP_REACH) / 16.f); cj <= (int)floorf((sz1 + STOOP_REACH) / 16.f); cj++)
+                    stoops.emplace(ci * 4096 + cj, Stoop{sx0, sx1, sz0, sz1, toStreet});
+        };
         if (fi.side) {   // collision for the flight along the front and its landing
             float ulo = std::min(fi.uA, fi.uL), uhi = std::max(fi.uA, fi.uL);
             Vector3 a = F.P(ulo, 0, 0), b = F.P(uhi, 0, 1.4f);
             float h0 = fi.uA < fi.uL ? fi.yStart : fi.doorY, h1 = fi.uA < fi.uL ? fi.doorY : fi.yStart;
             addPlat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), h0, h1, fi.yStart - 2.f, (uint8_t)(facing < 2 ? 0 : 1), PK_PROP});
+            addStoop(std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z));
             Vector3 la = F.P(fi.lu0, 0, 0), lb = F.P(fi.lu1, 0, 1.4f);
             addPlat({std::min(la.x, lb.x), std::max(la.x, lb.x), std::min(la.z, lb.z), std::max(la.z, lb.z), fi.doorY, fi.doorY, fi.gd - 2.f, 0, PK_PROP});
+            addStoop(std::min(la.x, lb.x), std::max(la.x, lb.x), std::min(la.z, lb.z), std::max(la.z, lb.z));
         } else {   // collision for the front steps: a flat top step, then a smooth ramp down to the street so you roll up
             // instead of bouncing off each tread (it follows the front edges of the drawn steps)
             float W2 = fi.ns * fi.tread;
@@ -722,6 +797,7 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
                 Vector3 a = F.P(fi.cDoor - 0.9f, 0, dep0), b = F.P(fi.cDoor + 0.9f, 0, dep1);
                 float x0s = std::min(a.x, b.x), x1s = std::max(a.x, b.x), z0s = std::min(a.z, b.z), z1s = std::max(a.z, b.z);
                 float base2 = fi.gd - 0.4f;
+                addStoop(x0s, x1s, z0s, z1s);
                 switch (facing) { // wall side is the near end
                 case 0: addPlat({x0s, x1s, z0s, z1s, yFar2, yNear, base2, 1, PK_PROP}); break;
                 case 1: addPlat({x0s, x1s, z0s, z1s, yNear, yFar2, base2, 1, PK_PROP}); break;
@@ -1160,6 +1236,7 @@ void World::addTree(float x, float z, int type, float s, RNG& r, bool solid) {
     if (solid && doorBlocked(x, z, 2.6f)) return; // never plant a trunk in front of a front door
     float y = terrain(x, z);
     if (y < 0.8f) return;
+    if (buildingAt(x, z, 0.5f * s, y - 0.2f, y + 5.f)) return;   // not inside a building or landmark base
     treeCells[(int)floorf(z / 25.f) * 100000 + (int)floorf(x / 25.f)]++;
     MeshBuilder& m = mb(x, z);
     Color bark = jitterC(col(96, 72, 52), r, 0.15f);
@@ -1285,10 +1362,13 @@ void World::addFlowerBed(float x0, float z0, float x1, float z1, int count, RNG&
 void World::addLamp(float x, float z, float yaw) {
     if (doorBlocked(x, z, 2.1f)) return;
     float y = terrain(x, z);
+    // keep the pole out of buildings and landmark bases, and the arm's lamp head out of their walls
+    Vector3 head = {x + cosf(yaw) * 1.4f, y + 6.6f, z + sinf(yaw) * 1.4f};
+    if (buildingAt(x, z, 0.2f, y - 0.2f, y + 6.6f) || buildingAt(head.x, head.z, 0.3f, head.y - 0.3f, head.y + 0.1f)) return;
     MeshBuilder& m = mb(x, z);
     Color pole = col(56, 66, 60);
     m.beam({x, y - 0.2f, z}, {x, y + 6.5f, z}, 0.18f, 0.18f, pole);
-    Vector3 tip = {x + cosf(yaw) * 1.4f, y + 6.6f, z + sinf(yaw) * 1.4f};
+    Vector3 tip = head;
     m.beam({x, y + 6.4f, z}, tip, 0.1f, 0.1f, pole);
     m.box({tip.x - 0.3f, tip.y - 0.25f, tip.z - 0.3f}, {tip.x + 0.3f, tip.y + 0.05f, tip.z + 0.3f}, col(255, 222, 160, M_EMISSIVE));
     lamps.push_back({tip.x, tip.y - 0.4f, tip.z});
@@ -1306,6 +1386,7 @@ static void disk(MeshBuilder& m, Vector3 c, Vector3 a, Vector3 b, float r, int n
 
 void World::addClutter(Vector2 p, Vector2 f, Vector2 o, int kind, uint32_t h) {
     float y = terrain(p.x, p.y);
+    if (buildingAt(p.x, p.y, kind == 5 ? 2.2f : 1.0f, y - 0.2f, y + 2.6f)) return;   // not inside a building or landmark base
     MeshBuilder& m = mb(p.x, p.y);
     Vector3 F = {f.x, 0, f.y}, O = {o.x, 0, o.y}, U = {0, 1, 0};
     auto at = [&](float alongF, float up, float outO) { return V3(p.x + f.x * alongF + o.x * outO, y + up, p.y + f.y * alongF + o.y * outO); };
@@ -1465,6 +1546,7 @@ void World::buildIntersections(const Grid& g) {
                 Vector2 c = {n.x - head.x * 7.7f + right.x * 7.7f, n.y - head.y * 7.7f + right.y * 7.7f};
                 if (doorBlocked(c.x, c.y, 3.6f)) continue;
                 float y = terrain(c.x, c.y);
+                if (buildingAt(c.x, c.y, 0.3f, y - 0.2f, y + 6.5f)) continue;   // a corner inside a landmark's base
                 MeshBuilder& m = mb(c.x, c.y);
                 Vector3 face = {-head.x, 0, -head.y};   // toward the oncoming cars
                 if (signal) {

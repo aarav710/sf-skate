@@ -107,6 +107,8 @@ struct Traffic {
     void init(World& w);
     void update(float dt, World& w, const Player& p);
     void interact(Player& p);
+    // put the roofs of the vehicles near `at` into w.vehicleTops, for the skater to land on (update does this each frame)
+    void publishRoofs(World& w, Vector3 at) const;
     // nearPass: everything within reach of the near clip range; otherwise only cars far enough to need the far pass
     void draw(Vector3 cam, Vector3 camFwd, bool nearPass) const;
     // sun shadow casters: cars within rCars of c, people (and their dogs) within rPeds

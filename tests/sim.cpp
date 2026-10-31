@@ -109,6 +109,20 @@ int main() {
         snprintf(b, sizeof b, "state=%d score=%lld", s.p.state, s.p.score);
         check(s.p.state == Player::RIDE && s.p.score > 100, "FS 360 lands", b);
     }
+    {   // brushing the Embarcadero Plaza lamp post mid-ollie turns the board with the deflection (issue #3)
+        int ok = 0, deflected = 0;
+        for (float side : {-0.3f, 0.3f}) {
+            float yaw = 0.77f, x = 1185 - cosf(yaw) * 4 - sinf(yaw) * side, z = -222.7f - sinf(yaw) * 4 + cosf(yaw) * side;
+            Sim s; s.spawn(x, z, yaw, 10);
+            Input in; in.ollie = true; s.run(1, in);
+            bool hit = false;
+            s.run(120, Input{}, [&](Player& p) { if (p.state == Player::AIR && p.hspeed() < 9) hit = true; return p.state != Player::AIR; });
+            deflected += hit;
+            ok += hit && s.p.state == Player::RIDE;
+        }
+        snprintf(b, sizeof b, "deflected %d of 2, landed %d", deflected, ok);
+        check(deflected == 2 && ok == 2, "mid-air pole clip lands", b);
+    }
     {   // grind the flat bar at Embarcadero Plaza
         Sim s; s.spawn(1186, -238, 0, 7);
         bool ground = s.run(60, Input{}, [](Player& p) { return p.pos.x > 1193.5f; });

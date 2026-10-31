@@ -228,7 +228,12 @@ void Player::air(float dt, const Input& in, World& w) {
     if (w.collide(pos, 0.35f, pos.y, 1.7f, &n)) {
         float into = -(vel.x * n.x + vel.z * n.y);
         if (into > 9.f) { bail("Flew into a wall"); return; }
-        if (into > 0) { vel.x += n.x * into; vel.z += n.y * into; }
+        if (into > 0) {
+            float before = atan2f(vel.z, vel.x);
+            vel.x += n.x * into; vel.z += n.y * into;
+            // turn the board with the deflection (keeping any spin/fakie offset), or the landing reads it as sideways
+            if (vel.x * vel.x + vel.z * vel.z > 0.25f) yaw = wrapPi(yaw + wrapPi(atan2f(vel.z, vel.x) - before));
+        }
     }
 
     // grind snapping: falling onto a rail or ledge edge

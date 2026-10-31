@@ -380,6 +380,7 @@ int main() {
         }
     }
     float titleT = 0, sirenT = 0, landKick = 0, swingT = 0, squeezeYaw = 0;
+    float airT = 0;   // clock for the SFO jets and the AirTrain: stands still while paused, on the map or in the picker
     if (getenv("SFSKATE_NIGHT")) preset = 2; // test hook: start at night
     if (getenv("SFSKATE_TOD")) preset = atoi(getenv("SFSKATE_TOD")) % 3; // test hook: 0 day, 1 golden hour, 2 night
     if (getenv("SFSKATE_COPS")) CH.calmT = 0.5f; // test hook: cops show up right away
@@ -602,6 +603,8 @@ int main() {
         else if (P.state == Player::RIDE && P.flipT < 0) P.flipAngle = 0;
 
         // ---------------- update
+        // wrapped at 75 * 76 s, a whole number of jet (75 s) and AirTrain (76 s) loops, so nothing jumps at the wrap
+        if (!paused && !showMap && (!picker || title)) airT = fmodf(airT + dt, 75.f * 76.f);
         bool running = !title && !paused && !showMap && !picker && !ride.on && !JS.riding && !SP.riding;
         // Caltrain: board at a station platform with E
         int nearStation = -1;
@@ -702,7 +705,7 @@ int main() {
             T.interact(P);
             {
                 Jet jets[2];
-                airTraffic(now, jets);
+                airTraffic(airT, jets);
                 for (auto& j : jets) {
                     if (!j.visible || j.pos.y > P.pos.y + 5) continue;
                     if (fabsf(P.pos.x - j.pos.x) < 19 && fabsf(P.pos.z - j.pos.z) < 17 && P.pos.y > j.pos.y - 1) {
@@ -1182,12 +1185,12 @@ int main() {
             T.drawTrains(W, cam.position);
             if (ride.on) Traffic::drawTrain(W, ride.s, ride.dir, cam.position);
             Jet jets[2];
-            airTraffic(now, jets);
+            airTraffic(airT, jets);
             for (auto& j : jets)
                 if (j.visible) drawCarModel(CT_PLANE, j.livery, j.pos, j.yaw, j.pitch, false);
             // AirTrain shuttling between the rental car center and the hotel, pausing at each station
             for (int k = 0; k < 2; k++) {
-                float ph = fmodf(now + k * 38.f, 76.f);
+                float ph = fmodf(airT + k * 38.f, 76.f);
                 const float stops[4] = {1460, 1640, 2000, 2165};
                 int leg = (int)(ph / 19.f);
                 float u = clampf((fmodf(ph, 19.f) - 5.f) / 14.f, 0, 1);

@@ -75,6 +75,19 @@ int main() {
         snprintf(b, sizeof b, "air=%d landed=%d peak=%.2fm score=%lld", air, landed, peak, s.p.score);
         check(air && landed && peak > 1.3f && peak < 2.2f && (s.p.score == 100 || s.p.score == 150), "ollie", b);
     }
+    {   // a short tap of I: the grab pose lets go with the key, but the Indy Grab still scores once
+        Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
+        Input in; in.ollie = true;
+        s.run(1, in);
+        Input g; g.grab = true;
+        int held = 0, stuck = 0, f = 0;
+        s.run(6, g, [&](Player& p) { held += p.grabbing; return p.state != Player::AIR; });
+        int indy = 0;
+        for (auto& t : s.p.combo) indy += t == "Indy Grab";
+        s.run(120, Input{}, [&](Player& p) { if (p.state == Player::AIR && p.grabbing) stuck++; f++; return p.state != Player::AIR; });
+        snprintf(b, sizeof b, "pose on %d/6 held frames, %d of %d frames after release; Indy Grab x%d", held, stuck, f, indy);
+        check(held == 6 && stuck == 0 && f > 10 && indy == 1, "grab pose follows I", b);
+    }
     {   // a landing bounces: the board pops back up a little before rolling out
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
         Input in; in.ollie = true; s.run(1, in);
@@ -168,6 +181,32 @@ int main() {
             }
         snprintf(b, sizeof b, "worst heading error: velocity %.1f deg, travel %.1f deg", worst * RAD2DEG, worstPos * RAD2DEG);
         check(worst < 0.02f && worstPos < 0.02f, "bail throws board along heading", b);
+    }
+    {   // slamming a building wall: the tumbling board bounces off it instead of flying inside (issue #41)
+        int slams = 0, inside = 0; float deepest = 0; Vector3 worstAt = {};
+        for (float x = 120; x <= 480 && slams < 24; x += 45)
+            for (float z = 300; z <= 660 && slams < 24; z += 45)
+                for (int d = 0; d < 4; d++) {
+                    float yaw = d * PI / 2;
+                    Sim s; s.spawn(x, z, yaw, 12);
+                    s.run(240, Input{}, [](Player& p) { return p.state != Player::RIDE; });
+                    if (s.p.state != Player::BAIL || s.p.subPopup != "Slammed into a wall") continue;
+                    slams++;
+                    bool in = false;
+                    s.run(100, Input{}, [&](Player& p) {
+                        Vector3 c = p.boardPos; Vector2 n;
+                        if (W.collide(c, 0.01f, p.boardPos.y, 0.3f, &n)) {
+                            in = true;
+                            float dd = Vector2Length({c.x - p.boardPos.x, c.z - p.boardPos.z});
+                            if (dd > deepest) { deepest = dd; worstAt = p.boardPos; }
+                        }
+                        return p.state != Player::BAIL;
+                    });
+                    inside += in;
+                }
+        snprintf(b, sizeof b, "%d of %d slams left the board in a wall, deepest %.2f m at (%.1f, %.1f, %.1f)",
+                 inside, slams, deepest, worstAt.x, worstAt.y, worstAt.z);
+        check(slams >= 8 && inside == 0, "bail board stays out of walls", b);
     }
     {   // 360 spin
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
@@ -1120,6 +1159,40 @@ int main() {
         snprintf(b, sizeof b, "%d grid cars, off the main roads: overlapping %.1f s, longest stop %.0f s (%.0f s in an intersection); average speed %.1f m/s",
                  (int)grid.size(), gridOv, longest, longestIn, avg);
         check(gridOv < 15 && longest < 120 && longestIn < 30 && avg > 6.5f, "Grid traffic takes turns", b);
+    }
+    {   // a stopped vehicle is solid all the way to its ends: roll at 3 m/s into each end of each type, on the axis and
+        // near a corner, on the runway (flat and open), and the skater stops at the body (or bails), not inside it
+        int bad = 0, tot = 0;
+        std::string det;
+        struct { int type; const char* n; } kinds[] = {{CT_SEDAN, "car"}, {CT_BUS, "bus"}, {CT_CABLECAR, "cable car"},
+                                                       {CT_STREETCAR, "streetcar"}, {CT_LRV, "LRV"}, {CT_PEDALBUS, "pedal bus"}};
+        for (auto& k : kinds) {
+            int type = k.type;
+            const CarModel& m = carModel(type);
+            float worst = 1e9f;
+            for (int end = -1; end <= 1; end += 2)
+                for (float lat : {0.f, m.halfWid - 0.2f}) {
+                    Traffic T;
+                    Car c; c.type = type; c.speed = 0; c.stopT = 1e9f; c.placed = true;
+                    c.pos = {1950, W.ground(1950, 2262, 500), 2262};
+                    T.cars.push_back(c);
+                    Sim s; s.spawn(1950 + end * (m.halfLen + 2.5f), 2262 + lat, end > 0 ? PI : 0, 3);
+                    float reach = 1e9f;
+                    for (int f = 0; f < 60 * 3 && s.p.state != Player::BAIL; f++) {
+                        s.run(1, Input{});
+                        T.interact(s.p);
+                        reach = std::min(reach, fabsf(s.p.pos.x - 1950));
+                    }
+                    tot++;
+                    if (s.p.state != Player::BAIL && reach < m.halfLen + 0.2f) bad++;
+                    if (s.p.state != Player::BAIL) worst = std::min(worst, reach - m.halfLen);
+                }
+            char one[64];
+            snprintf(one, sizeof one, "%s%s %+.2f", det.empty() ? "" : ", ", k.n, worst);
+            det += one;
+        }
+        snprintf(b, sizeof b, "%d of %d rides got inside; closest stop, m outside the body: %s", bad, tot, det.c_str());
+        check(bad == 0, "Vehicles are solid to their ends", b);
     }
     {   // the "SFO Airport" label covers the airport fill, and not the East Bay shore and hills beyond it
         int wrong = 0, land = 0, missed = 0, fill = 0;

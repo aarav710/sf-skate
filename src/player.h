@@ -43,7 +43,8 @@ struct Player {
     float comboPts = 0;
     long long score = 0;
     int bestCombo = 0;
-    bool grabbed = false;
+    bool grabbed = false;     // Indy Grab already scored this jump
+    bool grabbing = false;    // holding the board right now (the pose follows this)
     std::string popup; float popupT = 0; Color popupCol = WHITE;
     std::string subPopup;
     std::string landNote;     // how the last landing went, shown with the banked combo

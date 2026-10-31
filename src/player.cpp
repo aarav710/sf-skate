@@ -402,6 +402,7 @@ void Player::grind(float dt, const Input& in, World& w) {
     if (fabsf(balance) > 1.f) { bail("Lost balance on the rail"); return; }
     if (speed < 1.0f) {
         state = AIR; vel = {dir.x * railDir * 1.5f, 0, dir.y * railDir * 1.5f}; vy = 0; airTime = 0; spinAccum = 0;
+        if (boardslide) yaw = atan2f(vel.z, vel.x); // swing the crosswise board round to the travel, as the other exits do
         // step off sideways, to whichever side has floor and no wall (a bridge railing has the bay on one side)
         Vector3 off = pos;
         float best = -1e9f;

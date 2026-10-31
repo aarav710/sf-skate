@@ -4,6 +4,7 @@
 #include "../src/chase.h"
 #include "../src/traffic.h"
 #include "../src/models.h"
+#include "../src/gondola.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -1280,6 +1281,34 @@ int main() {
         }
         snprintf(b, sizeof b, "%d of %d towers ridden through", through, towers);
         check(towers > 0 && through == towers, "Ride between gondola tower legs", b);
+    }
+    {   // gondola cabins clear the station roofs: wherever the cable passes over a terminal, the cabin's floor
+        // stays above the roof slab (terminal: a 12 m PK_PROP box under the station; slab top 0.38 m above it)
+        int stations = 0, clear = 0;
+        float worst = 1e9f;
+        for (const GondolaLine& g : W.gondolas)
+            for (float ss : g.stationS) {
+                size_t k = std::lower_bound(g.cum.begin(), g.cum.end(), ss) - g.cum.begin();
+                Vector3 c = g.path[std::min(k, g.path.size() - 1)];
+                const Platform* term = nullptr;
+                for (const Platform& q : W.plats)
+                    if (q.kind == PK_PROP && fabsf(q.x1 - q.x0 - 12.f) < 0.01f && fabsf(q.z1 - q.z0 - 12.f) < 0.01f &&
+                        fabsf((q.x0 + q.x1) * 0.5f - c.x) < 1.f && fabsf((q.z0 + q.z1) * 0.5f - c.z) < 1.f) term = &q;
+                if (!term) continue;
+                stations++;
+                float roof = term->h0 + 0.38f, gap = 1e9f;
+                for (float s = std::max(0.f, ss - 30.f); s <= std::min(g.len, ss + 30.f); s += 0.5f) {
+                    size_t i = std::min(std::max<size_t>(std::upper_bound(g.cum.begin(), g.cum.end(), s) - g.cum.begin(), 1), g.path.size() - 1);
+                    float t = clampf((s - g.cum[i - 1]) / std::max(g.cum[i] - g.cum[i - 1], 1e-4f), 0, 1);
+                    Vector3 p = Vector3Lerp(g.path[i - 1], g.path[i], t);
+                    if (sq(p.x - c.x) + sq(p.z - c.z) > sq(7.2f * 1.4143f + 1.2f)) continue;   // not over the roof
+                    gap = std::min(gap, p.y - GONDOLA_CABIN_DROP - roof);
+                }
+                worst = std::min(worst, gap);
+                if (gap > 0) clear++;
+            }
+        snprintf(b, sizeof b, "%d of %d stations clear, tightest %.2f m", clear, stations, worst);
+        check(stations >= 7 && clear == stations, "Gondola cabins clear station roofs", b);
     }
     {   // Lombard planters: the collision box is the drawn shrub (same layout as World::buildLombard)
         float x0 = gx(16) + 6, x1 = gx(17) - 6, zc = gz(3);

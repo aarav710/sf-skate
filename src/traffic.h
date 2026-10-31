@@ -23,6 +23,7 @@ struct Car {
     float yaw = 0, pitch = 0;
     bool braking = false, placed = false;
     float pedal = 0;            // crank angle (pedal buses)
+    float acrossT = -1;         // grid cars: when a car on a main road last stopped for this one (Traffic::clock)
 };
 
 struct Ped {
@@ -82,6 +83,7 @@ struct Traffic {
     float clock = 0;            // drives the traffic signals
     Vector3 view = {1e6f, 0, 1e6f};   // the camera, as of last frame: people near it get the full update too
     int farTurn = 0;            // which slice of the far-away people gets its catch-up update this frame
+    std::vector<uint64_t> carCells;   // (40 m cell << 32 | car index), sorted: who's near whom, for every car each frame
 
     void init(World& w);
     void update(float dt, World& w, const Player& p);

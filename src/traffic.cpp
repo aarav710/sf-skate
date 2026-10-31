@@ -336,6 +336,13 @@ void Traffic::init(World& w) {
         for (int k = 0; k < n; k++) {
             Ped p;
             p.mode = 1; p.path = pi; p.s = r.range(0, P.len); p.pdir = r.chance(0.5f) ? 1 : -1; p.lane = r.range(-1.0f, 1.0f);
+            // a walkway up on a bridge deck: start them standing on it. The height update only climbs a step at a
+            // time from where they last stood, so from the default y = 0 they'd drop to the seabed under it (#87)
+            if (P.onDeck) {
+                Vector2 dir, q = P.at(p.s, &dir);
+                q = Vector2Add(q, Vector2Scale({-dir.y, dir.x}, p.lane * (float)p.pdir));
+                p.pos = {q.x, w.ground(q.x, q.y, 1e5f), q.y};
+            }
             colorPed(p, r);
             peds.push_back(p);
         }
@@ -457,6 +464,7 @@ void Traffic::farPedUpdate(Ped& p, float dt, World& w, RNG& r) {
         if (p.t >= 1) { p.t = 1; nextPedMove(p, r); if (r.chance(0.22f)) p.wait = r.range(1.5f, 5.f); }
         base = Vector2Lerp(p.from, p.to, clampf(p.t, 0, 1));
         if (Vector2Length(Vector2Subtract(p.to, p.from)) > 0.1f) routeDir = Vector2Normalize(Vector2Subtract(p.to, p.from));
+        base = Vector2Add(base, w.stoopDetour(base.x, base.y, routeDir));   // round the front of a house's steps
     } else if (p.mode == 1) {
         const Path& P = w.pedPaths[p.path];
         p.s += p.pdir * p.speed * dt;
@@ -1021,6 +1029,9 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             if (p.t >= 1) { p.t = 1; nextPedMove(p, r); if (r.chance(0.22f)) p.wait = r.range(1.5f, 5.f); }
             base = Vector2Lerp(p.from, p.to, clampf(p.t, 0, 1));
             if (Vector2Length(Vector2Subtract(p.to, p.from)) > 0.1f) routeDir = Vector2Normalize(Vector2Subtract(p.to, p.from));
+            // swing out round the front of a house's steps instead of walking through them (far from the skater
+            // too: nothing pushes them out of a stoop there)
+            base = Vector2Add(base, w.stoopDetour(base.x, base.y, routeDir));
         } else if (p.mode == 1) {
             const Path& P = w.pedPaths[p.path];
             if (!hold) p.s += p.pdir * p.speed * dt;

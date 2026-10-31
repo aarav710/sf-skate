@@ -147,18 +147,27 @@ struct World {
     float terrainRaw(float x, float z) const;                 // the 4 m heightfield itself (what the mesh is built from)
     float ground(float x, float z, float yRef) const;         // highest walkable surface <= yRef+STEP_UP
     bool collide(Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr) const; // push out of walls; size = widest box hit
-    bool solidAt(Vector3 p, bool bigProps = false) const;      // buildings/decks (+ big prop boxes: the camera)
+    // collide() along the move from `from` to p in short steps, so a fast mover can't skip through a thin wall or pole;
+    // after a hit the rest of the move slides along the wall. p ends at the resolved position
+    bool collideSwept(Vector3 from, Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr) const;
+    bool solidAt(Vector3 p, bool bigProps = false, bool piers = false) const;   // buildings/decks (+ big prop boxes: the camera; + piers: boats)
     float ceiling(float x, float z, float feetY) const;        // lowest underside above the feet (1e9 if open sky)
     int houseAt(float x, float z, float y) const;              // index into houses if inside one, else -1
     bool doorBlocked(float x, float z, float pad) const;       // is (x,z) on the way from the sidewalk to a front door?
+    // how far to step a sidewalk walker at (x,z), out toward the street, to keep them clear of the front steps
+    // of a house (routeDir: the way their route runs, or zero); zero when no stoop is near
+    Vector2 stoopDetour(float x, float z, Vector2 routeDir) const;
+    bool buildingAt(float x, float z, float pad, float y0, float y1) const; // does a building box overlap x/z +-pad between heights y0..y1?
     bool isWater(float x, float z, float y) const;
-    const char* waterKind(float x, float z, float y) const;   // what isWater found there: "bay", or the pond's kind
+    const char* waterKind(float x, float z, float y) const;   // what isWater found there: "bay", "ocean", or the pond's kind
+    const Pond* pondAt(float x, float z, float y) const;      // the pond (lake, pool, ...) whose water is at this spot, if any
     bool onBridge(float x, float z) const;
     bool inPlay(float x, float z) const {
         return (x >= PX0 && x <= PX1 && z >= PZ0 && z <= PZ1) || (x >= AX0 && x <= AX1 && z >= AZ0 && z <= AZ1) ||
                (x >= MX0 && x <= MX1 && z >= MZ0 && z <= MZ1);
     }
     const char* district(float x, float z) const;
+    bool overPier(float x, float z) const;                  // is (x,z) on a pier deck (Embarcadero, Pier 39, Hyde St, Alcatraz)?
     int zoneFlags(float x, float z, bool strict) const;
 
     // ---- data ----
@@ -179,6 +188,9 @@ struct World {
     std::vector<House> houses;
     int rowhouseCount = 0, houseTooSteep = 0, houseTooHigh = 0;   // generation stats: street fronts built, and why some stay closed
     std::unordered_multimap<int, Vector4> doorWays; // coarse grid of door approach segments (ax, az, bx, bz)
+    static constexpr float STOOP_REACH = 3.f;   // how far round a stoop stoopDetour can move a walker (clearance + ease)
+    struct Stoop { float x0, x1, z0, z1; Vector2 out; };   // a house's front-step collision box, and the way to the street
+    std::unordered_multimap<int, Stoop> stoops;     // same coarse grid, in every cell within STOOP_REACH of the box
     std::vector<Platform> plats;
     std::vector<std::vector<int>> pgrid; int pgW = 0, pgH = 0;
     std::vector<Rail> rails;
@@ -244,6 +256,7 @@ private:
     int addPlat(const Platform& p);
     void addBox(float x0, float z0, float x1, float z1, float base, float top, uint8_t kind,
                 Color side, Color topC, float ao = 0.8f);
+    void addBridgePier(MeshBuilder& m, float x0, float z0, float x1, float z1, float lo, float hi, Color c);
     void addBuilding(float x0, float z0, float x1, float z1, float height, Color side, Color roof, int style, int facing, RNG& r);
     void addTower(float x0, float z0, float x1, float z1, float H, RNG& r);
     // geo null: collision only (the city build); otherwise the mesh only, into geo

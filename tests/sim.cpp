@@ -1327,6 +1327,27 @@ int main() {
                  stuck, longGrid, longMain);
         check(std::max(longGrid, longMain) < 90 && longMain < 60, "Main-road crossings don't lock up", b);
     }
+    {   // the Golden Gate walkways have people on them, on the deck: not on the seabed 45 m below or walking inside
+        // the approach deck (#87). Skater standing mid-span, 30 s, every walker on a deck path checked twice a second,
+        // near (full update) and far (route only) alike
+        Traffic T; T.init(W);
+        Player pl; pl.spawn({-1100, W.ground(-1100, -1500, 1e5f), -1500}, -PI / 2);
+        int tot = 0, bad = 0, near = 0;
+        float worst = 0;
+        for (int f = 0; f <= 60 * 30; f++) {
+            if (f > 0) T.update(1.f / 60, W, pl);
+            if (f % 30) continue;
+            for (const Ped& p : T.peds) {
+                if (p.mode != 1 || !W.pedPaths[p.path].onDeck) continue;
+                float g = W.ground(p.pos.x, p.pos.z, 1e5f), d = fabsf(p.pos.y - p.evY - g);
+                tot++;
+                near += sq(p.pos.x - pl.pos.x) + sq(p.pos.z - pl.pos.z) < 120 * 120;
+                if (d > 0.3f) { bad++; worst = std::max(worst, d); }
+            }
+        }
+        snprintf(b, sizeof b, "%d of %d walkway samples (%d within 120 m) off the deck, worst %.1f m", bad, tot, near, worst);
+        check(tot > 61 * 200 && near > 61 * 10 && bad == 0, "Golden Gate walkers stay on the deck", b);
+    }
     {   // a stopped vehicle is solid all the way to its ends: roll at 3 m/s into each end of each type, on the axis and
         // near a corner, on the runway (flat and open), and the skater stops at the body (or bails), not inside it
         int bad = 0, tot = 0;

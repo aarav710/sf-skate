@@ -336,6 +336,13 @@ void Traffic::init(World& w) {
         for (int k = 0; k < n; k++) {
             Ped p;
             p.mode = 1; p.path = pi; p.s = r.range(0, P.len); p.pdir = r.chance(0.5f) ? 1 : -1; p.lane = r.range(-1.0f, 1.0f);
+            // a walkway up on a bridge deck: start them standing on it. The height update only climbs a step at a
+            // time from where they last stood, so from the default y = 0 they'd drop to the seabed under it (#87)
+            if (P.onDeck) {
+                Vector2 dir, q = P.at(p.s, &dir);
+                q = Vector2Add(q, Vector2Scale({-dir.y, dir.x}, p.lane * (float)p.pdir));
+                p.pos = {q.x, w.ground(q.x, q.y, 1e5f), q.y};
+            }
             colorPed(p, r);
             peds.push_back(p);
         }

@@ -1566,6 +1566,44 @@ int main() {
                  stuck, longGrid, longMain);
         check(std::max(longGrid, longMain) < 90 && longMain < 60, "Main-road crossings don't lock up", b);
     }
+    {   // sidewalk walkers go round the front of a house's steps, not through them (#86): the walking line runs ~2 m
+        // out from the house fronts and a stoop reaches up to 3 m out, so following it put them inside the step boxes,
+        // feet at street level and legs sunk into the stoop (about 2% of them at any moment). Checked near the
+        // skater (the full update) and far from them (the cheap one), once a second for half a minute.
+        Traffic T; T.init(W);
+        Player pl; pl.spawn({0, W.ground(0, 0, 1000) + 200, 0}, 0);   // the skater out of everyone's way
+        int sunk = 0, samples = 0, walkers = 0;
+        float worst = 0;
+        Vector3 at{};
+        for (auto& p : T.peds) walkers += p.mode == 0;
+        for (int f = 1; f <= 60 * 30; f++) {
+            T.update(1.f / 60, W, pl);
+            if (f < 60 * 5 || f % 60) continue;
+            for (auto& p : T.peds) {
+                if (p.mode != 0 || p.knock > 0) continue;
+                samples++;
+                bool in = false;
+                for (int dx = -1; dx <= 1 && !in; dx++)
+                    for (int dz = -1; dz <= 1 && !in; dz++) {
+                        int cell = (int)floorf(p.pos.x / 16.f + dx) * 4096 + (int)floorf(p.pos.z / 16.f + dz);
+                        auto r = W.stoops.equal_range(cell);
+                        for (auto it = r.first; it != r.second && !in; ++it) {
+                            const World::Stoop& st = it->second;
+                            if (p.pos.x <= st.x0 + 0.05f || p.pos.x >= st.x1 - 0.05f || p.pos.z <= st.z0 + 0.05f || p.pos.z >= st.z1 - 0.05f) continue;
+                            float top = W.ground(p.pos.x, p.pos.z, p.pos.y + 5.f), feet = p.pos.y - p.evY;
+                            if (top > feet + 0.3f) {
+                                in = true;
+                                if (top - feet > worst) { worst = top - feet; at = p.pos; }
+                            }
+                        }
+                    }
+                sunk += in;
+            }
+        }
+        snprintf(b, sizeof b, "%d of %d walker samples (%d walkers) sunk into front steps; deepest %.2f m at (%.1f, %.1f)",
+                 sunk, samples, walkers, worst, at.x, at.z);
+        check(W.stoops.size() > 100 && sunk == 0, "Walkers go round front steps", b);
+    }
     {   // the Golden Gate walkways have people on them, on the deck: not on the seabed 45 m below or walking inside
         // the approach deck (#87). Skater standing mid-span, 30 s, every walker on a deck path checked twice a second,
         // near (full update) and far (route only) alike

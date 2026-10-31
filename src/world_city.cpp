@@ -49,19 +49,22 @@ static void drapePoly(World& w, MeshBuilder& m, const Vector2* q, int nq, float 
     }
     int i0 = (int)floorf((x0 - ox) / S), i1 = (int)floorf((x1 - ox) / S);
     int j0 = (int)floorf((z0 - oz) / S), j1 = (int)floorf((z1 - oz) / S);
+    // Clipping and plane lookup run in coordinates local to each square: in world coordinates (x up to ~6000, z up to
+    // ~10000) the products in the edge tests and the area lose metres squared to float rounding and real pieces of
+    // road far from the origin came out with a negative area and were dropped
     Vector2 buf[2][16];
     for (int j = j0; j <= j1; j++)
         for (int i = i0; i <= i1; i++) {
             float cx = ox + i * S, cz = oz + j * S;
-            Vector3 c00 = {cx, w.terrainRaw(cx, cz), cz}, c10 = {cx + S, w.terrainRaw(cx + S, cz), cz};
-            Vector3 c01 = {cx, w.terrainRaw(cx, cz + S), cz + S}, c11 = {cx + S, w.terrainRaw(cx + S, cz + S), cz + S};
-            // the two triangles of the square, as the ground mesh splits it
-            const Vector3 tris[2][3] = {{c00, c10, c11}, {c00, c11, c01}};
-            for (const auto& t : tris) {
+            float h00 = w.terrainRaw(cx, cz), h10 = w.terrainRaw(cx + S, cz);
+            float h01 = w.terrainRaw(cx, cz + S), h11 = w.terrainRaw(cx + S, cz + S);
+            // the two triangles of the square, as the ground mesh splits it (see terrain())
+            static const Vector2 TRI[2][3] = {{{0, 0}, {1, 0}, {1, 1}}, {{0, 0}, {1, 1}, {0, 1}}};
+            for (int t = 0; t < 2; t++) {
                 int n = nq, cur = 0;
-                for (int k = 0; k < nq; k++) buf[0][k] = q[k];
+                for (int k = 0; k < nq; k++) buf[0][k] = {q[k].x - cx, q[k].y - cz};
                 for (int e = 0; e < 3 && n >= 3; e++) {   // Sutherland-Hodgman against each triangle edge
-                    Vector2 a = {t[e].x, t[e].z}, b = {t[(e + 1) % 3].x, t[(e + 1) % 3].z};
+                    Vector2 a = Vector2Scale(TRI[t][e], S), b = Vector2Scale(TRI[t][(e + 1) % 3], S);
                     auto side = [&](Vector2 p) { return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x); };
                     const Vector2* in = buf[cur];
                     Vector2* out = buf[cur ^ 1];
@@ -78,19 +81,17 @@ static void drapePoly(World& w, MeshBuilder& m, const Vector2* q, int nq, float 
                 if (n < 3) continue;
                 const Vector2* p = buf[cur];
                 float area = 0;
-                for (int k = 0; k < n; k++) area += p[k].x * p[(k + 1) % n].y - p[(k + 1) % n].x * p[k].y;
-                if (area < 1e-5f) continue;
-                // height on this triangle's plane (the same plane terrain() reads there)
-                Vector3 A = t[0], B = t[1], C = t[2];
-                float det = (B.x - A.x) * (C.z - A.z) - (C.x - A.x) * (B.z - A.z);
-                auto y = [&](Vector2 v) {
-                    float u = ((v.x - A.x) * (C.z - A.z) - (C.x - A.x) * (v.y - A.z)) / det;
-                    float vv = ((B.x - A.x) * (v.y - A.z) - (v.x - A.x) * (B.z - A.z)) / det;
-                    return A.y + (B.y - A.y) * u + (C.y - A.y) * vv + off;
-                };
-                Vector3 v0 = {p[0].x, y(p[0]), p[0].y};
                 for (int k = 1; k + 1 < n; k++)
-                    m.tri(v0, {p[k].x, y(p[k]), p[k].y}, {p[k + 1].x, y(p[k + 1]), p[k + 1].y}, c);
+                    area += (p[k].x - p[0].x) * (p[k + 1].y - p[0].y) - (p[k + 1].x - p[0].x) * (p[k].y - p[0].y);
+                if (area < 1e-6f) continue;
+                // height on this triangle's plane (the same plane terrain() reads there)
+                auto at = [&](Vector2 v) -> Vector3 {
+                    float tx = v.x / S, tz = v.y / S;
+                    float y = t == 0 ? h00 + (h10 - h00) * tx + (h11 - h10) * tz : h00 + (h11 - h01) * tx + (h01 - h00) * tz;
+                    return {cx + v.x, y + off, cz + v.y};
+                };
+                Vector3 v0 = at(p[0]);
+                for (int k = 1; k + 1 < n; k++) m.tri(v0, at(p[k]), at(p[k + 1]), c);
             }
         }
 }
@@ -102,8 +103,8 @@ void roadStrip(World& w, Vector2 a, Vector2 b, float halfL, float halfR, float e
     Vector2 dir = Vector2Scale(d, 1.f / L), right = {-dir.y, dir.x};
     Vector2 s = Vector2Subtract(a, Vector2Scale(dir, ext));
     float total = L + 2 * ext;
-    // drapePoly cuts each piece to the ground triangles, so the pieces only need to be short enough to keep the
-    // strip spread over the mesh chunks it crosses
+    // drapePoly cuts each piece to the ground triangles, so `step` no longer shapes the strip: pieces only need to be
+    // short enough to keep the strip spread over the mesh chunks it crosses (at least 30 m, longer if step asks)
     int n = std::max(1, (int)ceilf(total / std::max(step, 30.f)));
     for (int k = 0; k < n; k++) {
         float s0 = total * k / n, s1 = total * (k + 1) / n;

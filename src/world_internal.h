@@ -29,5 +29,7 @@ inline float alcatrazD(float x, float z) { return sqrtf(sq((x - AZ_X) / 118.f) +
 // diagonal. False where terrain() reads the raw heightfield instead.
 bool groundMeshGrid(float x, float z, float* ox, float* oz, float* S);
 void groundPad(World& w, float x0, float z0, float x1, float z1, float off, Color c);
+// A flat strip from a to b (halfL / halfR either side, ext past each end) laid `off` above the ground mesh, cut to its
+// triangles. step is the longest piece the strip is split into for the mesh chunks (never under 30 m).
 void roadStrip(World& w, Vector2 a, Vector2 b, float halfL, float halfR, float ext, float off, Color c, float step = 5.f);
 extern const Color PASTEL[12];

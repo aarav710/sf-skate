@@ -1781,6 +1781,44 @@ int main() {
                  worstCol, cz - 39.8f);
         check(worst < cz - 38 && worstCol < cz - 39.8f, "City Hall portico and columns solid", b);
     }
+    {   // roads far from the origin are draped whole: strips laid in Menlo Park (El Camino Real), Oakland and out east,
+        // straight and diagonal, wide and paint-thin, cover their full area on the ground (float rounding in world
+        // coordinates once dropped pieces there). Runs last: it adds geometry to the world.
+        struct Strip { Vector2 a, b; float half; };
+        const float ecr = W.mp.node(6, 0).x;
+        const Strip strips[] = {{{ecr, 8800}, {ecr, 10400}, 11}, {{ecr - 300, 9000}, {ecr + 500, 9700}, 11},
+                                {{4093, 0}, {4093, 900}, 0.06f}, {{4080, 500}, {4600, 820}, 7}, {{6000, 3000}, {6300, 3000}, 0.06f},
+                                {{4088.5f, 500}, {4091.1f, 500}, 0.3f}};
+        int bad = 0;
+        char det[96] = "";
+        for (int k = 0; k < (int)(sizeof strips / sizeof strips[0]); k++) {
+            const Strip& st = strips[k];
+            Color mark = col(1, 2, 3 + k, M_GROUND);   // a color nothing else uses
+            roadStrip(W, st.a, st.b, st.half, st.half, 0, 0.08f, mark);
+            double area = 0;
+            int under = 0;
+            for (auto& kv : W.builders) {
+                const MeshBuilder& m = kv.second;
+                size_t r = 0;
+                for (size_t t = 0; t + 2 < m.count(); t += 3) {
+                    while (r < m.c.size() && m.c[r].end <= t) r++;
+                    if (r == m.c.size() || memcmp(m.c[r].d, &mark, 4)) continue;
+                    double ax = m.v[3 * t], az = m.v[3 * t + 2];
+                    double ux = m.v[3 * (t + 1)] - ax, uz = m.v[3 * (t + 1) + 2] - az, vx = m.v[3 * (t + 2)] - ax, vz = m.v[3 * (t + 2) + 2] - az;
+                    area += (ux * vz - vx * uz) / 2;
+                    for (int q = 0; q < 3; q++)
+                        if (m.v[3 * (t + q) + 1] - W.terrain(m.v[3 * (t + q)], m.v[3 * (t + q) + 2]) < 0.05f) under++;
+                }
+            }
+            double want = Vector2Distance(st.a, st.b) * 2 * st.half;
+            if (fabs(area - want) > want * 0.002 + 0.01 || under) {
+                bad++;
+                snprintf(det, sizeof det, " (strip %d: %.2f of %.2f m2, %d under)", k, area, want, under);
+            }
+        }
+        snprintf(b, sizeof b, "%d of %d strips short%s", bad, (int)(sizeof strips / sizeof strips[0]), det);
+        check(bad == 0, "far-off roads draped whole", b);
+    }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;
 }

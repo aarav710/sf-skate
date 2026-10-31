@@ -169,6 +169,32 @@ int main() {
         snprintf(b, sizeof b, "worst heading error: velocity %.1f deg, travel %.1f deg", worst * RAD2DEG, worstPos * RAD2DEG);
         check(worst < 0.02f && worstPos < 0.02f, "bail throws board along heading", b);
     }
+    {   // slamming a building wall: the tumbling board bounces off it instead of flying inside (issue #41)
+        int slams = 0, inside = 0; float deepest = 0; Vector3 worstAt = {};
+        for (float x = 120; x <= 480 && slams < 24; x += 45)
+            for (float z = 300; z <= 660 && slams < 24; z += 45)
+                for (int d = 0; d < 4; d++) {
+                    float yaw = d * PI / 2;
+                    Sim s; s.spawn(x, z, yaw, 12);
+                    s.run(240, Input{}, [](Player& p) { return p.state != Player::RIDE; });
+                    if (s.p.state != Player::BAIL || s.p.subPopup != "Slammed into a wall") continue;
+                    slams++;
+                    bool in = false;
+                    s.run(100, Input{}, [&](Player& p) {
+                        Vector3 c = p.boardPos; Vector2 n;
+                        if (W.collide(c, 0.01f, p.boardPos.y, 0.3f, &n)) {
+                            in = true;
+                            float dd = Vector2Length({c.x - p.boardPos.x, c.z - p.boardPos.z});
+                            if (dd > deepest) { deepest = dd; worstAt = p.boardPos; }
+                        }
+                        return p.state != Player::BAIL;
+                    });
+                    inside += in;
+                }
+        snprintf(b, sizeof b, "%d of %d slams left the board in a wall, deepest %.2f m at (%.1f, %.1f, %.1f)",
+                 inside, slams, deepest, worstAt.x, worstAt.y, worstAt.z);
+        check(slams >= 8 && inside == 0, "bail board stays out of walls", b);
+    }
     {   // 360 spin
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
         Input in; in.ollie = true; s.run(1, in);

@@ -1,5 +1,6 @@
 // Headless gameplay checks: drives the skater with scripted input and checks the outcome.
 #include "../src/world.h"
+#include "../src/world_internal.h"
 #include "../src/player.h"
 #include "../src/chase.h"
 #include "../src/traffic.h"
@@ -1952,6 +1953,46 @@ int main() {
         snprintf(b, sizeof b, "%d of %d ledges grindable", grinds, ledges);
         check(ledges == 3 && grinds == ledges, "Union Square ledges grindable", b);
     }
+    {   // Telegraph Hill: the asphalt lies on the ground mesh all over (no grass breaking up through it on the steep
+        // climb), and no street runs into Coit Tower's base
+        int tris = 0, under = 0;
+        float worst = 1e9f;
+        for (auto& kv : W.builders) {
+            const MeshBuilder& m = kv.second;
+            size_t r = 0;
+            for (size_t t = 0; t + 2 < m.count(); t += 3) {
+                while (r < m.c.size() && m.c[r].end <= t) r++;
+                if (r == m.c.size() || memcmp(m.c[r].d, &C_ASPHALT, 4)) continue;
+                Vector3 P[3];
+                for (int k = 0; k < 3; k++) P[k] = {m.v[3 * (t + k)], m.v[3 * (t + k) + 1], m.v[3 * (t + k) + 2]};
+                float cx = (P[0].x + P[1].x + P[2].x) / 3, cz = (P[0].z + P[1].z + P[2].z) / 3;
+                if (cx < 770 || cx > 990 || cz < -990 || cz > -760) continue;
+                tris++;
+                for (int a = 0; a <= 4; a++)
+                    for (int c = 0; a + c <= 4; c++) {   // points spread over the triangle
+                        float u = a / 4.f, v = c / 4.f, w0 = 1 - u - v;
+                        Vector3 q = {P[0].x * w0 + P[1].x * u + P[2].x * v, P[0].y * w0 + P[1].y * u + P[2].y * v,
+                                     P[0].z * w0 + P[1].z * u + P[2].z * v};
+                        float d = q.y - W.terrain(q.x, q.z);
+                        worst = std::min(worst, d);
+                        if (d < 0.03f) under++;
+                    }
+            }
+        }
+        int intoBase = 0;   // street centerline samples within a half street width of the base block (880, -880) +-14
+        for (int j = 0; j < W.sf.nj; j++)
+            for (int i = 0; i < W.sf.ni; i++)
+                for (int d = 0; d < 4; d += 2) {
+                    if (!W.sf.nodeOk(i, j) || !W.sf.edge(i, j, d)) continue;
+                    Vector2 a = W.sf.node(i, j), e = W.sf.node(i + DI[d], j + DJ[d]);
+                    for (int k = 0; k <= 20; k++) {
+                        float x = a.x + (e.x - a.x) * k / 20, z = a.y + (e.y - a.y) * k / 20;
+                        if (fabsf(x - 880) < 14 + W.sf.roadHalf && fabsf(z + 880) < 14 + W.sf.roadHalf) intoBase++;
+                    }
+                }
+        snprintf(b, sizeof b, "%d tris, %d samples under, lowest %.3f m; %d into Coit base", tris, under, worst, intoBase);
+        check(tris > 100 && under == 0 && intoBase == 0, "Telegraph Hill road on the ground", b);
+    }
     {   // City Hall: riding south from Civic Center, the front columns and the portico behind them stop the skater
         // (they were mesh only, so the skater rode through the column line at z 351 into the portico at z 352..358)
         float cx = (gx(14) + gx(15)) / 2, cz = (gz(13) + gz(14)) / 2;
@@ -1970,6 +2011,44 @@ int main() {
         snprintf(b, sizeof b, "between columns reached z %.2f (portico face %.1f), at a column z %.2f (column face %.1f)", worst, cz - 38,
                  worstCol, cz - 39.8f);
         check(worst < cz - 38 && worstCol < cz - 39.8f, "City Hall portico and columns solid", b);
+    }
+    {   // roads far from the origin are draped whole: strips laid in Menlo Park (El Camino Real), Oakland and out east,
+        // straight and diagonal, wide and paint-thin, cover their full area on the ground (float rounding in world
+        // coordinates once dropped pieces there). Runs last: it adds geometry to the world.
+        struct Strip { Vector2 a, b; float half; };
+        const float ecr = W.mp.node(6, 0).x;
+        const Strip strips[] = {{{ecr, 8800}, {ecr, 10400}, 11}, {{ecr - 300, 9000}, {ecr + 500, 9700}, 11},
+                                {{4093, 0}, {4093, 900}, 0.06f}, {{4080, 500}, {4600, 820}, 7}, {{6000, 3000}, {6300, 3000}, 0.06f},
+                                {{4088.5f, 500}, {4091.1f, 500}, 0.3f}};
+        int bad = 0;
+        char det[96] = "";
+        for (int k = 0; k < (int)(sizeof strips / sizeof strips[0]); k++) {
+            const Strip& st = strips[k];
+            Color mark = col(1, 2, 3 + k, M_GROUND);   // a color nothing else uses
+            roadStrip(W, st.a, st.b, st.half, st.half, 0, 0.08f, mark);
+            double area = 0;
+            int under = 0;
+            for (auto& kv : W.builders) {
+                const MeshBuilder& m = kv.second;
+                size_t r = 0;
+                for (size_t t = 0; t + 2 < m.count(); t += 3) {
+                    while (r < m.c.size() && m.c[r].end <= t) r++;
+                    if (r == m.c.size() || memcmp(m.c[r].d, &mark, 4)) continue;
+                    double ax = m.v[3 * t], az = m.v[3 * t + 2];
+                    double ux = m.v[3 * (t + 1)] - ax, uz = m.v[3 * (t + 1) + 2] - az, vx = m.v[3 * (t + 2)] - ax, vz = m.v[3 * (t + 2) + 2] - az;
+                    area += (ux * vz - vx * uz) / 2;
+                    for (int q = 0; q < 3; q++)
+                        if (m.v[3 * (t + q) + 1] - W.terrain(m.v[3 * (t + q)], m.v[3 * (t + q) + 2]) < 0.05f) under++;
+                }
+            }
+            double want = Vector2Distance(st.a, st.b) * 2 * st.half;
+            if (fabs(area - want) > want * 0.002 + 0.01 || under) {
+                bad++;
+                snprintf(det, sizeof det, " (strip %d: %.2f of %.2f m2, %d under)", k, area, want, under);
+            }
+        }
+        snprintf(b, sizeof b, "%d of %d strips short%s", bad, (int)(sizeof strips / sizeof strips[0]), det);
+        check(bad == 0, "far-off roads draped whole", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

@@ -531,6 +531,14 @@ float World::terrain(float x, float z) const {
     return terrainRaw(x, z);
 }
 
+bool groundMeshGrid(float x, float z, float* ox, float* oz, float* S) {
+    // the same regions, in the same order, as terrain() above
+    if (x >= AZB_X0 && x < AZB_X1 && z >= AZB_Z0 && z < AZB_Z1) { *ox = AZB_X0; *oz = AZB_Z0; *S = 4.f; return true; }
+    if (x >= WX0 && z >= WZ0 && x < WX1 - 10.f && z < WZ1 - 10.f) { *ox = WX0; *oz = WZ0; *S = 10.f; return true; }
+    if (x >= MX0 - 390 && z >= MZ0 - 390 && x < MX1 + 380 && z < MZ1 + 380) { *ox = MX0 - 390; *oz = MZ0 - 390; *S = 10.f; return true; }
+    return false;
+}
+
 float World::terrainRaw(float x, float z) const {
     float fx = (x - WX0) / HF_RES, fz = (z - WZ0) / HF_RES;
     if (fx < 0 || fz < 0 || fx >= hfW - 1 || fz >= hfH - 1) {

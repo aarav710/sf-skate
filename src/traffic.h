@@ -28,6 +28,10 @@ struct Car {
     int box = -1, wantBox = -1; // grid cars: the intersection (node j * ni + i) this one is cleared through / waiting at
     float boxSince = 0;         // (Traffic::clock) waiting: since when (the longest wait goes first; 1e9 while it's only
                                 // waiting for room in the road out); cleared: when it last got anywhere
+    bool queued = false;        // grid cars: held up behind the car ahead (or for room past a main road), so not about
+                                // to pull out across a main road whatever its traffic does
+    float still = 0;            // how long it's been stood still (s)
+    bool passing = false;       // main-road cars: given up waiting for grid cars stood in the way, easing past them
 };
 
 struct Ped {
@@ -94,6 +98,10 @@ struct Traffic {
     std::vector<uint8_t> nearMain[3];   // per node of the SF, Oakland and Menlo Park grids: 1 close to a main road
     std::vector<float> exitTail[3];     // per node and heading on those grids: the back of the last car stopped (or all
                                         // but) in the road leaving it, in m from the node; rebuilt every frame
+    std::vector<Vector2> mainBand[3];   // per node and heading on those grids: where the lane leaving it crosses a main
+                                        // road (from, to: m from the node, wide enough for both cars; from 1e9: none)
+    std::vector<std::vector<Vector2>> pathCross;   // per car path and way along it (path * 2 + (pdir > 0)): where its
+                                                   // lanes cross a grid street (from, to: s), in order
     std::vector<uint64_t> carCells;   // (40 m cell << 32 | car index), sorted: who's near whom, for every car each frame
 
     void init(World& w);

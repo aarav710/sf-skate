@@ -1103,6 +1103,31 @@ int main() {
                  (int)grid.size(), gridOv, longest, longestIn, avg);
         check(gridOv < 15 && longest < 120 && longestIn < 30 && avg > 6.5f, "Grid traffic takes turns", b);
     }
+    {   // and where the main roads cross the grid, and at their ends, nobody waits on anybody for minutes (#47): the
+        // whole city for ten minutes (those lockups mostly started after three), every car on the main roads and the
+        // grid, near the main roads or not. (Over nine traffic seeds, 600 s: longest stop under 60 s, where before
+        // up to ~100 cars a seed stood for over a minute, main-road cars for up to 9 minutes.)
+        Traffic T; T.init(W);
+        Player pl; pl.spawn({0, W.ground(0, 0, 1000) + 200, 0}, 0);   // the skater out of everyone's way
+        std::vector<float> still(T.cars.size(), 0), most(T.cars.size(), 0);
+        float longGrid = 0, longMain = 0;
+        for (int f = 0; f < 60 * 600; f++) {
+            T.update(1.f / 60, W, pl);
+            if (f < 60 * 10) continue;
+            for (size_t i = 0; i < T.cars.size(); i++) {
+                const Car& a = T.cars[i];
+                if (a.mode > 1) continue;
+                still[i] = a.speed < 0.3f ? still[i] + 1.f / 60 : 0;
+                most[i] = std::max(most[i], still[i]);
+                (a.mode == 0 ? longGrid : longMain) = std::max(a.mode == 0 ? longGrid : longMain, still[i]);
+            }
+        }
+        int stuck = 0;
+        for (float m : most) stuck += m > 60;
+        snprintf(b, sizeof b, "%d cars stood over a minute; longest stop %.0f s on the grid, %.0f s on the main roads",
+                 stuck, longGrid, longMain);
+        check(stuck == 0 && longMain < 60, "Main-road crossings don't lock up", b);
+    }
     {   // the "SFO Airport" label covers the airport fill, and not the East Bay shore and hills beyond it
         int wrong = 0, land = 0, missed = 0, fill = 0;
         for (float x = AX0 + 10; x < WX1; x += 40)

@@ -209,8 +209,10 @@ void World::buildGoldenGate() {
         addRailObj({X - 42, y + 1.0f, -2377}, {X - 17, y + 1.0f, -2377}, "Vista Point Rail");
         addRailObj({X + 17, y + 1.0f, -2377}, {X + 42, y + 1.0f, -2377}, "Vista Point Rail");
     }
+    // cars U-turn at the city end 23 m short of the street the approach meets (gz(4)), the loop (9 m outer lane) clear
+    // of its cross traffic rather than out across it, where the two waited on each other for minutes (#47)
     Path P;
-    P.p = {{X, gz(4)}, {X, -2410}};
+    P.p = {{X, gz(4) - 23}, {X, -2410}};
     P.onDeck = true;
     P.finish();
     carPaths.push_back(P);
@@ -298,8 +300,9 @@ void World::buildBayBridge() {
     }
     Path P;
     // cars U-turn at the city end up on the approach ramp, the loop (9.5 m outer lane) clear of the Embarcadero
-    // roadway (x < 1272), rather than out across its cross traffic
-    P.p = {{1288, Z}, {4080, Z}};
+    // roadway (x < 1272), rather than out across its cross traffic; the same at the Oakland end, short of the street
+    // the bridge comes down onto (x > 4073), where they held each other up for minutes (#47)
+    P.p = {{1288, Z}, {4056, Z}};
     P.onDeck = true;
     P.finish();
     carPaths.push_back(P);

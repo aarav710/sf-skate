@@ -685,6 +685,12 @@ bool World::isWater(float x, float z, float y) const {
     return terrain(x, z) < 0.15f && y < 0.4f;
 }
 
+const char* World::waterKind(float x, float z, float y) const {
+    for (auto& pd : ponds)
+        if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1 && y < terrain(x, z) + 0.2f) return pd.kind;
+    return "bay";
+}
+
 bool Grid::edge(int i, int j, int d) const {
     switch (d) {
     case 0: return in(i + 1, j) && ex[j * ni + i];

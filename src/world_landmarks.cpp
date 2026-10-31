@@ -862,9 +862,18 @@ void World::buildSkateSpots() {
         }
         addRamp(cx - 4, cz - 3, cx - 1, cz + 3, 1.0f, 0, true);
     }
-    // --- Marina Green mega kicker
-    addRamp(-480, -1050, -468, -1042, 3.4f, 0, true);
-    addRamp(-440, -1052, -430, -1040, 1.6f, 0, false);   // landing bump
+    // --- Marina Green mega kicker: kicker, a table a real drop below the lip, then a long landing slope back down to
+    // the grass, like a real kicker-to-landing setup. The table butts against the kicker's high end, so its face
+    // toward the kicker is hidden under the lip and nothing faces the kicker with a wall: rolling off the lip or an
+    // ollie lands on the table or the landing slope, and anything faster lands on open grass past it (#94).
+    {
+        float y = terrain(-474, -1046), lip = y + 3.4f, table = lip - 1.3f;   // the kicker's base (addRamp samples its centre)
+        addRamp(-480, -1050, -468, -1042, 3.4f, 0, true);
+        addBox(-468, -1050, -458, -1042, y - 0.4f, table, PK_PROP, col(120, 120, 124), col(184, 152, 112, M_GROUND));
+        float yl = terrain(-438, -1046), base = fminf(y, yl) - 0.4f;   // the landing meets the grass at its foot
+        addPlat({-458, -438, -1050, -1042, table, yl, base, 0, PK_PROP});
+        mb(-448, -1046).slab(-458, -438, -1050, -1042, table, yl, 0, base, col(184, 152, 112, M_GROUND), col(120, 120, 124));
+    }
     // --- Twin Peaks summit lookout with a kicker
     {
         float cx = -280, cz = 890, y = terrain(cx, cz);

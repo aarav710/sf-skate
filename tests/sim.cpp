@@ -432,6 +432,32 @@ int main() {
         snprintf(b, sizeof b, "air=%d x=%.1f vy=%.1f", air, s.p.pos.x, s.p.vy);
         check(air && s.p.pos.x > 1241, "kicker launches", b);
     }
+    {   // Marina Green mega kicker: nothing faces the kicker with a wall, and a jump off the lip rides away (#94)
+        float wallAt = 0, prev = W.ground(-486, -1046, 1e4f);
+        for (float x = -485.9f; x < -425; x += 0.1f) {
+            float g = W.ground(x, -1046, 1e4f);
+            if (g - prev > 0.3f && !wallAt) wallAt = x;
+            prev = g;
+        }
+        int ok = 0, tot = 0; char got[160] = "";
+        for (float v : {12.f, 15.f}) for (bool pop : {true, false}) {
+            tot++;
+            Sim s; s.spawn(-495, -1046, 0, v);
+            bool popped = false, clear = false;
+            for (int f = 0; f < 60 * 20 && s.p.state != Player::BAIL && !clear; f++) {
+                Input in;
+                in.push = s.p.state == Player::RIDE && s.p.pos.x < -484 && s.p.speed < v;   // hold the speed on the run-in, coast up the kicker
+                if (pop && !popped && s.p.state == Player::RIDE && s.p.pos.x > -470.5f) in.ollie = popped = true;   // ollie at the lip
+                s.p.update(1.f / 60, in, W);
+                clear = s.p.pos.x > -428 && s.p.state == Player::RIDE;
+            }
+            if (clear && popped == pop) ok++;
+            else if (!got[0]) snprintf(got, sizeof got, " (%.0f m/s%s: x %.1f, %s '%s')", v, pop ? " ollie" : "", s.p.pos.x,
+                                       s.p.state == Player::BAIL ? "bailed" : "stopped", s.p.popup.c_str());
+        }
+        snprintf(b, sizeof b, "wall facing kicker at x %.1f; %d of %d runs rode clear%s", wallAt, ok, tot, got);
+        check(!wallAt && ok == tot, "Marina Green kicker lands clean", b);
+    }
     {   // rolling off the Marina Green mega kicker (3.4 m, lip at x -468) without an ollie flies up and out,
         // not slammed down by a slope sample read past the lip (#93)
         int ok = 0; char got[160] = "";

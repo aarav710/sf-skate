@@ -1082,7 +1082,7 @@ void World::buildMeta() {
     spot("Menlo Park", mp.node(5, 0).x - 20, mp.node(0, 4).y + 2.4f, PI);
 
     auto tok = [&](const char* n, float x, float z) { tokens.push_back({{x, G(x, z) + 1.4f, z}, n}); };
-    tok("Coit Tower", 880, -852);
+    tok("Coit Tower", 880, -904);   // behind the tower, well away from the teleport spot on the south plaza
     tok("Golden Gate Bridge", -1100, -1690);
     tok("Twin Peaks", -300, 905);
     tok("Lombard Street", gx(17) + 3, gz(3));

@@ -236,6 +236,75 @@ int main() {
         snprintf(b, sizeof b, "deflected %d of 2, landed clean %d, board off line %.0f deg, spin trick=%d", deflected, ok, worst * RAD2DEG, spinTrick);
         check(deflected == 2 && ok == 2 && worst < 0.05f && !spinTrick, "mid-air pole clip lands", b);
     }
+    {   // rolling fakie off the Embarcadero Plaza deck, or ollieing fakie, keeps the board facing the same way (issue #46)
+        auto fakie = [&](float x, float z, float yaw, bool pop, const char* name, long long okLo, long long okHi, float spd = -4) {
+            Sim s; s.spawn(x, z, yaw, spd);
+            float jump = 0, prev = s.p.yaw;
+            bool air = false;
+            if (pop) { Input in; in.ollie = true; s.run(1, in); air = s.p.state == Player::AIR; jump = fabsf(wrapPi(s.p.yaw - prev)); prev = s.p.yaw; }
+            s.run(150, Input{}, [&](Player& p) {   // takeoff, landing and bounce, then rolling on
+                air |= p.state == Player::AIR;
+                jump = std::max(jump, fabsf(wrapPi(p.yaw - prev)));
+                prev = p.yaw;
+                return false;
+            });
+            snprintf(b, sizeof b, "air=%d max yaw step %.2f rad, state=%d speed=%.1f score=%lld %s", air, jump, s.p.state, s.p.speed, s.p.score, s.p.subPopup.c_str());
+            check(air && jump < 0.05f && s.p.state == Player::RIDE && s.p.speed < 0 && s.p.score >= okLo && s.p.score <= okHi, name, b);
+        };
+        fakie(1173, -300, 0, false, "roll off a ledge fakie: no snap", 0, 0);
+        fakie(1045 + 2.4f, -80, PI / 2, true, "fakie ollie: no snap, no spin", 100, 150);
+        fakie(1045 + 2.4f, -80, PI / 2, true, "slow fakie ollie stays fakie", 100, 150, -0.8f);
+    }
+    {   // ...a 180 from fakie lands forwards, and it's the 180 that scores, not "to Fakie"
+        Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, -8);
+        Input in; in.ollie = true; s.run(1, in);
+        Input sp; sp.steer = 1; s.run(63, sp, [](Player& p) { return fabsf(p.spinAccum) >= PI; });
+        s.run(120, Input{}, [](Player& p) { return p.state == Player::RIDE; });
+        snprintf(b, sizeof b, "state=%d speed=%.1f banked \"%s\"", s.p.state, s.p.speed, s.p.subPopup.c_str());
+        check(s.p.state == Player::RIDE && s.p.speed > 0 && s.p.subPopup.find("180") != std::string::npos &&
+              s.p.subPopup.find("Fakie") == std::string::npos, "fakie 180 lands forwards", b);
+    }
+    {   // ...and ollieing fakie onto the Embarcadero Plaza Flat Bar grinds fakie, then rolls away fakie
+        int ok = 0, tries = 6; float worst = 0; char last[200] = "";
+        for (int t = 0; t < tries; t++) {
+            SetRandomSeed(4600 + t);
+            Sim s; s.spawn(1186, -238, PI, -7);
+            s.run(60, Input{}, [](Player& p) { return p.pos.x > 1193.5f; });
+            float prev = s.p.yaw, jump = 0;
+            bool grind = false, settled = false;
+            std::string tricks;
+            auto track = [&](Player& p) { jump = std::max(jump, fabsf(wrapPi(p.yaw - prev))); prev = p.yaw; };
+            Input in; in.ollie = true; s.run(1, in, [&](Player& p) { track(p); return false; });
+            for (int f = 0; f < 600 && !settled && s.p.state != Player::BAIL; f++) {
+                Input bal; // follow the HUD meter, as in the grind balance check
+                if (s.p.state == Player::GRIND) bal.steer = s.p.balance > 0.1f ? -1.f : s.p.balance < -0.1f ? 1.f : 0.f;
+                s.run(1, bal, [&](Player& p) { track(p); return false; });
+                if (s.p.state == Player::GRIND) { grind = true; tricks = s.p.combo.back(); }
+                settled = grind && s.p.state == Player::RIDE && !s.p.bouncing;
+            }
+            s.run(10, Input{}, [&](Player& p) { track(p); return false; });
+            worst = std::max(worst, jump);
+            bool good = grind && jump < 0.05f && s.p.state == Player::RIDE && s.p.speed < 0 && tricks.rfind("Fakie 50-50", 0) == 0;
+            ok += good;
+            if (!good || !last[0]) snprintf(last, sizeof last, " (seed %d: grind=%d \"%s\" yaw step %.2f, state=%d speed=%.1f)", t, grind, tricks.c_str(), jump, s.p.state, s.p.speed);
+        }
+        snprintf(b, sizeof b, "%d of %d fakie grinds rolled away fakie, worst yaw step %.2f rad%s", ok, tries, worst, last);
+        check(ok == tries, "fakie grind: no snap", b);
+    }
+    {   // ...and losing balance on a fakie 50-50 throws the board and rider on along the rail (+x), not back up it
+        SetRandomSeed(4700);
+        Sim s; s.spawn(1186, -238, PI, -7);
+        s.run(60, Input{}, [](Player& p) { return p.pos.x > 1193.5f; });
+        Input in; in.ollie = true; s.run(1, in);
+        bool grind = s.run(90, Input{}, [](Player& p) { return p.state == Player::GRIND; });
+        Input lean; lean.steer = 1;   // push the balance off the meter
+        s.run(240, lean, [](Player& p) { return p.state != Player::GRIND; });
+        bool bailed = s.p.state == Player::BAIL;
+        Vector3 bv = s.p.boardVel; float x0 = s.p.pos.x;
+        s.run(30, Input{});
+        snprintf(b, sizeof b, "grind=%d bailed=%d board vel %.1f,%.1f, rider moved %.2f m in x", grind, bailed, bv.x, bv.z, s.p.pos.x - x0);
+        check(grind && bailed && bv.x > 1.f && s.p.pos.x - x0 > 0.2f, "fakie grind bail goes along travel", b);
+    }
     {   // ...but flying into a building wall at a steep angle is still a crash
         int bailed = 0, tot = 0;
         for (float sp : {8.f, 10.f})
@@ -353,6 +422,19 @@ int main() {
         });
         snprintf(b, sizeof b, "air=%d landed=%d dropped %.2f m", air, landed, y0 - s.p.pos.y);
         check(air && landed && y0 - s.p.pos.y > 1.4f, "slow roll off a drop goes airborne", b);
+    }
+    {   // ...and rolling slowly off it fakie keeps going away from the edge after landing, not back into the deck (#46)
+        int ok = 0; char got[160] = "";
+        for (float spd : {-0.6f, -1.0f}) {
+            Sim s; s.spawn(1170.4f, -300, 0, spd);
+            float y0 = s.p.pos.y; bool air = false;
+            s.run(180, Input{}, [&](Player& q) { air |= q.state == Player::AIR; return false; });
+            bool good = air && y0 - s.p.pos.y > 1.4f && s.p.state == Player::RIDE && s.p.speed < 0 && s.p.pos.x < 1169.5f;
+            ok += good;
+            if (!good && !got[0]) snprintf(got, sizeof got, " (%.1f m/s: air=%d dropped %.2f, x %.2f, speed %.2f, state %d)", spd, air, y0 - s.p.pos.y, s.p.pos.x, s.p.speed, s.p.state);
+        }
+        snprintf(b, sizeof b, "%d of 2 slow fakie roll-offs kept rolling away from the edge%s", ok, got);
+        check(ok == 2, "slow fakie roll off a drop", b);
     }
     {   // braking at rest on a steep hill holds without creeping
         Sim s; s.spawn(-282, 878, -0.6f, 0);

@@ -47,6 +47,7 @@ void Player::bankCombo() {
 void Player::bail(const char* why) {
     if (state == BAIL) return;
     airClip = false;
+    if (state == GRIND && railFakie) yaw = wrapPi(yaw + PI); // fakie 50-50: fall along the rail travel, not back up it
     Vector3 f = state == AIR ? vel : Vector3Scale(fwd(), speed);
     if (state == AIR) {
         float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
@@ -174,8 +175,7 @@ void Player::ride(float dt, const Input& in, World& w) {
         state = AIR;
         airTime = 0;
         spinAccum = 0;
-        grabbed = false;
-        if (speed < 0) { yaw = wrapPi(yaw + PI); }
+        grabbed = false;   // rolling fakie keeps its yaw: the air and the landing read it from yaw vs velocity
         return;
     }
     Vector3 f2 = fwd();
@@ -192,7 +192,6 @@ void Player::ride(float dt, const Input& in, World& w) {
         return;
     }
     if (in.ollie && fabsf(speed) < 40) {
-        if (speed < 0) { yaw = wrapPi(yaw + PI); speed = -speed; } // pop out of fakie rolling
         ollie(7.4f + clampf(fabsf(speed) * 0.03f, 0, 0.6f));
         // going uphill, pop off the slope rather than off flat ground: keep the climb the board already had,
         // or a fast ollie up a steep hill leaves the skater inside the rising hillside
@@ -285,11 +284,12 @@ void Player::air(float dt, const Input& in, World& w) {
             speed = std::max(3.5f, hv * fabsf(al));
             Vector2 bf = {cosf(yaw), sinf(yaw)};
             boardslide = fabsf(bf.x * rd.x + bf.y * rd.y) < 0.6f;
+            railFakie = !boardslide && bf.x * vel.x + bf.y * vel.z < 0; // came in backwards: grind fakie rather than snapping round
             balance = 0;
             balanceVel = (GetRandomValue(0, 1) ? 1 : -1) * 0.3f;
             state = GRIND;
             airClip = false;
-            std::string nm = boardslide ? "Boardslide" : "50-50";
+            std::string nm = boardslide ? "Boardslide" : railFakie ? "Fakie 50-50" : "50-50";
             if (r.name) nm += std::string(" (") + r.name + ")";
             addTrick(nm, 250);
             if (airTime > 0.6f && spinAccum != 0) {
@@ -331,10 +331,15 @@ void Player::land(World& w, float g) {
     if (shoveT >= 0 && shoveT < shoveDur * 0.75f) { bail("Didn't finish the shove-it"); return; }
     if (vy < -21.f) { bail("Way too much drop"); return; }
     float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
-    float diff = hv > 1.f ? wrapPi(yaw - atan2f(vel.z, vel.x)) : 0.f;
+    // barely moving: forgive the angle, but keep a backwards drift backwards
+    float diff = hv > 1.f ? wrapPi(yaw - atan2f(vel.z, vel.x)) : (vel.x * cosf(yaw) + vel.z * sinf(yaw) < 0 ? PI : 0.f);
     bool fakie = false;
     if (fabsf(diff) > 0.65f) {
-        if (fabsf(fabsf(diff) - PI) < 0.65f) { fakie = true; yaw = wrapPi(yaw + PI); diff = wrapPi(yaw - atan2f(vel.z, vel.x)); }
+        if (fabsf(fabsf(diff) - PI) < 0.65f) {
+            // an odd number of half spins brought it round: ride out the other way. No spin: it left the ground
+            // rolling fakie, so it rolls on fakie (negative speed) instead of snapping round
+            if ((int)roundf(fabsf(spinAccum) / PI) % 2) { fakie = true; yaw = wrapPi(yaw + PI); diff = wrapPi(yaw - atan2f(vel.z, vel.x)); }
+        }
         else { bail("Landed sideways"); return; }
     }
     flipT = shoveT = -1;
@@ -393,7 +398,7 @@ void Player::grind(float dt, const Input& in, World& w) {
     // balance: tap the opposite direction to stay on (D pushes balance, and the HUD marker, right)
     balanceVel += ((GetRandomValue(-100, 100) / 100.f) * 2.4f + balance * 2.4f + in.steer * 4.2f) * dt;
     balance += balanceVel * dt;
-    lean = balance * 0.8f;
+    lean = balance * (railFakie ? -0.8f : 0.8f); // board turned round: mirror, so the rider still tips toward the HUD marker
     if (fabsf(balance) > 1.f) { bail("Lost balance on the rail"); return; }
     if (speed < 1.0f) {
         state = AIR; vel = {dir.x * railDir * 1.5f, 0, dir.y * railDir * 1.5f}; vy = 0; airTime = 0; spinAccum = 0;
@@ -410,7 +415,7 @@ void Player::grind(float dt, const Input& in, World& w) {
         pos = off;
         return;
     }
-    if (!boardslide) yaw = atan2f(dir.y * railDir, dir.x * railDir);
+    if (!boardslide) yaw = wrapPi(atan2f(dir.y * railDir, dir.x * railDir) + (railFakie ? PI : 0.f));
     railT += railDir * speed * dt / Lxz;
     if (railT >= 1.f || railT <= 0.f) {
         railT = clampf(railT, 0, 1);

@@ -343,6 +343,17 @@ int main() {
         snprintf(b, sizeof b, "%d of 2 rested at the deck edge%s", held, got);
         check(held == 2, "no pull over a drop edge", b);
     }
+    {   // rolling slowly off that edge still drops through the air and lands, not a one-frame teleport down
+        Sim s; s.spawn(1171.5f, -300, PI, 1.0f);
+        float y0 = s.p.pos.y; bool air = false, landed = false;
+        s.run(240, Input{}, [&](Player& q) {
+            air |= q.state == Player::AIR;
+            landed |= air && q.evLand;
+            return landed;
+        });
+        snprintf(b, sizeof b, "air=%d landed=%d dropped %.2f m", air, landed, y0 - s.p.pos.y);
+        check(air && landed && y0 - s.p.pos.y > 1.4f, "slow roll off a drop goes airborne", b);
+    }
     {   // braking at rest on a steep hill holds without creeping
         Sim s; s.spawn(-282, 878, -0.6f, 0);
         Vector3 p0 = s.p.pos;

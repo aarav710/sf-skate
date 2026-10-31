@@ -165,8 +165,8 @@ void Player::ride(float dt, const Input& in, World& w) {
     }
     float g = w.ground(np.x, np.z, pos.y);
     float predicted = pos.y + rideVy * dt - 0.5f * GRAVITY * dt * dt;
-    if (g < predicted - 0.06f && fabsf(speed) > 1.5f) {
-        // the ground dropped away: we're flying (ramp lip, stairs, crest)
+    if (g < predicted - 0.06f && (fabsf(speed) > 1.5f || g < pos.y - STEP_UP)) {
+        // the ground dropped away: we're flying (ramp lip, stairs, crest, or rolling slowly off a real drop)
         pos = np;
         pos.y = predicted;
         vel = Vector3Scale(f, speed);

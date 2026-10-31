@@ -541,6 +541,29 @@ int main() {
         }
         check(tot == 4 && ok == tot, "grind stop steps off onto the deck", det);
     }
+    {   // a boardslide that slows to a stop on the Embarcadero Flat Bar rolls out like a 50-50, not "Landed sideways"
+        int ri = -1;
+        for (int i = 0; i < (int)W.rails.size(); i++) if (strcmp(W.rails[i].name, "Flat Bar") == 0) ri = i;
+        int ok = 0, tot = 0;
+        char det[400] = "";
+        for (int bs = 0; bs <= 1 && ri >= 0; bs++)
+            for (int dirn = -1; dirn <= 1; dirn += 2) {
+                const Rail& r = W.rails[ri];
+                SetRandomSeed(8400 + tot);
+                Sim s; s.spawn(1205, -238, 0, 0);
+                float t = 0.5f, along = atan2f((r.b.z - r.a.z) * dirn, (r.b.x - r.a.x) * dirn);
+                s.p.state = Player::GRIND; s.p.rail = ri; s.p.railT = t; s.p.railDir = dirn; s.p.railFakie = false;
+                s.p.boardslide = bs; s.p.yaw = wrapPi(along + (bs ? PI / 2 : 0.f));
+                s.p.pos = Vector3Lerp(r.a, r.b, t); s.p.speed = 0.5f; s.p.balance = s.p.balanceVel = 0;
+                s.p.combo = {bs ? "Boardslide (Flat Bar)" : "50-50 (Flat Bar)"}; s.p.comboPts = 500;
+                s.run(180, Input{}, [](Player& p) { return p.state == Player::RIDE || p.state == Player::BAIL; });
+                bool good = s.p.state == Player::RIDE && s.p.score > 0;
+                tot++; ok += good;
+                char one[120]; snprintf(one, sizeof one, "%s%s st=%d score=%lld %s; ", bs ? "board" : "50-50", dirn > 0 ? "+" : "-", s.p.state, s.p.score, s.p.subPopup.c_str());
+                strncat(det, one, sizeof det - strlen(det) - 1);
+            }
+        check(tot == 4 && ok == tot, "boardslide stop rolls out", det);
+    }
     {   // ride the length of the Bay Bridge deck
         Sim s; s.spawn(1500, 335 + 4, 0, 10);
         Input in; in.push = true; in.tuck = true;

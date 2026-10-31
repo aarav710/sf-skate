@@ -70,7 +70,11 @@ void Birds::update(float dt, const World& w, Vector3 sk, float skSpeed) {
             if (fmodf(b.t + b.phase, 2.3f) < dt * 1.5f) b.yaw += sinf(b.phase * 7 + b.t) * 1.4f;
             if (fmodf(b.t * 1.7f + b.phase, 3.f) < 0.6f) {
                 float nx = b.pos.x + cosf(b.yaw) * 0.35f * dt, nz = b.pos.z + sinf(b.yaw) * 0.35f * dt;
-                if (sq(nx - b.home.x) + sq(nz - b.home.z) < 64) { b.pos.x = nx; b.pos.z = nz; }
+                // follow the paving up and down the slope, but turn back from a kerb or ledge too tall to hop
+                float ny = w.ground(nx, nz, b.pos.y);
+                Vector3 np = {nx, ny, nz};
+                if (sq(nx - b.home.x) + sq(nz - b.home.z) < 64 && fabsf(ny - b.pos.y) < 0.3f && !w.collide(np, 0.1f, ny, 0.3f, nullptr))
+                    b.pos = {nx, ny, nz};
                 else b.yaw += PI * 0.7f;
             }
             // something on wheels comes through: everyone nearby goes up at once

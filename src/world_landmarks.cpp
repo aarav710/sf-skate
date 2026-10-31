@@ -127,6 +127,13 @@ static float bbDeck(float s) {
     return gBB.back().y;
 }
 
+// a bridge pier: drawn always, and solid where it stands in the water so boats can't pass through it (#63);
+// the ones on land stay mesh-only, as before, so nothing that drives or walks there changes
+void World::addBridgePier(MeshBuilder& m, float x0, float z0, float x1, float z1, float lo, float hi, Color c) {
+    m.box({x0, lo, z0}, {x1, hi, z1}, c, c, 0.8f);
+    if (terrain((x0 + x1) / 2, (z0 + z1) / 2) < 0.05f) addPlat({x0, x1, z0, z1, hi, hi, lo, 0, PK_BUILDING});
+}
+
 void World::buildGoldenGate() {
     const float X = -1100, HW = 14;
     Color orange = col(192, 58, 40), conc = col(160, 158, 152);
@@ -150,8 +157,8 @@ void World::buildGoldenGate() {
     // towers
     for (float tz : {-1250.f, -2130.f}) {
         m.box({X - 30, -10, tz - 14}, {X + 30, 5, tz + 14}, conc, conc, 0.8f);
-        addPlat({X - 30, X + 30, tz - 14, tz - 9, 5, 5, -10, 0, PK_BUILDING});
-        addPlat({X - 30, X + 30, tz + 9, tz + 14, 5, 5, -10, 0, PK_BUILDING});
+        // the whole concrete base is solid (not just its two ends), so boats can't run through between the legs (#63)
+        addPlat({X - 30, X + 30, tz - 14, tz + 14, 5, 5, -10, 0, PK_BUILDING});
         for (int sd = -1; sd <= 1; sd += 2) {
             float lx = X + sd * 19.5f;
             m.box({lx - 4.5f, 5, tz - 5.5f}, {lx + 4.5f, 85, tz + 5.5f}, orange, orange, 0.85f);
@@ -185,12 +192,12 @@ void World::buildGoldenGate() {
     for (float z = -1060; z > -1240; z -= 45) {
         float y = ggDeck(z);
         for (int sd = -1; sd <= 1; sd += 2)
-            m.box({X + sd * 10 - 2, terrain(X, z) - 2, z - 2}, {X + sd * 10 + 2, y - 6, z + 2}, orange, orange, 0.8f);
+            addBridgePier(m, X + sd * 10 - 2, z - 2, X + sd * 10 + 2, z + 2, terrain(X, z) - 2, y - 6, orange);
     }
     for (float z = -2150; z > -2320; z -= 45) {
         float y = ggDeck(z);
         for (int sd = -1; sd <= 1; sd += 2)
-            m.box({X + sd * 10 - 2, std::min(terrain(X, z), 0.f) - 2, z - 2}, {X + sd * 10 + 2, y - 6, z + 2}, orange, orange, 0.8f);
+            addBridgePier(m, X + sd * 10 - 2, z - 2, X + sd * 10 + 2, z + 2, std::min(terrain(X, z), 0.f) - 2, y - 6, orange);
     }
     // Vista Point plaza on the Marin side
     {
@@ -240,6 +247,7 @@ void World::buildBayBridge() {
     float towers[] = {1580, 1820, 2030, 2270};
     for (float tx : towers) {
         m.box({tx - 10, -10, Z - 28}, {tx + 10, 4, Z + 28}, conc, conc, 0.8f);
+        addPlat({tx - 10, tx + 10, Z - 28, Z + 28, 4, 4, -10, 0, PK_BUILDING});   // the base in the water (#63)
         for (int sd = -1; sd <= 1; sd += 2) {
             float lz = Z + sd * 19.5f;
             m.box({tx - 3.5f, 4, lz - 3.5f}, {tx + 3.5f, 142, lz + 3.5f}, steel, steel, 0.85f);
@@ -258,6 +266,7 @@ void World::buildBayBridge() {
         float y = bbDeck(ax);
         float top = ax == 1925 ? y + 22 : y + 5;
         m.box({ax - 20, -10, Z - 25}, {ax + 20, y - 6, Z + 25}, conc, conc, 0.8f);
+        addPlat({ax - 20, ax + 20, Z - 25, Z + 25, y - 6, y - 6, -10, 0, PK_BUILDING});   // solid down to the water (#63)
         for (int sd = -1; sd <= 1; sd += 2)
             m.box({ax - 20, y - 6, sd > 0 ? Z + 15.5f : Z - 25}, {ax + 20, top, sd > 0 ? Z + 25 : Z - 15.5f}, conc, conc, 0.85f);
     }
@@ -275,6 +284,7 @@ void World::buildBayBridge() {
     {
         float tx = 3050;
         m.box({tx - 12, -10, Z - 30}, {tx + 12, 4, Z + 30}, conc, conc, 0.8f);
+        addPlat({tx - 12, tx + 12, Z - 30, Z + 30, 4, 4, -10, 0, PK_BUILDING});
         for (int sd = -1; sd <= 1; sd += 2) {
             float lz = Z + sd * 19.0f;
             m.box({tx - 3.0f, 4, lz - 3.0f}, {tx + 3.0f, 160, lz + 3.0f}, white, white, 0.9f);
@@ -296,7 +306,7 @@ void World::buildBayBridge() {
         float y = bbDeck(x);
         float g = std::min(terrain(x, Z), 0.f) - 2;
         for (int sd = -1; sd <= 1; sd += 2)
-            m.box({x - 2, g, Z + sd * 9 - 2}, {x + 2, y - 6, Z + sd * 9 + 2}, conc, conc, 0.8f);
+            addBridgePier(m, x - 2, Z + sd * 9 - 2, x + 2, Z + sd * 9 + 2, g, y - 6, conc);
     }
     Path P;
     // cars U-turn at the city end up on the approach ramp, the loop (9.5 m outer lane) clear of the Embarcadero
@@ -332,7 +342,16 @@ void World::buildLandmarks() {
         }
         m.beam({cx, y + H - 5, cz}, {cx, y + H + 35, cz}, 0.8f, 0.8f, col(236, 233, 226));
         m.box({cx - 0.5f, y + H + 35, cz - 0.5f}, {cx + 0.5f, y + H + 37, cz + 0.5f}, col(255, 40, 30, M_EMISSIVE));
-        addPlat({cx - b + 3, cx + b - 3, cz - b + 3, cz + b - 3, y + 120, y + 120, y, 0, PK_BUILDING});
+        // collision steps up the taper: each box is as wide as the glass at its own top, so it sits just inside the
+        // walls all the way down (the old single +-15 box let the skater ride 2.4 m into the base, #65)
+        for (float t : {4.f, 20.f, 40.f, 60.f, 80.f, 100.f, 120.f, 140.f, 160.f}) {
+            float hw = b * (1 - t / H);
+            addPlat({cx - hw, cx + hw, cz - hw, cz + hw, y + t, y + t, y, 0, PK_BUILDING});
+        }
+        for (int sd = -1; sd <= 1; sd += 2) { // the wings stick out past the taper above 95 m
+            float off = b * (1 - 95 / H);
+            addPlat({cx + (sd > 0 ? off : -off - 5), cx + (sd > 0 ? off + 5 : -off), cz - 4, cz + 4, y + 178, y + 178, y + 95, 0, PK_BUILDING});
+        }
         for (int k = 0; k < 6; k++) addTree(cx - 40 + k * 4, cz + 30, 0, 0.9f, r, true);
     }
     // --- Salesforce Tower (rounded glass obelisk with a glowing crown)
@@ -342,7 +361,18 @@ void World::buildLandmarks() {
         Color g = col(178, 190, 198, M_GLASS);
         m.prism({cx, y, cz}, 16, 23, 18, 200, g, g, 0.2f, false);
         m.prism({cx, y + 200, cz}, 16, 18, 15, 20, col(220, 225, 235, M_EMISSIVE), col(90, 90, 95), 0.2f, true);
-        addPlat({cx - 18, cx + 18, cz - 18, cz + 18, y + 220, y + 220, y, 0, PK_BUILDING});
+        // collision for the round, tapering shaft: at each step a stack of centred boxes whose corners sit on the
+        // glass radius at that step's top. At the deepest (45 deg) notches the skater's centre stops about 0.6 m
+        // inside the glass's flat face, against 4.6 m inside the 23 m base with the old +-18 square (#65)
+        auto disc = [&](float top, float rad, int k) {
+            for (int i = 0; i < k; i++) {
+                float a = (i + 0.5f) * (PI / 2) / k, hx = rad * cosf(a), hz = rad * sinf(a);
+                addPlat({cx - hx, cx + hx, cz - hz, cz + hz, y + top, y + top, y, 0, PK_BUILDING});
+            }
+        };
+        disc(4, 23 - 5 * 4 / 200.f, 12);   // street level, where the skater rides: finest fit
+        for (float t : {50.f, 100.f, 150.f, 200.f}) disc(t, 23 - 5 * t / 200, 8);
+        disc(220, 15, 8);                  // the crown's roof
         m.box({cx - 40, y + 0.9f, cz + 25}, {cx + 40, y + 1.4f, cz + 40}, col(90, 140, 70)); // rooftop-park nod
     }
     // --- Coit Tower on Telegraph Hill
@@ -364,7 +394,12 @@ void World::buildLandmarks() {
         Color w = col(216, 212, 202, M_HOUSE), roof = col(170, 168, 160);
         addBox(cx - 45, cz - 32, cx + 45, cz + 32, y - 1, y + 24, PK_BUILDING, w, roof);
         m.box({cx - 20, y + 0.5f, cz - 38}, {cx + 20, y + 20, cz - 32}, col(225, 220, 210), roof, 0.9f); // portico
-        for (int k = 0; k < 8; k++) m.prism({cx - 17.5f + k * 5, y + 0.5f, cz - 39}, 8, 0.8f, 0.8f, 19, col(235, 232, 225), w);
+        addPlat({cx - 20, cx + 20, cz - 38, cz - 32, y + 20, y + 20, y - 1, 0, PK_BUILDING});
+        for (int k = 0; k < 8; k++) {   // the front columns, solid like the Palace of Fine Arts' ones
+            float px = cx - 17.5f + k * 5, pz = cz - 39;
+            m.prism({px, y + 0.5f, pz}, 8, 0.8f, 0.8f, 19, col(235, 232, 225), w);
+            addPlat({px - 0.8f, px + 0.8f, pz - 0.8f, pz + 0.8f, y + 19.5f, y + 19.5f, y - 1, 0, PK_POLE});
+        }
         m.prism({cx, y + 24, cz}, 16, 15, 15, 14, w, w);
         Color gold = col(212, 172, 72);
         m.sphere({cx, y + 38, cz}, 15, 12, 18, gold, true);
@@ -392,9 +427,11 @@ void World::buildLandmarks() {
             m.box({px - 1.5f, py + 12, pz - 1.5f}, {px + 1.5f, py + 13.5f, pz + 1.5f}, peach);
             addPlat({px - 1, px + 1, pz - 1, pz + 1, py + 12, py + 12, py - 1, 0, PK_POLE});
         }
-        ponds.push_back({cx + 25, cz - 30, cx + 90, cz + 25, "lagoon"});
-        float py = terrain(cx + 55, cz) - 0.3f;
-        m.quad({cx + 25, py, cz - 30}, {cx + 90, py, cz - 30}, {cx + 90, py, cz + 25}, {cx + 25, py, cz + 25}, col(50, 100, 110, M_WATER));
+        // the lagoon sits in a basin dug into the terrain (rawHeight). The sheet reaches one ground cell past the
+        // splash rectangle, over the bank, so the shoreline is drawn where the bank rises out of the water
+        ponds.push_back({LAGOON_X0, LAGOON_Z0, LAGOON_X1, LAGOON_Z1, "lagoon"});
+        float wx0 = LAGOON_X0 - 10, wx1 = LAGOON_X1 + 10, wz0 = LAGOON_Z0 - 10, wz1 = LAGOON_Z1 + 10, py = LAGOON_Y;
+        m.quad({wx0, py, wz0}, {wx1, py, wz0}, {wx1, py, wz1}, {wx0, py, wz1}, col(50, 100, 110, M_WATER));
     }
     // --- Sutro Tower
     {
@@ -475,13 +512,29 @@ void World::buildLandmarks() {
         addBox(1175, 684, 1225, 698, y - 1, y + 18, PK_BUILDING, brick, col(60, 90, 70));
         addBox(1245, 684, 1300, 698, y - 1, y + 18, PK_BUILDING, brick, col(60, 90, 70));
         addBox(1300, 690, 1312, 868, y - 1, y + 3, PK_PROP, col(40, 80, 60), col(40, 80, 60));
+        // grandstand: a seating bank rising from a 2 m front wall at x 1195 up to the back wall at x 1175
         m.slab(1175, 1195, 698, 852, y + 18, y + 2, 0, y, col(40, 90, 70), brick);
+        addPlat({1175, 1195, 698, 852, y + 18, y + 2, y - 1, 0, PK_PROP});
         m.box({1280, y, 702}, {1298, y + 26, 708}, col(30, 30, 34), col(30, 30, 34));       // scoreboard
-        m.prism({1290, y + 3, 715}, 10, 2.5f, 1.2f, 18, col(190, 30, 30), col(190, 30, 30));  // the giant bottle
-        m.sphere({1290, y + 12, 735}, 6, 8, 10, col(140, 90, 50));                           // the giant glove
-        for (Vector2 t : {Vector2{1165, 690}, Vector2{1165, 862}, Vector2{1295, 860}})
-            m.box({t.x - 0.7f, y, t.y - 0.7f}, {t.x + 0.7f, y + 40, t.y + 0.7f}, col(80, 80, 85)),
+        addPlat({1280, 1298, 702, 708, y + 26, y + 26, y - 1, 0, PK_PROP});
+        // the giant bottle stands on a plinth (it used to float 3 m over the grass); solid down to the field
+        Color red = col(190, 30, 30);
+        m.box({1287.5f, y, 712.5f}, {1292.5f, y + 3, 717.5f}, brick, brick);
+        m.prism({1290, y + 3, 715}, 10, 2.5f, 1.2f, 18, red, red);
+        addPlat({1287.5f, 1292.5f, 712.5f, 717.5f, y + 3, y + 3, y - 1, 0, PK_PROP});      // plinth
+        addPlat({1288.2f, 1291.8f, 713.2f, 716.8f, y + 21, y + 21, y - 1, 0, PK_PROP});    // bottle (its tapering 10-gon, roughly)
+        // the giant glove sits on a pedestal (it used to float 6 m over the grass); the glove itself is approximated by
+        // a box around the core of its r 6 sphere
+        Color leather = col(140, 90, 50);
+        m.box({1287.5f, y, 732.5f}, {1292.5f, y + 7, 737.5f}, brick, brick);
+        m.sphere({1290, y + 12, 735}, 6, 8, 10, leather);
+        addPlat({1287.5f, 1292.5f, 732.5f, 737.5f, y + 7, y + 7, y - 1, 0, PK_PROP});      // pedestal
+        addPlat({1285.8f, 1294.2f, 730.8f, 739.2f, y + 16, y + 16, y + 8, 0, PK_PROP});    // glove
+        for (Vector2 t : {Vector2{1165, 690}, Vector2{1165, 862}, Vector2{1295, 860}}) {     // light towers
+            m.box({t.x - 0.7f, y, t.y - 0.7f}, {t.x + 0.7f, y + 40, t.y + 0.7f}, col(80, 80, 85));
             m.box({t.x - 3, y + 38, t.y - 3}, {t.x + 3, y + 42, t.y + 3}, col(255, 250, 220, M_EMISSIVE));
+            addPlat({t.x - 0.7f, t.x + 0.7f, t.y - 0.7f, t.y + 0.7f, y + 40, y + 40, y - 1, 0, PK_POLE});
+        }
     }
     buildAlcatraz();
     // --- Treasure Island hangars
@@ -548,16 +601,29 @@ void World::buildWaterfront() {
     }
     // Piers along the Embarcadero
     for (float zc : {-800.f, -660.f, -520.f, -380.f, 50.f, 180.f, 480.f}) {
-        float y = terrain(1290, zc) + 0.02f;
-        float x0 = 1290, x1 = 1480;
+        float root = 1290, x1 = 1480;   // the shed and the piles stand from the root out
+        float x0 = root, y = terrain(root, zc) + 0.02f;
+        if (y < 2.4f) {
+            // The north end of the promenade runs out past the seawall: at z -800 the shore has already dropped into
+            // the bay at the root. Run the deck back west over the shore to where the promenade is still up at its
+            // height across the whole width, and build it at that height, so you roll straight off the promenade
+            // onto it (never under the bay, and no step up out of the water at its end).
+            auto lowest = [&](float x) {
+                float h = 1e9f;
+                for (float z = zc - 15; z <= zc + 15; z += 2.5f) h = std::min(h, terrain(x, z));
+                return h;
+            };
+            while (x0 > root - 40 && lowest(x0) < 2.4f) x0 -= 1;
+            y = std::max(lowest(x0), 2.0f) + 0.02f;
+        }
         MeshBuilder& m = mb(1380, zc);
         m.box({x0, -3, zc - 15}, {x1, y, zc + 15}, col(110, 100, 90), wood, 0.7f);
         addPlat({x0, x1, zc - 15, zc + 15, y, y, -4, 0, PK_PIER});
-        for (float x = x0 + 10; x < x1; x += 15)
+        for (float x = root + 10; x < x1; x += 15)
             for (int sd = -1; sd <= 1; sd += 2) m.beam({x, -4, zc + sd * 14}, {x, y - 0.5f, zc + sd * 14}, 0.6f, 0.6f, col(80, 70, 60));
-        addBox(x0 + 12, zc - 11, x1 - 8, zc + 11, y - 0.5f, y + 11, PK_BUILDING, pale, roof);
-        addBox(x0 + 4, zc - 13, x0 + 12, zc + 13, y - 0.5f, y + 14, PK_BUILDING, col(236, 230, 214, M_HOUSE), col(200, 195, 185));
-        m.gable(x0 + 12, x1 - 8, zc - 11, zc + 11, y + 11, 3.5f, 0, roof, pale);
+        addBox(root + 12, zc - 11, x1 - 8, zc + 11, y - 0.5f, y + 11, PK_BUILDING, pale, roof);
+        addBox(root + 4, zc - 13, root + 12, zc + 13, y - 0.5f, y + 14, PK_BUILDING, col(236, 230, 214, M_HOUSE), col(200, 195, 185));
+        m.gable(root + 12, x1 - 8, zc - 11, zc + 11, y + 11, 3.5f, 0, roof, pale);
     }
     // Pier 39
     {
@@ -591,6 +657,8 @@ void World::buildWaterfront() {
         MeshBuilder& m = mb(495, -1200);
         m.obox({495, 1.5f, -1200}, {35, 3.5f, 5.5f}, -PI / 2, 0, col(28, 28, 30));
         m.obox({495, 5.1f, -1200}, {34, 0.2f, 5.2f}, -PI / 2, 0, col(150, 120, 90));
+        // the hull is solid (it ran 489.5..500.5 x -1235..-1165, keel underwater, deck at 5.3): boats bump it (#63)
+        addPlat({489.5f, 500.5f, -1235, -1165, 5.3f, 5.3f, -2, 0, PK_BUILDING});
         for (int k = -1; k <= 1; k++) {
             float mz = -1200 + k * 18;
             m.beam({495, 5, mz}, {495, 40, mz}, 0.6f, 0.6f, col(110, 85, 60));
@@ -1082,7 +1150,7 @@ void World::buildMeta() {
     spot("Menlo Park", mp.node(5, 0).x - 20, mp.node(0, 4).y + 2.4f, PI);
 
     auto tok = [&](const char* n, float x, float z) { tokens.push_back({{x, G(x, z) + 1.4f, z}, n}); };
-    tok("Coit Tower", 880, -852);
+    tok("Coit Tower", 880, -904);   // behind the tower, well away from the teleport spot on the south plaza
     tok("Golden Gate Bridge", -1100, -1690);
     tok("Twin Peaks", -300, 905);
     tok("Lombard Street", gx(17) + 3, gz(3));
@@ -1097,7 +1165,7 @@ void World::buildMeta() {
     tok("Dolores Park", gx(12) + 55, gz(17) + 30);
     tok("Sutro Tower", -470, 800);
     tok("Port of Oakland", 4040, 900);
-    tok("Pier 39", 1025, -1265);   // on the deck just north of the carousel (1018..1032, -1292..-1278), not on its 8 m roof
+    tok("Pier 39", 1025, -1265);   // on the deck just south of the carousel (+z) (1018..1032, -1292..-1278), not on its 8 m roof
     tok("Salesforce Tower", 1100, 210);
     tok("Embarcadero Plaza", 1230, -256);
     tok("SFO Runway 28R", 1560, 2262);
@@ -1236,6 +1304,7 @@ void World::generate(void (*progress)(const char*, float)) {
     buildGrid(sf);
     buildGrid(oak);
     sf.setEdge(16, 3, 0, false); // Lombard's crooked block replaces the straight street
+    sf.setEdge(20, 2, 0, false); // Coit Tower's base (880, -880) stands on this block of the street up Telegraph Hill
     progress("Laying the ground", 0.25f);
     buildTerrainMesh();
     buildBackdrop();

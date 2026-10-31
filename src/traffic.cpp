@@ -4,6 +4,9 @@
 
 static RNG gR(20240);
 static const World* gTrainWorld = nullptr;
+// Caltrain: five cars of 25.8 m behind the front; and how far either side of the line's middle a road car stops short
+// of it (the trains run 2.4 m out on either track and are 1.55 m half-wide; the ballast runs out to 7.5 m)
+static const float TRAIN_LEN = 5 * 25.8f, RAIL_CLEAR = 7.5f;
 
 static void colorPed(Ped& p, RNG& r) {
     static const Color SKIN[] = {{240, 205, 175, 255}, {214, 170, 134, 255}, {170, 120, 85, 255}, {120, 80, 55, 255}, {90, 60, 40, 255}};
@@ -170,6 +173,30 @@ void Traffic::init(World& w) {
                         if (sq(u - di * g.sp) + sq(v - dj * g.sp) < 50 * 50) mark(i + di, j + dj);
             }
         exitTail[gi].assign((size_t)g.ni * g.nj * 4, 1e9f);
+        // grade crossings of the Caltrain tracks (#60): where each lane (2.4 m right of the street's middle, as every
+        // grid car drives) runs over the line at ground level, the stop line short of it and the far side
+        railX[gi].assign((size_t)g.ni * g.nj * 4, RailCrossing{});
+        for (int j = 0; j < g.nj; j++)
+            for (int i = 0; i < g.ni; i++)
+                for (int d = 0; d < 4; d++) {
+                    if (!g.edge(i, j, d)) continue;
+                    Vector2 a = g.node(i, j), dir = {(float)DI[d], (float)DJ[d]}, right = {-dir.y, dir.x};
+                    auto at = [&](float u) { return Vector2Add(a, Vector2Add(Vector2Scale(dir, u), Vector2Scale(right, 2.4f))); };
+                    auto railD = [&](float u, float* s) { Vector2 p = at(u); return w.railDistance(p.x, p.y, s); };
+                    float s, best = 1e9f, bu = 0, bs = 0;
+                    if (railD(g.sp / 2, &s) > g.sp) continue;   // nowhere near it
+                    for (float u = 0; u <= g.sp; u += 0.25f) {
+                        float dd = railD(u, &s);
+                        if (dd < best) { best = dd; bu = u; bs = s; }
+                    }
+                    Vector2 p = at(bu);
+                    if (best > 1 || fabsf(w.railGrade(bs) - w.terrain(p.x, p.y)) > 2.5f) continue;   // (not over or under it)
+                    RailCrossing& x = railX[gi][((size_t)j * g.ni + i) * 4 + d];
+                    x.s = bs;
+                    x.stop = x.clear = bu;
+                    while (x.stop > 0 && railD(x.stop, &s) < RAIL_CLEAR) x.stop -= 0.25f;
+                    while (x.clear < g.sp && railD(x.clear, &s) < RAIL_CLEAR) x.clear += 0.25f;
+                }
     }
     spawnGrid(&w.sf, 1300, true);
     spawnGrid(&w.oak, 170, false);
@@ -336,6 +363,13 @@ void Traffic::init(World& w) {
         for (int k = 0; k < n; k++) {
             Ped p;
             p.mode = 1; p.path = pi; p.s = r.range(0, P.len); p.pdir = r.chance(0.5f) ? 1 : -1; p.lane = r.range(-1.0f, 1.0f);
+            // a walkway up on a bridge deck: start them standing on it. The height update only climbs a step at a
+            // time from where they last stood, so from the default y = 0 they'd drop to the seabed under it (#87)
+            if (P.onDeck) {
+                Vector2 dir, q = P.at(p.s, &dir);
+                q = Vector2Add(q, Vector2Scale({-dir.y, dir.x}, p.lane * (float)p.pdir));
+                p.pos = {q.x, w.ground(q.x, q.y, 1e5f), q.y};
+            }
             colorPed(p, r);
             peds.push_back(p);
         }
@@ -457,6 +491,7 @@ void Traffic::farPedUpdate(Ped& p, float dt, World& w, RNG& r) {
         if (p.t >= 1) { p.t = 1; nextPedMove(p, r); if (r.chance(0.22f)) p.wait = r.range(1.5f, 5.f); }
         base = Vector2Lerp(p.from, p.to, clampf(p.t, 0, 1));
         if (Vector2Length(Vector2Subtract(p.to, p.from)) > 0.1f) routeDir = Vector2Normalize(Vector2Subtract(p.to, p.from));
+        base = Vector2Add(base, w.stoopDetour(base.x, base.y, routeDir));   // round the front of a house's steps
     } else if (p.mode == 1) {
         const Path& P = w.pedPaths[p.path];
         p.s += p.pdir * p.speed * dt;
@@ -584,6 +619,17 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             float& e = exitTail[gridIdx(k)][((size_t)k.j * k.g->ni + k.i) * 4 + k.d];
             e = std::min(e, k.t * k.g->sp - carModel(k.type).halfLen);
         }
+    // a train on a grade crossing at s along the line, or coming up to it (#60): any of it from the front back to the
+    // end of the last car (a few metres to spare either way), or its front within 150 m or 20 s of it (but not one
+    // still stood at a station for a while yet)
+    auto trainAt = [&](float s) {
+        for (auto& t : trains) {
+            float ahead = (s - t.s) * t.dir;   // from its front to the crossing
+            if (ahead > -(TRAIN_LEN + 6) && ahead < 6) return true;
+            if (ahead >= 6 && t.dwell < 4 && (ahead < 150 || ahead < t.v * 20)) return true;
+        }
+        return false;
+    };
     for (auto& c : cars) {
         float distP = sqrtf(sq(c.pos.x - pp.x) + sq(c.pos.z - pp.z));
         // target speed: stop for the skater and for cars ahead
@@ -771,6 +817,26 @@ void Traffic::update(float dt, World& w, const Player& pl) {
                     sigHold = true;
                 }
             }
+        }
+        // Caltrain grade crossings (#60): stop short of the tracks while a train's on them or coming, and don't drive
+        // onto them without room past them for the whole car (or it'd stand on the tracks at the back of a queue)
+        if (c.mode == 0 && !railX[gridIdx(c)].empty()) {
+            const Grid& g = *c.g;
+            int gi = gridIdx(c);
+            float u = c.t * g.sp, hl = carModel(c.type).halfLen, stop = 1e9f;
+            const RailCrossing& x = railX[gi][((size_t)c.j * g.ni + c.i) * 4 + c.d];
+            if (x.stop < 1e8f && u + hl < x.stop + 0.3f) {   // (not over the line already)
+                float tail = u + tailAhead, et = exitTail[gi][((size_t)c.j * g.ni + c.i) * 4 + c.d];
+                if (et > u + hl) tail = std::min(tail, et);
+                if (trainAt(x.s) || tail < x.clear + 2 * hl + 2.5f) stop = x.stop;
+            } else if (c.nd >= 0) {   // one just round the corner ahead, with no room to stop for it in the next block
+                int nn = (c.j + DJ[c.d]) * g.ni + c.i + DI[c.d];
+                const RailCrossing& y = railX[gi][(size_t)nn * 4 + c.nd];
+                if (y.stop < 10 + 2 * hl + 2.5f && trainAt(y.s)) stop = g.sp - 11.5f;
+            }
+            float d = stop - u - hl;
+            if (stop < 1e8f && d > -0.3f && (c.speed < 1 || d > c.speed * c.speed / 28 + 0.3f))
+                target = std::min(target, d > 0.4f ? sqrtf(2 * 4.5f * d) - 0.6f : 0.f);
         }
         if (c.mode == 0) {
             float hl = carModel(c.type).halfLen;
@@ -1021,6 +1087,9 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             if (p.t >= 1) { p.t = 1; nextPedMove(p, r); if (r.chance(0.22f)) p.wait = r.range(1.5f, 5.f); }
             base = Vector2Lerp(p.from, p.to, clampf(p.t, 0, 1));
             if (Vector2Length(Vector2Subtract(p.to, p.from)) > 0.1f) routeDir = Vector2Normalize(Vector2Subtract(p.to, p.from));
+            // swing out round the front of a house's steps instead of walking through them (far from the skater
+            // too: nothing pushes them out of a stoop there)
+            base = Vector2Add(base, w.stoopDetour(base.x, base.y, routeDir));
         } else if (p.mode == 1) {
             const Path& P = w.pedPaths[p.path];
             if (!hold) p.s += p.pdir * p.speed * dt;
@@ -1139,6 +1208,7 @@ void Traffic::update(float dt, World& w, const Player& pl) {
         float x = p.pos.x + p.dogOff.x, z = p.pos.z + p.dogOff.y;
         p.dog = {x, w.ground(x, z, std::max(w.terrain(x, z), to.y)), z};
     }
+    publishRoofs(w, pp);
     // Caltrain: accelerate, brake for the next station, dwell, reverse at the ends
     float lineEnd = w.railLen() - 25, lineStart = w.stations.empty() ? 0 : w.stations[0].s;
     for (auto& t : trains) {
@@ -1155,6 +1225,24 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             t.s = stop; t.v = 0; t.dwell = 16;
             if (stop == lineEnd || stop == lineStart) { t.dir = -t.dir; t.dwell = 30; }
         }
+    }
+}
+
+// The roof of a vehicle as the skater lands on it: the whole footprint, 0.1 m below the top of the model (as the
+// PK_CAR platforms of parked cars), tilted with the body as it's drawn (yaw, then pitch about its center).
+static VehicleTop roofOf(const Car& c) {
+    const CarModel& m = carModel(c.type);
+    float cp = cosf(c.pitch);
+    return {c.pos.x, c.pos.z, cosf(c.yaw), sinf(c.yaw), m.halfLen * cp, m.halfWid, c.pos.y + (m.height - 0.1f) * cp, tanf(c.pitch)};
+}
+
+void Traffic::publishRoofs(World& w, Vector3 at) const {
+    w.vehicleTops.clear();
+    for (const Car& c : cars) {
+        if (!c.placed) continue;
+        const CarModel& m = carModel(c.type);
+        if (sq(c.pos.x - at.x) + sq(c.pos.z - at.z) > sq(40 + m.halfLen)) continue;   // the skater covers < 1 m a frame
+        w.vehicleTops.push_back(roofOf(c));
     }
 }
 
@@ -1184,7 +1272,10 @@ void Traffic::interact(Player& pl) {
         float lx = dx * f0 + dz * f1, lz = -dx * f1 + dz * f0;
         float px = m.halfLen + 0.35f - fabsf(lx), pz = m.halfWid + 0.35f - fabsf(lz);
         if (px <= 0 || pz <= 0) continue;
-        if (pl.pos.y > c.pos.y + m.height - 0.2f || pl.pos.y < c.pos.y - 1.5f) continue;
+        // on (or over) the roof: riding on top, not into the side. The roof is ground for the skater (see
+        // World::skaterGround), so a drop onto it lands there rather than sinking into the body
+        VehicleTop roof = roofOf(c);
+        if (pl.pos.y > roof.y + clampf(lx, -roof.halfLen, roof.halfLen) * roof.slope - 0.2f || pl.pos.y < c.pos.y - 1.5f) continue;
         Vector2 pv = pl.state == Player::AIR ? Vector2{pl.vel.x, pl.vel.z} : Vector2{cosf(pl.yaw) * pl.speed, sinf(pl.yaw) * pl.speed};
         Vector2 cv = {f0 * c.speed, f1 * c.speed};
         float rel = Vector2Length(Vector2Subtract(pv, cv));

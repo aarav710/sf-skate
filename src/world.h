@@ -91,6 +91,9 @@ struct Spot { const char* name; Vector3 pos; float yaw; };
 struct Seat { Vector3 pos; float yaw; bool grass; };   // where someone can sit: the seat surface (or lawn) and the way they face
 struct MapLabel { const char* name; float x, z; int size; };
 struct Pond { float x0, z0, x1, z1; const char* kind = "pond"; };   // kind names it in the splash message
+// The Palace of Fine Arts lagoon. Its edges lie on both the 10 m ground-mesh grid and the 4 m heightfield grid, so
+// the basin dug under it (rawHeight) keeps every drawn ground triangle inside it below the water surface.
+constexpr float LAGOON_X0 = -800, LAGOON_X1 = -740, LAGOON_Z0 = -1040, LAGOON_Z1 = -980, LAGOON_Y = 3.6f;
 
 // Static geometry is split into layers per 400 m cell: the main layer is always drawn; foliage detail (every leaf)
 // only up close, swapped for low-poly canopy blobs further out; house interiors only near the camera.

@@ -392,9 +392,11 @@ void World::buildLandmarks() {
             m.box({px - 1.5f, py + 12, pz - 1.5f}, {px + 1.5f, py + 13.5f, pz + 1.5f}, peach);
             addPlat({px - 1, px + 1, pz - 1, pz + 1, py + 12, py + 12, py - 1, 0, PK_POLE});
         }
-        ponds.push_back({cx + 25, cz - 30, cx + 90, cz + 25, "lagoon"});
-        float py = terrain(cx + 55, cz) - 0.3f;
-        m.quad({cx + 25, py, cz - 30}, {cx + 90, py, cz - 30}, {cx + 90, py, cz + 25}, {cx + 25, py, cz + 25}, col(50, 100, 110, M_WATER));
+        // the lagoon sits in a basin dug into the terrain (rawHeight). The sheet reaches one ground cell past the
+        // splash rectangle, over the bank, so the shoreline is drawn where the bank rises out of the water
+        ponds.push_back({LAGOON_X0, LAGOON_Z0, LAGOON_X1, LAGOON_Z1, "lagoon"});
+        float wx0 = LAGOON_X0 - 10, wx1 = LAGOON_X1 + 10, wz0 = LAGOON_Z0 - 10, wz1 = LAGOON_Z1 + 10, py = LAGOON_Y;
+        m.quad({wx0, py, wz0}, {wx1, py, wz0}, {wx1, py, wz1}, {wx0, py, wz1}, col(50, 100, 110, M_WATER));
     }
     // --- Sutro Tower
     {

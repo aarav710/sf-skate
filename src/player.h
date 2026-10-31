@@ -48,7 +48,7 @@ struct Player {
     std::string landNote;     // how the last landing went, shown with the banked combo
     float landShake = 0;      // 0..1 camera kick from a hard landing, decays in the camera
     bool bouncing = false;    // AIR is just the hop after a landing: no spins, flips or grabs
-    float bounceDur = 0;      // how long that hop should last; past it we've rolled off something into real air
+    float bounceY = 0, bounceRate = 0; // ground height and its rise/fall rate along the hop at its start; ground well below that line = rolled off into real air
     bool ollieQueued = false; // Space pressed during the hop: pop as the wheels come back down
 
     // grind

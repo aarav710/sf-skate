@@ -4,6 +4,13 @@
 static const Color C_GOLD = {255, 205, 60, 255};
 static const Color C_RED = {255, 80, 70, 255};
 
+// how fast the ground under a board at p rolling at speed along f rises (+) or falls (-), m/s
+static float groundRate(World& w, Vector3 p, Vector3 f, float speed) {
+    float hF = w.ground(p.x + f.x * 0.5f, p.z + f.z * 0.5f, p.y + 0.2f);
+    float hB = w.ground(p.x - f.x * 0.5f, p.z - f.z * 0.5f, p.y + 0.2f);
+    return clampf(speed * (hF - hB), -30, 30);
+}
+
 void Player::spawn(Vector3 p, float y) {
     pos = p; yaw = y; speed = 0; vel = {0, 0, 0}; vy = 0; rideVy = 0;
     state = RIDE; flipT = shoveT = -1; flipAngle = shoveAngle = 0; combo.clear(); comboPts = 0;
@@ -184,7 +191,8 @@ void Player::ride(float dt, const Input& in, World& w) {
 
 void Player::air(float dt, const Input& in, World& w) {
     airTime += dt;
-    if (bouncing && airTime > bounceDur) bouncing = ollieQueued = false; // bounced off an edge into a real drop: controls back
+    // bounced off an edge into a real drop: controls back. Hills are fine: the ground is expected to keep its slope under the hop
+    if (bouncing && w.ground(pos.x, pos.z, pos.y + 0.2f) < bounceY + bounceRate * airTime - 0.5f) bouncing = ollieQueued = false;
     pitch = lerpf(pitch, 0.f, 1 - expf(-dt * 3));
     float prevY = pos.y;
     vy -= GRAVITY * dt;
@@ -276,8 +284,12 @@ void Player::air(float dt, const Input& in, World& w) {
         bool pop = bouncing && (ollieQueued || in.ollie); // Space during a landing bounce pops as it touches down
         bouncing = ollieQueued = false;
         land(w, g);
-        if (pop && state == RIDE) ollie(7.4f + clampf(fabsf(speed) * 0.03f, 0, 0.6f));
-        else if (pop && bouncing) ollieQueued = true; // bounced again (downhill): keep waiting
+        if (pop && (state == RIDE || bouncing)) { // (on a steep downhill the touchdown may start another bounce: pop anyway)
+            bouncing = false;
+            float up = groundRate(w, pos, fwd(), speed);
+            ollie(7.4f + clampf(fabsf(speed) * 0.03f, 0, 0.6f));
+            vy += std::max(up, 0.f); // uphill: keep the climb, as ride() does
+        }
     }
     else if (pos.y < g) pos.y = g;   // still rising into a steeper hillside: skim along it rather than through it
     if (bouncing && in.ollie) ollieQueued = true;
@@ -338,7 +350,8 @@ void Player::land(World& w, float g) {
         spinAccum = 0;
         grabbed = false;
         bouncing = true;
-        bounceDur = 2.f * bv / GRAVITY + 0.1f;
+        bounceY = g;
+        bounceRate = groundRate(w, pos, fwd(), speed);
     }
 }
 

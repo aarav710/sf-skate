@@ -87,23 +87,51 @@ int main() {
         check(hopped && hop < 3.5f && s.p.state == Player::RIDE, "landing bounce", b);
     }
     {   // the bounce is part of riding: Space pops, steering and flip keys can't bail a clean landing (issue #11)
+        // spot: where to ride from; ks: frames after landing to give the input
+        auto bounceInput = [&](float x, float z, float yaw, float spd, int warm, std::initializer_list<int> ks, int& popped, int& bails, int& tries) {
+            for (int mode = 0; mode < 3; mode++)
+                for (int k : ks) {
+                    Sim s; s.spawn(x, z, yaw, spd);
+                    s.run(warm, Input{});
+                    Input in; in.ollie = true; s.run(1, in);
+                    s.run(200, Input{}, [](Player& p) { return p.evLand; });
+                    s.run(k - 1, Input{});
+                    Input b2;
+                    if (mode == 0) b2.ollie = true; else if (mode == 1) b2.steer = 1; else b2.kickflip = true;
+                    float peak = 0;
+                    bool bailed = s.run(60, b2, [&](Player& p) {
+                        peak = std::max(peak, p.pos.y - W.ground(p.pos.x, p.pos.z, p.pos.y + 0.2f));
+                        return p.state == Player::BAIL;
+                    });
+                    tries++;
+                    if (bailed) bails++;
+                    if (mode == 0 && peak > 1.0f) popped++;
+                }
+        };
         int popped = 0, bails = 0, tries = 0;
-        for (int mode = 0; mode < 3; mode++)
-            for (int k = 1; k <= 16; k++) {
-                Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
-                Input in; in.ollie = true; s.run(1, in);
-                s.run(120, Input{}, [](Player& p) { return p.evLand; });
-                s.run(k - 1, Input{});
-                Input b2;
-                if (mode == 0) b2.ollie = true; else if (mode == 1) b2.steer = 1; else b2.kickflip = true;
-                float peak = 0, y0 = s.p.pos.y;
-                bool bailed = s.run(60, b2, [&](Player& p) { peak = std::max(peak, p.pos.y - y0); return p.state == Player::BAIL; });
-                tries++;
-                if (bailed) bails++;
-                if (mode == 0 && peak > 1.0f) popped++;
+        bounceInput(1045 + 2.4f, -80, PI / 2, 8, 0, {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}, popped, bails, tries);
+        snprintf(b, sizeof b, "flat: Space popped %d of %d, %d bails in %d tries", popped, tries / 3, bails, tries);
+        check(popped == tries / 3 && bails == 0, "input during landing bounce", b);
+        // downhill (12-30% straight roads): the ground falls away under the hop, so it lasts longer
+        int spots = 0; popped = bails = tries = 0;
+        for (float x = -3000; x < 3000 && spots < 12; x += 37) for (float z = -3000; z < 3000 && spots < 12; z += 41) {
+            if (!W.inPlay(x, z)) continue;
+            float g = W.ground(x, z, 500); if (g < 2) continue;
+            float gx = (W.ground(x + 1, z, g + 0.5f) - W.ground(x - 1, z, g + 0.5f)) / 2, gz = (W.ground(x, z + 1, g + 0.5f) - W.ground(x, z - 1, g + 0.5f)) / 2;
+            float sl = sqrtf(gx * gx + gz * gz); if (sl < 0.12f || sl > 0.3f) continue;
+            float yaw = atan2f(-gz, -gx);
+            bool ok = true;
+            for (int i = 1; i <= 25 && ok; i++) {
+                float px = x + cosf(yaw) * i, pz = z + sinf(yaw) * i, gg = W.ground(px, pz, g + 1);
+                Vector3 q{px, gg, pz}; Vector2 nn;
+                if (fabsf((g - gg) / i - sl) > 0.05f || W.collide(q, 0.5f, gg, 1.7f, &nn)) ok = false;
             }
-        snprintf(b, sizeof b, "Space popped %d of 16, %d bails in %d tries", popped, bails, tries);
-        check(popped == 16 && bails == 0, "input during landing bounce", b);
+            if (!ok) continue;
+            spots++;
+            bounceInput(x, z, yaw, 10, 20, {1, 5, 10, 16}, popped, bails, tries);
+        }
+        snprintf(b, sizeof b, "%d hills: Space popped %d of %d, %d bails in %d tries", spots, popped, tries / 3, bails, tries);
+        check(spots >= 8 && popped == tries / 3 && bails == 0, "input during downhill landing bounce", b);
     }
     {   // kickflip landed cleanly
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);

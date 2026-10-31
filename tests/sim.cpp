@@ -524,6 +524,31 @@ int main() {
             check(s2.p.pos.x < tgt->x0, "buildings are solid", b);
         }
     }
+    {   // Oracle Park's grandstand, scoreboard, Coke bottle and glove are solid (issue #67): push across the field into each
+        struct Run { const char* name; float x, z, yaw; bool alongX; float wall; int dir; };
+        const Run runs[] = {
+            {"grandstand", 1215, 775, PI, true, 1195, -1},          // westward into the stand's 2 m front wall
+            {"scoreboard", 1284, 725, -PI / 2, false, 708, -1},     // north into the scoreboard
+            {"bottle", 1268, 715, 0, true, 1287.5f, 1},             // east into the bottle's plinth
+            {"glove", 1268, 735, 0, true, 1287.5f, 1},              // east into the glove's pedestal
+        };
+        int ok = 0;
+        std::string why;
+        for (const Run& r : runs) {
+            Sim s; s.spawn(r.x, r.z, r.yaw, 2);
+            Input in; in.push = true;
+            float deepest = -1e9f;   // furthest past the face, in the direction of travel
+            s.run(400, in, [&](Player& q) {
+                float c = r.alongX ? q.pos.x : q.pos.z;
+                deepest = std::max(deepest, (c - r.wall) * r.dir);
+                return false;
+            });
+            if (deepest < 0) ok++;
+            else if (why.empty()) { char w[96]; snprintf(w, sizeof w, " (first miss: %s, %.1f m past its face)", r.name, deepest); why = w; }
+        }
+        snprintf(b, sizeof b, "%d of 4 ballpark structures stopped the skater%s", ok, why.c_str());
+        check(ok == 4, "Oracle Park structures are solid", b);
+    }
     {   // ride into the Pacific
         Sim s; s.spawn(-1440, 0, PI, 6);
         Input in; in.push = true;

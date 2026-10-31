@@ -558,6 +558,22 @@ int main() {
         snprintf(b, sizeof b, "%d bad of %d", bad, (int)W.spots.size());
         check(bad == 0, "teleport spots are safe", b);
     }
+    {   // teleporting is not a free token: idling at a spawn point (rolling down its slope, no input) never
+        // brings the skater into a token's pickup radius (the game's test: feet + 1 m within 3 m)
+        int bad = 0;
+        for (auto& sp : W.spots) {
+            Sim s; s.spawn(sp.pos.x, sp.pos.z, sp.yaw);
+            const char* hit = nullptr;
+            s.run(60 * 3, Input{}, [&](Player& p) {
+                for (auto& t : W.tokens)
+                    if (Vector3Distance(t.pos, {p.pos.x, p.pos.y + 1.0f, p.pos.z}) < 3.0f) { hit = t.name; return true; }
+                return false;
+            });
+            if (hit) { bad++; printf("      spot %s collects token %s with no input\n", sp.name, hit); }
+        }
+        snprintf(b, sizeof b, "%d of %d", bad, (int)W.spots.size());
+        check(bad == 0, "no token is collected just by teleporting", b);
+    }
     {   // every token is reachable-ish: above ground, not inside a wall
         int bad = 0;
         for (auto& t : W.tokens) {

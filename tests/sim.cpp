@@ -109,6 +109,19 @@ int main() {
         snprintf(b, sizeof b, "state=%d score=%lld", s.p.state, s.p.score);
         check(s.p.state == Player::RIDE && s.p.score > 100, "FS 360 lands", b);
     }
+    {   // a stomped landing scales the spin and Big Air too, not just the tricks done before it
+        auto stomped = [](float spin, float air) {
+            Sim s; s.spawn(1045 + 2.4f, -80, PI / 2);
+            Player& p = s.p;
+            p.state = Player::AIR; p.pos.y += 0.05f; p.vel = Vector3Scale(p.fwd(), 8); p.vy = -6;
+            p.combo = {"Ollie"}; p.comboPts = 100; p.spinAccum = spin; p.airTime = air;
+            s.run(30, Input{}, [](Player& q) { return q.state != Player::AIR; });
+            return p.score;
+        };
+        long long spun = stomped(PI, 0.5f), big = stomped(0, 1.7f);
+        snprintf(b, sizeof b, "Ollie+FS 180 +%lld (want 920), Ollie+Big Air +%lld (want ~1160)", spun, big);
+        check(spun >= 915 && spun <= 925 && big >= 1140 && big <= 1180, "stomp bonus covers spin & Big Air", b);
+    }
     {   // grind the flat bar at Embarcadero Plaza
         Sim s; s.spawn(1186, -238, 0, 7);
         bool ground = s.run(60, Input{}, [](Player& p) { return p.pos.x > 1193.5f; });

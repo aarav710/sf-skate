@@ -569,6 +569,40 @@ int main() {
         snprintf(b, sizeof b, "%d bad of %d", bad, (int)W.tokens.size());
         check(bad == 0, "tokens are not inside walls", b);
     }
+    {   // street lamps, trees and curb clutter are never built inside a building or landmark base (issue #88:
+        // Coit Tower's base swallowed the hilltop's lamps and trees, a lamp head poking out of its roof)
+        std::unordered_map<long long, std::vector<const Platform*>> blds;   // building boxes bucketed by 32 m cell
+        auto cell = [](float x, float z) { return (long long)floorf(x / 32.f) * 1000003LL + (long long)floorf(z / 32.f); };
+        for (auto& pl : W.plats) {
+            if (pl.kind != PK_BUILDING || pl.x1 - pl.x0 > 600 || pl.z1 - pl.z0 > 600) continue;
+            for (float x = floorf(pl.x0 / 32.f) * 32.f; x <= pl.x1; x += 32.f)
+                for (float z = floorf(pl.z0 / 32.f) * 32.f; z <= pl.z1; z += 32.f) blds[cell(x + 1, z + 1)].push_back(&pl);
+        }
+        auto inside = [&](const Platform& p) {   // pole centre inside a building box that overlaps its height
+            float x = (p.x0 + p.x1) / 2, z = (p.z0 + p.z1) / 2, top = std::max(p.h0, p.h1);
+            auto it = blds.find(cell(x, z));
+            if (it == blds.end()) return false;
+            for (const Platform* bl : it->second)
+                if (bl->contains(x, z) && bl->base < top - 0.5f && std::max(bl->h0, bl->h1) > p.base + 1.2f) return true;
+            return false;
+        };
+        int coit = 0, coitBad = 0, city = 0, cityBad = 0;
+        for (auto& p : W.plats) {
+            if (p.kind != PK_POLE || p.x1 - p.x0 > 1.8f || p.z1 - p.z0 > 1.8f) continue;
+            float x = (p.x0 + p.x1) / 2, z = (p.z0 + p.z1) / 2, tall = std::max(p.h0, p.h1) - p.base;
+            if (x > 840 && x < 920 && z > -920 && z < -840) {   // Telegraph Hill around Coit Tower: everything small
+                coit++;
+                if (inside(p)) { coitBad++; printf("      pole at %.1f, %.1f inside Coit Tower's base\n", x, z); }
+            }
+            // city-wide: street lamps / signal poles (7.3-7.5 m boxes) and trees (6 m boxes) on the SF grid
+            if (x > -1460 && x < 1340 && z > -1080 && z < 1820 && tall > 5.9f && tall < 7.6f) {
+                city++;
+                if (inside(p)) { cityBad++; if (cityBad <= 5) printf("      lamp/tree at %.1f, %.1f inside a building\n", x, z); }
+            }
+        }
+        snprintf(b, sizeof b, "Coit hill: %d of %d inside; city lamps/trees: %d of %d inside", coitBad, coit, cityBad, city);
+        check(coitBad == 0 && city > 1000 && cityBad == 0, "no street furniture inside buildings", b);
+    }
     {   // tourists stand on the ground at their landmark: on the terrain (or a kerb a step up from it), or on a deck
         // or pier (SFO's departures level, out over the water) -- never up on a roof or a monument, never inside
         // one, and never out in the traffic on a car path or a city street

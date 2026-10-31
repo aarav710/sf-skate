@@ -168,8 +168,7 @@ void Player::ride(float dt, const Input& in, World& w) {
         state = AIR;
         airTime = 0;
         spinAccum = 0;
-        grabbed = false;
-        if (speed < 0) { yaw = wrapPi(yaw + PI); }
+        grabbed = false;   // rolling fakie keeps its yaw: the air and the landing read it from yaw vs velocity
         return;
     }
     Vector3 f2 = fwd();
@@ -186,7 +185,6 @@ void Player::ride(float dt, const Input& in, World& w) {
         return;
     }
     if (in.ollie && fabsf(speed) < 40) {
-        if (speed < 0) { yaw = wrapPi(yaw + PI); speed = -speed; } // pop out of fakie rolling
         ollie(7.4f + clampf(fabsf(speed) * 0.03f, 0, 0.6f));
         // going uphill, pop off the slope rather than off flat ground: keep the climb the board already had,
         // or a fast ollie up a steep hill leaves the skater inside the rising hillside
@@ -327,7 +325,11 @@ void Player::land(World& w, float g) {
     float diff = hv > 1.f ? wrapPi(yaw - atan2f(vel.z, vel.x)) : 0.f;
     bool fakie = false;
     if (fabsf(diff) > 0.65f) {
-        if (fabsf(fabsf(diff) - PI) < 0.65f) { fakie = true; yaw = wrapPi(yaw + PI); diff = wrapPi(yaw - atan2f(vel.z, vel.x)); }
+        if (fabsf(fabsf(diff) - PI) < 0.65f) {
+            // an odd number of half spins brought it round: ride out the other way. No spin: it left the ground
+            // rolling fakie, so it rolls on fakie (negative speed) instead of snapping round
+            if ((int)roundf(fabsf(spinAccum) / PI) % 2) { fakie = true; yaw = wrapPi(yaw + PI); diff = wrapPi(yaw - atan2f(vel.z, vel.x)); }
+        }
         else { bail("Landed sideways"); return; }
     }
     flipT = shoveT = -1;

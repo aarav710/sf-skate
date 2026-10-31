@@ -197,6 +197,24 @@ int main() {
         snprintf(b, sizeof b, "deflected %d of 2, landed clean %d, board off line %.0f deg, spin trick=%d", deflected, ok, worst * RAD2DEG, spinTrick);
         check(deflected == 2 && ok == 2 && worst < 0.05f && !spinTrick, "mid-air pole clip lands", b);
     }
+    {   // rolling fakie off the Embarcadero Plaza deck, or ollieing fakie, keeps the board facing the same way (issue #46)
+        auto fakie = [&](float x, float z, float yaw, bool pop, const char* name, long long okLo, long long okHi) {
+            Sim s; s.spawn(x, z, yaw, -4);
+            float jump = 0, prev = s.p.yaw;
+            bool air = false;
+            if (pop) { Input in; in.ollie = true; s.run(1, in); air = s.p.state == Player::AIR; jump = fabsf(wrapPi(s.p.yaw - prev)); prev = s.p.yaw; }
+            s.run(150, Input{}, [&](Player& p) {   // takeoff, landing and bounce, then rolling on
+                air |= p.state == Player::AIR;
+                jump = std::max(jump, fabsf(wrapPi(p.yaw - prev)));
+                prev = p.yaw;
+                return false;
+            });
+            snprintf(b, sizeof b, "air=%d max yaw step %.2f rad, state=%d speed=%.1f score=%lld %s", air, jump, s.p.state, s.p.speed, s.p.score, s.p.subPopup.c_str());
+            check(air && jump < 0.05f && s.p.state == Player::RIDE && s.p.speed < 0 && s.p.score >= okLo && s.p.score <= okHi, name, b);
+        };
+        fakie(1173, -300, 0, false, "roll off a ledge fakie: no snap", 0, 0);
+        fakie(1045 + 2.4f, -80, PI / 2, true, "fakie ollie: no snap, no spin", 100, 150);
+    }
     {   // ...but flying into a building wall at a steep angle is still a crash
         int bailed = 0, tot = 0;
         for (float sp : {8.f, 10.f})

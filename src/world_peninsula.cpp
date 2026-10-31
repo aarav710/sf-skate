@@ -85,23 +85,35 @@ void World::buildCaltrain() {
     }
 }
 
-// Where you step off at a station: on the platform (west side first), clear of the station building and the
-// overhead-wire poles, facing along the platform away from its middle. At 4th & King the depot's collision box
-// reaches over the middle of the west platform, so you land 20 m down it instead.
+// Where you step off at a station: on the platform (west side first), inside the line of overhead-wire poles
+// (lateral 6.4), clear of the station building, with an open run of 50 m along the platform ahead. You face
+// along the platform toward whichever end the spot is nearer (south when it's in the middle). At 4th & King
+// the depot's collision box reaches over the middle of the west platform, so you land 20 m down it instead.
 Vector3 World::caltrainDropoff(int station, float* yaw) const {
     float s0 = stations[station].s;
-    for (float lat : {6.2f, -6.2f})
+    auto deck = [&](float s, float lat, Vector3* at) {   // the platform surface there, if there is one
+        Vector3 c = trackPoint(s, lat, nullptr);
+        float y = ground(c.x, c.z, c.y + 3);
+        *at = {c.x, y, c.z};
+        return fabsf(y - (c.y + 0.47f)) <= 0.3f;
+    };
+    for (float lat : {5.2f, -5.2f})
         for (float k : {0.f, 20.f, -20.f, 30.f, -30.f, 45.f, -45.f, 60.f, -60.f}) {
-            Vector2 d;
-            Vector3 c = trackPoint(s0 + k, lat, &d);
-            float y = ground(c.x, c.z, c.y + 3);
-            if (fabsf(y - (c.y + 0.47f)) > 0.3f) continue;   // not on the platform deck
-            Vector3 q = {c.x, y, c.z};
-            Vector2 n;
-            if (collide(q, 1.0f, y, 1.8f, &n)) continue;
+            Vector2 d, n;
+            trackPoint(s0 + k, lat, &d);
+            Vector3 p;
+            if (!deck(s0 + k, lat, &p)) continue;
             float dir = k < 0 ? -1.f : 1.f;
+            bool clear = true;
+            for (float t = 0; t <= 50 && clear; t += 1) {   // the spot itself, then the way ahead
+                Vector3 q;
+                if (!deck(s0 + k + dir * t, lat, &q)) { q = trackPoint(s0 + k + dir * t, lat, nullptr); q.y += 0.47f; } // past the platform end
+                Vector3 r = q;
+                if (collide(r, t == 0 ? 1.0f : 0.6f, q.y, 1.8f, &n)) clear = false;
+            }
+            if (!clear) continue;
             if (yaw) *yaw = atan2f(d.y * dir, d.x * dir);
-            return {c.x, y, c.z};
+            return p;
         }
     Vector3 c = trackPoint(s0, 6.2f, nullptr);   // no clear spot found: the old drop-off
     if (yaw) *yaw = PI;

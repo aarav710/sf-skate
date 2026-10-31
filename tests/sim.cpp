@@ -383,7 +383,7 @@ int main() {
         check(W.stations.size() == 5 && maxGrade < 0.04f && blocked == 0 && L > 9000, "Caltrain line", b);
     }
     {   // stepping off the train (at 4th & King or Menlo Park, the two ends you can ride to): on the platform,
-        // clear of the station building, and facing somewhere you can skate away
+        // clear of the station building, and you can push off down the platform without hitting anything
         int bad = 0;
         for (int i : {0, (int)W.stations.size() - 1}) {
             float yaw;
@@ -394,9 +394,9 @@ int main() {
             bool onGround = fabsf(W.ground(p.x, p.z, p.y + 0.5f) - p.y) < 0.05f && !W.isWater(p.x, p.z, p.y);
             Sim s; s.p.spawn(p, yaw);
             Input in; in.push = true;
-            s.run(60 * 2, in);
+            bool bailed = s.run(60 * 8, in, [](Player& pl) { return pl.state == Player::BAIL; });   // push off down the platform
             float moved = Vector2Distance({s.p.pos.x, s.p.pos.z}, {p.x, p.z});
-            if (inWall || !onGround || s.p.state != Player::RIDE || moved < 8) {
+            if (inWall || !onGround || bailed || s.p.state != Player::RIDE || moved < 40) {
                 bad++;
                 printf("      %s: (%.1f, %.1f) wall %d ground %d state %d moved %.1f\n", W.stations[i].name, p.x, p.z, inWall, onGround,
                        s.p.state, moved);

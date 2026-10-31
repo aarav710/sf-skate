@@ -151,6 +151,23 @@ int main() {
         snprintf(b, sizeof b, "state=%d (3 = bail)", s.p.state);
         check(s.p.state == Player::BAIL, "late kickflip bails", b);
     }
+    {   // the board flies off along the skater's heading, not always east (issue #20)
+        float worst = 0, worstPos = 0;
+        for (float spd : {0.f, 8.f})
+            for (int d = 0; d < 4; d++) {
+                float yaw = d * PI / 2; // E, S, W, N
+                Sim s; s.spawn(1045 + 2.4f, -80, yaw, spd);
+                s.p.bail("test");
+                Vector3 bv = s.p.boardVel;
+                worst = std::max(worst, fabsf(wrapPi(atan2f(bv.z, bv.x) - yaw)));
+                Vector3 b0 = s.p.boardPos;
+                s.run(15, Input{});
+                Vector3 db = Vector3Subtract(s.p.boardPos, b0);
+                worstPos = std::max(worstPos, fabsf(wrapPi(atan2f(db.z, db.x) - yaw)));
+            }
+        snprintf(b, sizeof b, "worst heading error: velocity %.1f deg, travel %.1f deg", worst * RAD2DEG, worstPos * RAD2DEG);
+        check(worst < 0.02f && worstPos < 0.02f, "bail throws board along heading", b);
+    }
     {   // 360 spin
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
         Input in; in.ollie = true; s.run(1, in);

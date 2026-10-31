@@ -5,6 +5,7 @@
 #include "../src/traffic.h"
 #include "../src/models.h"
 #include "../src/gondola.h"
+#include "../src/jetski.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -646,6 +647,44 @@ int main() {
         }
         snprintf(b, sizeof b, "%d/%d shores re-splashed%s", bad, tried, worst.c_str());
         check(tried > 0 && bad == 0, "splash respawn stays out of water", b);
+    }
+    {   // R while riding a jet ski puts you back on land, not on the water where the ski is (issue #69)
+        JetSkis js; js.place(W);
+        bool found = false;
+        Vector3 land{};
+        if (!js.skis.empty()) {
+            const Vector3 sk = js.skis[0].pos;
+            for (float d = 2; d <= 40 && !found; d += 1)
+                for (int k = 0; k < 16 && !found; k++) {
+                    float a = k * TAU_F / 16, x = sk.x + cosf(a) * d, z = sk.z + sinf(a) * d, h = W.terrain(x, z);
+                    if (h < 1.0f || h > 4.f || !W.inPlay(x, z) || W.isWater(x, z, h) || W.solidAt({x, h + 1.2f, z})) continue;
+                    bool dry = true;   // clear of water for 6 m around, like a spot the game itself would save
+                    for (int j = 0; j < 12 && dry; j++)
+                        for (float r = 2; r <= 6 && dry; r += 2) {
+                            float qx = x + cosf(j * PI / 6) * r, qz = z + sinf(j * PI / 6) * r;
+                            if (W.isWater(qx, qz, W.ground(qx, qz, h + 1.f))) dry = false;
+                        }
+                    if (dry) { land = {x, W.ground(x, z, h + 2), z}; found = true; }
+                }
+        }
+        Sim s; s.spawn(land.x, land.z, 0);              // on the shore by a moored ski (spawn records it as the safe spot)
+        int ski = found ? js.nearest(s.p.pos, 50.f) : -1;
+        bool onWater = false;
+        if (ski >= 0) {
+            js.mount(ski, s.p);
+            Input in; in.push = true; in.steer = 0.3f;
+            for (int f = 0; f < 60 * 4; f++) js.update(1.f / 60, in, false, s.p, W);
+            onWater = js.riding && W.terrain(s.p.pos.x, s.p.pos.z) < 0.05f;
+            // what main does on R: leave the ski where it is, then back to the safe spot
+            js.skis[js.cur].pos = s.p.pos; js.riding = false; js.cur = -1;
+            s.p.respawnSafe(W);
+        }
+        Vector3 r = s.p.pos;
+        float h = W.terrain(r.x, r.z);
+        Input hold; hold.brake = true;                   // stand still: a sloped shore mustn't roll you in
+        bool splash = s.run(120, hold, [](Player& p) { return p.splashed; });
+        snprintf(b, sizeof b, "ski=%d onWater=%d reset to %.0f,%.1f,%.0f terrain=%.1f splash=%d", ski, onWater, r.x, r.y, r.z, h, splash);
+        check(ski >= 0 && onWater && h > 0.5f && !W.isWater(r.x, r.z, r.y) && !splash && s.p.state == Player::RIDE, "R on a jet ski resets to land", b);
     }
     {   // the splash message names the water: ocean, bay, fountain, lake, lagoon, pool, salt pond (rolling in and dropping in)
         float sea = -1440;   // the Pacific, west of the city

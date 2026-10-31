@@ -5,6 +5,7 @@
 #include "../src/traffic.h"
 #include "../src/models.h"
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 
 static World W;
@@ -270,6 +271,38 @@ int main() {
         s.run(300, in);
         snprintf(b, sizeof b, "x=%.2f y=%.1f state=%d", s.p.pos.x, s.p.pos.y, s.p.state);
         check(s.p.pos.x < -1086 && s.p.pos.y > 25, "bridge railing holds", b);
+    }
+    {   // a grind that slows to a stop steps off onto the deck: not over the Golden Gate railing, not into a rail
+        struct { float x, z; bool ns; } spots[] = {{-1086.2f, -1500, true}, {-1130, -2377, false}};
+        int ok = 0, tot = 0;
+        char det[400] = "";
+        for (auto& sp : spots) {
+            int ri = -1;
+            for (int i = 0; i < (int)W.rails.size() && ri < 0; i++) {
+                const Rail& r = W.rails[i];
+                float lo = sp.ns ? std::min(r.a.z, r.b.z) : std::min(r.a.x, r.b.x), hi = sp.ns ? std::max(r.a.z, r.b.z) : std::max(r.a.x, r.b.x);
+                float c = sp.ns ? sp.z : sp.x;
+                if ((sp.ns ? fabsf(r.a.x - sp.x) + fabsf(r.b.x - sp.x) : fabsf(r.a.z - sp.z) + fabsf(r.b.z - sp.z)) < 0.3f && c > lo && c < hi) ri = i;
+            }
+            if (ri < 0) continue;
+            for (int dirn = -1; dirn <= 1; dirn += 2) {
+                const Rail& r = W.rails[ri];
+                Sim s; s.spawn(sp.x, sp.z, 0, 0);
+                float t = sp.ns ? (sp.z - r.a.z) / (r.b.z - r.a.z) : (sp.x - r.a.x) / (r.b.x - r.a.x);
+                s.p.state = Player::GRIND; s.p.rail = ri; s.p.railT = t; s.p.railDir = dirn;
+                s.p.pos = Vector3Lerp(r.a, r.b, t); s.p.speed = 0.5f; s.p.yaw = atan2f((r.b.z - r.a.z) * dirn, (r.b.x - r.a.x) * dirn); s.p.balance = s.p.balanceVel = 0;
+                float railY = s.p.pos.y;
+                s.run(1, Input{});
+                float side = sp.ns ? s.p.pos.x - sp.x : s.p.pos.z - sp.z;
+                s.run(180, Input{}, [](Player& p) { return p.state == Player::RIDE || p.state == Player::BAIL; });
+                float deck = W.ground(sp.ns ? sp.x - 1.5f : sp.x, sp.ns ? sp.z : sp.z - 1.5f, railY);
+                bool good = s.p.state == Player::RIDE && !s.p.splashed && fabsf(side) > 0.4f && fabsf(s.p.pos.y - deck) < 0.5f;
+                tot++; ok += good;
+                char one[120]; snprintf(one, sizeof one, "%s%s off=%.2f y=%.1f st=%d %s; ", r.name, dirn > 0 ? "+" : "-", side, s.p.pos.y, s.p.state, s.p.subPopup.c_str());
+                strncat(det, one, sizeof det - strlen(det) - 1);
+            }
+        }
+        check(tot == 4 && ok == tot, "grind stop steps off onto the deck", det);
     }
     {   // ride the length of the Bay Bridge deck
         Sim s; s.spawn(1500, 335 + 4, 0, 10);

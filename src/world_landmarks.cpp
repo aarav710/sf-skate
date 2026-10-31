@@ -374,7 +374,12 @@ void World::buildLandmarks() {
         Color w = col(216, 212, 202, M_HOUSE), roof = col(170, 168, 160);
         addBox(cx - 45, cz - 32, cx + 45, cz + 32, y - 1, y + 24, PK_BUILDING, w, roof);
         m.box({cx - 20, y + 0.5f, cz - 38}, {cx + 20, y + 20, cz - 32}, col(225, 220, 210), roof, 0.9f); // portico
-        for (int k = 0; k < 8; k++) m.prism({cx - 17.5f + k * 5, y + 0.5f, cz - 39}, 8, 0.8f, 0.8f, 19, col(235, 232, 225), w);
+        addPlat({cx - 20, cx + 20, cz - 38, cz - 32, y + 20, y + 20, y - 1, 0, PK_BUILDING});
+        for (int k = 0; k < 8; k++) {   // the front columns, solid like the Palace of Fine Arts' ones
+            float px = cx - 17.5f + k * 5, pz = cz - 39;
+            m.prism({px, y + 0.5f, pz}, 8, 0.8f, 0.8f, 19, col(235, 232, 225), w);
+            addPlat({px - 0.8f, px + 0.8f, pz - 0.8f, pz + 0.8f, y + 19.5f, y + 19.5f, y - 1, 0, PK_POLE});
+        }
         m.prism({cx, y + 24, cz}, 16, 15, 15, 14, w, w);
         Color gold = col(212, 172, 72);
         m.sphere({cx, y + 38, cz}, 15, 12, 18, gold, true);
@@ -485,13 +490,29 @@ void World::buildLandmarks() {
         addBox(1175, 684, 1225, 698, y - 1, y + 18, PK_BUILDING, brick, col(60, 90, 70));
         addBox(1245, 684, 1300, 698, y - 1, y + 18, PK_BUILDING, brick, col(60, 90, 70));
         addBox(1300, 690, 1312, 868, y - 1, y + 3, PK_PROP, col(40, 80, 60), col(40, 80, 60));
+        // grandstand: a seating bank rising from a 2 m front wall at x 1195 up to the back wall at x 1175
         m.slab(1175, 1195, 698, 852, y + 18, y + 2, 0, y, col(40, 90, 70), brick);
+        addPlat({1175, 1195, 698, 852, y + 18, y + 2, y - 1, 0, PK_PROP});
         m.box({1280, y, 702}, {1298, y + 26, 708}, col(30, 30, 34), col(30, 30, 34));       // scoreboard
-        m.prism({1290, y + 3, 715}, 10, 2.5f, 1.2f, 18, col(190, 30, 30), col(190, 30, 30));  // the giant bottle
-        m.sphere({1290, y + 12, 735}, 6, 8, 10, col(140, 90, 50));                           // the giant glove
-        for (Vector2 t : {Vector2{1165, 690}, Vector2{1165, 862}, Vector2{1295, 860}})
-            m.box({t.x - 0.7f, y, t.y - 0.7f}, {t.x + 0.7f, y + 40, t.y + 0.7f}, col(80, 80, 85)),
+        addPlat({1280, 1298, 702, 708, y + 26, y + 26, y - 1, 0, PK_PROP});
+        // the giant bottle stands on a plinth (it used to float 3 m over the grass); solid down to the field
+        Color red = col(190, 30, 30);
+        m.box({1287.5f, y, 712.5f}, {1292.5f, y + 3, 717.5f}, brick, brick);
+        m.prism({1290, y + 3, 715}, 10, 2.5f, 1.2f, 18, red, red);
+        addPlat({1287.5f, 1292.5f, 712.5f, 717.5f, y + 3, y + 3, y - 1, 0, PK_PROP});      // plinth
+        addPlat({1288.2f, 1291.8f, 713.2f, 716.8f, y + 21, y + 21, y - 1, 0, PK_PROP});    // bottle (its tapering 10-gon, roughly)
+        // the giant glove sits on a pedestal (it used to float 6 m over the grass); the glove itself is approximated by
+        // a box around the core of its r 6 sphere
+        Color leather = col(140, 90, 50);
+        m.box({1287.5f, y, 732.5f}, {1292.5f, y + 7, 737.5f}, brick, brick);
+        m.sphere({1290, y + 12, 735}, 6, 8, 10, leather);
+        addPlat({1287.5f, 1292.5f, 732.5f, 737.5f, y + 7, y + 7, y - 1, 0, PK_PROP});      // pedestal
+        addPlat({1285.8f, 1294.2f, 730.8f, 739.2f, y + 16, y + 16, y + 8, 0, PK_PROP});    // glove
+        for (Vector2 t : {Vector2{1165, 690}, Vector2{1165, 862}, Vector2{1295, 860}}) {     // light towers
+            m.box({t.x - 0.7f, y, t.y - 0.7f}, {t.x + 0.7f, y + 40, t.y + 0.7f}, col(80, 80, 85));
             m.box({t.x - 3, y + 38, t.y - 3}, {t.x + 3, y + 42, t.y + 3}, col(255, 250, 220, M_EMISSIVE));
+            addPlat({t.x - 0.7f, t.x + 0.7f, t.y - 0.7f, t.y + 0.7f, y + 40, y + 40, y - 1, 0, PK_POLE});
+        }
     }
     buildAlcatraz();
     // --- Treasure Island hangars
@@ -1094,7 +1115,7 @@ void World::buildMeta() {
     spot("Menlo Park", mp.node(5, 0).x - 20, mp.node(0, 4).y + 2.4f, PI);
 
     auto tok = [&](const char* n, float x, float z) { tokens.push_back({{x, G(x, z) + 1.4f, z}, n}); };
-    tok("Coit Tower", 880, -852);
+    tok("Coit Tower", 880, -904);   // behind the tower, well away from the teleport spot on the south plaza
     tok("Golden Gate Bridge", -1100, -1690);
     tok("Twin Peaks", -300, 905);
     tok("Lombard Street", gx(17) + 3, gz(3));

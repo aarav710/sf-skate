@@ -705,13 +705,23 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
         Facade F{m, x0, z0, x1, z1, facing};
         Vector3 po = F.P(fi.cDoor, 0, fi.side ? 0.8f : fi.ns * fi.tread + 0.7f), pi = F.P(fi.cDoor, 0, -1.6f), pf = F.P(fi.uA, 0, 0.7f);
         Vector2 doorOut = {po.x, po.z}, doorIn = {pi.x, pi.z}, foot = {pf.x, pf.z};
+        // remember each step box, so sidewalk walkers can go round the front of it instead of through it
+        Vector2 toStreet = facing == 0 ? Vector2{0, -1} : facing == 1 ? Vector2{0, 1} : facing == 2 ? Vector2{-1, 0} : Vector2{1, 0};
+        // (in every cell its reach touches, the box grown by STOOP_REACH, so a lookup needs only the walker's cell)
+        auto addStoop = [&](float sx0, float sx1, float sz0, float sz1) {
+            for (int ci = (int)floorf((sx0 - STOOP_REACH) / 16.f); ci <= (int)floorf((sx1 + STOOP_REACH) / 16.f); ci++)
+                for (int cj = (int)floorf((sz0 - STOOP_REACH) / 16.f); cj <= (int)floorf((sz1 + STOOP_REACH) / 16.f); cj++)
+                    stoops.emplace(ci * 4096 + cj, Stoop{sx0, sx1, sz0, sz1, toStreet});
+        };
         if (fi.side) {   // collision for the flight along the front and its landing
             float ulo = std::min(fi.uA, fi.uL), uhi = std::max(fi.uA, fi.uL);
             Vector3 a = F.P(ulo, 0, 0), b = F.P(uhi, 0, 1.4f);
             float h0 = fi.uA < fi.uL ? fi.yStart : fi.doorY, h1 = fi.uA < fi.uL ? fi.doorY : fi.yStart;
             addPlat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), h0, h1, fi.yStart - 2.f, (uint8_t)(facing < 2 ? 0 : 1), PK_PROP});
+            addStoop(std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z));
             Vector3 la = F.P(fi.lu0, 0, 0), lb = F.P(fi.lu1, 0, 1.4f);
             addPlat({std::min(la.x, lb.x), std::max(la.x, lb.x), std::min(la.z, lb.z), std::max(la.z, lb.z), fi.doorY, fi.doorY, fi.gd - 2.f, 0, PK_PROP});
+            addStoop(std::min(la.x, lb.x), std::max(la.x, lb.x), std::min(la.z, lb.z), std::max(la.z, lb.z));
         } else {   // collision for the front steps: a flat top step, then a smooth ramp down to the street so you roll up
             // instead of bouncing off each tread (it follows the front edges of the drawn steps)
             float W2 = fi.ns * fi.tread;
@@ -722,6 +732,7 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
                 Vector3 a = F.P(fi.cDoor - 0.9f, 0, dep0), b = F.P(fi.cDoor + 0.9f, 0, dep1);
                 float x0s = std::min(a.x, b.x), x1s = std::max(a.x, b.x), z0s = std::min(a.z, b.z), z1s = std::max(a.z, b.z);
                 float base2 = fi.gd - 0.4f;
+                addStoop(x0s, x1s, z0s, z1s);
                 switch (facing) { // wall side is the near end
                 case 0: addPlat({x0s, x1s, z0s, z1s, yFar2, yNear, base2, 1, PK_PROP}); break;
                 case 1: addPlat({x0s, x1s, z0s, z1s, yNear, yFar2, base2, 1, PK_PROP}); break;
@@ -1160,6 +1171,7 @@ void World::addTree(float x, float z, int type, float s, RNG& r, bool solid) {
     if (solid && doorBlocked(x, z, 2.6f)) return; // never plant a trunk in front of a front door
     float y = terrain(x, z);
     if (y < 0.8f) return;
+    if (buildingAt(x, z, 0.5f * s, y - 0.2f, y + 5.f)) return;   // not inside a building or landmark base
     treeCells[(int)floorf(z / 25.f) * 100000 + (int)floorf(x / 25.f)]++;
     MeshBuilder& m = mb(x, z);
     Color bark = jitterC(col(96, 72, 52), r, 0.15f);
@@ -1285,10 +1297,13 @@ void World::addFlowerBed(float x0, float z0, float x1, float z1, int count, RNG&
 void World::addLamp(float x, float z, float yaw) {
     if (doorBlocked(x, z, 2.1f)) return;
     float y = terrain(x, z);
+    // keep the pole out of buildings and landmark bases, and the arm's lamp head out of their walls
+    Vector3 head = {x + cosf(yaw) * 1.4f, y + 6.6f, z + sinf(yaw) * 1.4f};
+    if (buildingAt(x, z, 0.2f, y - 0.2f, y + 6.6f) || buildingAt(head.x, head.z, 0.3f, head.y - 0.3f, head.y + 0.1f)) return;
     MeshBuilder& m = mb(x, z);
     Color pole = col(56, 66, 60);
     m.beam({x, y - 0.2f, z}, {x, y + 6.5f, z}, 0.18f, 0.18f, pole);
-    Vector3 tip = {x + cosf(yaw) * 1.4f, y + 6.6f, z + sinf(yaw) * 1.4f};
+    Vector3 tip = head;
     m.beam({x, y + 6.4f, z}, tip, 0.1f, 0.1f, pole);
     m.box({tip.x - 0.3f, tip.y - 0.25f, tip.z - 0.3f}, {tip.x + 0.3f, tip.y + 0.05f, tip.z + 0.3f}, col(255, 222, 160, M_EMISSIVE));
     lamps.push_back({tip.x, tip.y - 0.4f, tip.z});
@@ -1306,6 +1321,7 @@ static void disk(MeshBuilder& m, Vector3 c, Vector3 a, Vector3 b, float r, int n
 
 void World::addClutter(Vector2 p, Vector2 f, Vector2 o, int kind, uint32_t h) {
     float y = terrain(p.x, p.y);
+    if (buildingAt(p.x, p.y, kind == 5 ? 2.2f : 1.0f, y - 0.2f, y + 2.6f)) return;   // not inside a building or landmark base
     MeshBuilder& m = mb(p.x, p.y);
     Vector3 F = {f.x, 0, f.y}, O = {o.x, 0, o.y}, U = {0, 1, 0};
     auto at = [&](float alongF, float up, float outO) { return V3(p.x + f.x * alongF + o.x * outO, y + up, p.y + f.y * alongF + o.y * outO); };
@@ -1465,6 +1481,7 @@ void World::buildIntersections(const Grid& g) {
                 Vector2 c = {n.x - head.x * 7.7f + right.x * 7.7f, n.y - head.y * 7.7f + right.y * 7.7f};
                 if (doorBlocked(c.x, c.y, 3.6f)) continue;
                 float y = terrain(c.x, c.y);
+                if (buildingAt(c.x, c.y, 0.3f, y - 0.2f, y + 6.5f)) continue;   // a corner inside a landmark's base
                 MeshBuilder& m = mb(c.x, c.y);
                 Vector3 face = {-head.x, 0, -head.y};   // toward the oncoming cars
                 if (signal) {

@@ -400,6 +400,26 @@ int main() {
         snprintf(b, sizeof b, "air=%d x=%.1f vy=%.1f", air, s.p.pos.x, s.p.vy);
         check(air && s.p.pos.x > 1241, "kicker launches", b);
     }
+    {   // rolling off the Marina Green mega kicker (3.4 m, lip at x -468) without an ollie flies up and out,
+        // not slammed down by a slope sample read past the lip (#93)
+        int ok = 0; char got[160] = "";
+        for (float spd : {12.f, 15.f, 20.f}) {
+            Sim s; s.spawn(-495, -1046, 0, spd);
+            float vy0 = -99, x0 = 0; bool air = false, landed = false;
+            s.run(360, Input{}, [&](Player& q) {
+                if (!air && q.state == Player::AIR) { air = true; vy0 = q.vy; x0 = q.pos.x; }
+                landed |= air && (q.evLand || q.state == Player::BAIL);
+                return landed;
+            });
+            bool good = air && landed && vy0 > 0.5f && x0 > -469 && s.p.pos.x > -464 &&
+                        !(s.p.state == Player::BAIL && s.p.subPopup == "Way too much drop");
+            ok += good;
+            if (!good && !got[0]) snprintf(got, sizeof got, " (%.0f m/s: air=%d vy0 %.1f at x %.1f, ended x %.1f, state %d '%s')",
+                                           spd, air, vy0, x0, s.p.pos.x, s.p.state, s.p.subPopup.c_str());
+        }
+        snprintf(b, sizeof b, "%d of 3 roll-offs launched up and forward%s", ok, got);
+        check(ok == 3, "roll off a big kicker launches upward", b);
+    }
     {   // at rest half a metre from the Embarcadero deck's drop edge (x 1170), facing it or backed up to it: stays put
         int held = 0; char got[96] = "";
         for (float yaw : {PI, 0.f}) {

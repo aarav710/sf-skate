@@ -181,6 +181,12 @@ void Player::ride(float dt, const Input& in, World& w) {
     Vector3 f2 = fwd();
     float hF2 = w.ground(np.x + f2.x * 0.5f, np.z + f2.z * 0.5f, g + 0.2f);
     float hB2 = w.ground(np.x - f2.x * 0.5f, np.z - f2.z * 0.5f, g + 0.2f);
+    // same edge rule as the slope above: a sample past a lip reads the ground far below, which would make
+    // the climb off a kicker a huge plunge (and the roll-off a "Way too much drop" bail). Continue the surface instead
+    bool edgeF2 = hF2 < g - STEP_UP, edgeB2 = hB2 < g - STEP_UP;
+    if (edgeF2 && edgeB2) hF2 = hB2 = g;
+    else if (edgeF2) hF2 = 2 * g - hB2;
+    else if (edgeB2) hB2 = 2 * g - hF2;
     rideVy = clampf(speed * (hF2 - hB2), -30, 30);
     pos = np;
     pos.y = g;

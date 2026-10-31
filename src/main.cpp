@@ -239,6 +239,7 @@ static void drawBigMap() {
     for (size_t i = 0; i < W.spots.size(); i++) {
         Vector2 p = S2(W.spots[i].pos.x, W.spots[i].pos.z);
         DrawCircleV(p, 11, {30, 30, 40, 230});
+        if (i >= 10) { DrawCircleV(p, 3, WHITE); continue; } // only 1..9, 0 have a key; the rest get a plain dot
         char b[4];
         snprintf(b, sizeof b, "%d", (int)((i + 1) % 10));
         DrawText(b, (int)p.x - MeasureText(b, 16) / 2, (int)p.y - 8, 16, WHITE);
@@ -459,11 +460,16 @@ int main() {
             CH.on = on;
             CH.reset(8);
         };
+        // get off whatever is being ridden before a teleport: the train ride ends, the jet ski stays moored
+        // where it was (it follows the rider while ridden) and the seaplane is back at its mooring
+        auto leaveVehicles = [&]() {
+            ride.on = false;
+            if (JS.riding) { JS.riding = false; JS.cur = -1; JS.speed = 0; }
+            if (SP.riding) { SP.riding = false; SP.cur = -1; }
+        };
         auto startAt = [&](int idx) {
             justStarted = true;
-            ride.on = false;
-            JS.riding = false; JS.cur = -1;
-            if (SP.riding) { SP.riding = false; SP.cur = -1; }
+            leaveVehicles();
             P.spawn(W.spots[idx].pos, W.spots[idx].yaw);
             camYaw = P.yaw;
             camPos = {P.pos.x - cosf(P.yaw) * 6, P.pos.y + 3, P.pos.z - sinf(P.yaw) * 6};
@@ -542,6 +548,7 @@ int main() {
                 int idx = k;
                 if (k == 9 && !IsKeyPressed(KEY_ZERO)) continue;
                 if (idx < (int)W.spots.size()) {
+                    leaveVehicles();
                     P.spawn(W.spots[idx].pos, W.spots[idx].yaw);
                     camYaw = P.yaw;
                     camPos = {P.pos.x - cosf(P.yaw) * 6, P.pos.y + 3, P.pos.z - sinf(P.yaw) * 6};
@@ -1289,7 +1296,7 @@ int main() {
                 int y = py + 90 + i * 34;
                 bool sel = i == pickIdx;
                 if (sel) DrawRectangle(px + 16, y - 2, 388, 32, {245, 95, 60, 220});
-                DrawText(TextFormat("%d", (i + 1) % 10), px + 28, y + 4, 20, sel ? WHITE : Color{150, 160, 180, 255});
+                if (i < 10) DrawText(TextFormat("%d", (i + 1) % 10), px + 28, y + 4, 20, sel ? WHITE : Color{150, 160, 180, 255});
                 DrawText(W.spots[i].name, px + 60, y + 4, 22, WHITE);
             }
             const Color TOD[3] = {{120, 180, 240, 255}, {240, 150, 80, 255}, {60, 70, 130, 255}};

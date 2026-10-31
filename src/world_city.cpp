@@ -946,16 +946,16 @@ void World::addHouseInterior(const House& h, float base, float top, float doorU,
 
     // furniture, kept clear of the entry hall and of the walkway to the back room
     float farU0 = doorLeft ? iu1 - 2.4f : iu0, farU1 = doorLeft ? iu1 : iu0 + 2.4f;     // side away from the door
-    float nearU0 = doorLeft ? iu0 : iu1 - 2.4f, nearU1 = doorLeft ? iu0 + 2.4f : iu1;
+    float nearU0 = doorLeft ? iu0 : iu1 - 2.4f;
     static const Color FAB[] = {col(120, 62, 58), col(58, 86, 110), col(96, 110, 78), col(150, 120, 80)};
     Color sofaC = FAB[hr.irange(0, 3)];
     float sofaD = d0 + 3.2f;
     aabb(farU0, farU1, sofaD, sofaD + 2.2f, Y, Y + 0.45f, sofaC, true);                              // sofa seat
-    aabb(doorLeft ? farU1 - 0.45f : farU0, doorLeft ? farU1 : farU0 + 0.45f, sofaD, sofaD + 2.2f, Y + 0.45f, Y + 0.95f, scaleC(sofaC, 0.9f), false); // back
+    aabb(doorLeft ? farU1 - 0.45f : farU0, doorLeft ? farU1 : farU0 + 0.45f, sofaD, sofaD + 2.2f, Y + 0.45f, Y + 0.95f, scaleC(sofaC, 0.9f), true);  // back
     aabb((farU0 + farU1) * 0.5f - 0.5f, (farU0 + farU1) * 0.5f + 0.5f, sofaD + 3.0f, sofaD + 3.0f + 0.9f, Y, Y + 0.04f, col(176, 70, 60), false); // rug
     aabb((farU0 + farU1) * 0.5f - 0.45f, (farU0 + farU1) * 0.5f + 0.45f, sofaD + 0.2f, sofaD + 1.6f, Y, Y + 0.42f, wood, true);          // coffee table
     aabb(nearU0, nearU0 + 0.4f, dp - 2.4f, dp - 0.4f, Y, Y + 2.1f, scaleC(wood, 0.8f), true);                                         // bookshelf by the partition
-    if (doorLeft) aabb(iu1 - 0.35f, iu1 - 0.12f, sofaD + 2.5f, sofaD + 2.75f, Y, Y + 1.6f, col(60, 60, 64), false);                    // floor lamp stem
+    if (doorLeft) aabb(iu1 - 0.35f, iu1 - 0.12f, sofaD + 2.5f, sofaD + 2.75f, Y, Y + 1.6f, col(60, 60, 64), true);                     // floor lamp stem
     aabb((farU0 + farU1) * 0.5f - 0.2f, (farU0 + farU1) * 0.5f + 0.2f, d0 + 1.0f, d0 + 1.4f, Y + CEIL_H - 0.1f, Y + CEIL_H - 0.02f, withMat(col(255, 236, 190), M_EMISSIVE), false); // ceiling light
     // back room: counter along the back wall, table and chairs
     aabb(iu0, iu0 + std::min(3.2f, iu1 - iu0 - 1.f), d1 - 0.65f, d1, Y, Y + 0.92f, col(190, 184, 170), true);
@@ -965,7 +965,7 @@ void World::addHouseInterior(const House& h, float base, float top, float doorU,
     for (int k = 0; k < 4; k++) {
         float cu = tu + (k % 2 ? 0.95f : -0.95f), cd = td + (k < 2 ? 0.0f : 0.0f);
         if (k >= 2) { cu = tu + (k == 2 ? -0.35f : 0.35f); cd = td + 0.85f; }
-        aabb(cu - 0.2f, cu + 0.2f, cd - 0.2f, cd + 0.2f, Y, Y + 0.45f, scaleC(wood, 0.85f), false);
+        aabb(cu - 0.2f, cu + 0.2f, cd - 0.2f, cd + 0.2f, Y, Y + 0.45f, scaleC(wood, 0.85f), true);
     }
     aabb(tu - 0.2f, tu + 0.2f, td - 0.2f, td + 0.2f, Y + 0.76f, Y + 0.95f, withMat(col(255, 226, 150), M_EMISSIVE), false); // lamp on the table
     aabb(tu - 0.25f, tu + 0.25f, td - 0.25f, td + 0.25f, Y + CEIL_H - 0.1f, Y + CEIL_H - 0.02f, withMat(col(255, 236, 190), M_EMISSIVE), false);
@@ -1002,12 +1002,14 @@ void World::addHouseInterior(const House& h, float base, float top, float doorU,
         Vector3 g0 = I(doorLeft ? iu1 - 0.56f : iu0 + 0.56f, Y + 0.12f, fd + 0.45f), g1 = I(doorLeft ? iu1 - 0.56f : iu0 + 0.56f, Y + 0.12f, fd + 1.25f);
         m.quad(g0, g1, {g1.x, Y + 0.75f, g1.z}, {g0.x, Y + 0.75f, g0.z}, withMat(col(255, 150, 60), M_EMISSIVE)); // firelight
     }
-    // television on a low cabinet against the partition, facing the sofa
+    // television on a low cabinet against the partition, between its doorway and the sofa so it never stands
+    // in the way to the back room; left out where that stretch of wall is too short for it
     {
-        float tc = (nearU0 + nearU1) * 0.5f;
-        if (iu1 - iu0 > 6.f) {
-            aabb(tc - 0.8f, tc + 0.8f, dp - 0.55f, dp - 0.05f, Y, Y + 0.5f, wood, false);
-            aabb(tc - 0.6f, tc + 0.6f, dp - 0.12f, dp - 0.05f, Y + 0.55f, Y + 1.1f, col(20, 22, 26), false);
+        float span0 = doorLeft ? g1 : farU1, span1 = doorLeft ? farU0 : g0;
+        float tc = (span0 + span1) * 0.5f;
+        if (iu1 - iu0 > 6.f && span1 - span0 >= 1.7f) {
+            aabb(tc - 0.8f, tc + 0.8f, dp - 0.55f, dp - 0.05f, Y, Y + 0.5f, wood, true);
+            aabb(tc - 0.6f, tc + 0.6f, dp - 0.12f, dp - 0.05f, Y + 0.55f, Y + 1.1f, col(20, 22, 26), true);
             aabb(tc - 0.54f, tc + 0.54f, dp - 0.14f, dp - 0.12f, Y + 0.6f, Y + 1.05f, withMat(col(110, 150, 220), M_EMISSIVE), false); // screen
         }
     }
@@ -1025,6 +1027,8 @@ void World::addHouseInterior(const House& h, float base, float top, float doorU,
         aabb(ku + 0.9f, ku + 1.5f, d1 - 0.65f, d1 - 0.1f, Y + 0.92f, Y + 0.96f, withMat(col(255, 120, 50), M_EMISSIVE), false); // burners
         aabb(farU0 + 0.2f, farU0 + 0.7f, sofaD - 1.0f, sofaD - 0.5f, Y, Y + 0.4f, col(150, 84, 60), false);   // pot
         m.prism(I(farU0 + 0.45f, Y + 0.4f, sofaD - 0.75f), 6, 0.32f, 0.12f, 0.9f, withMat(col(64, 128, 70), M_INTERIOR), withMat(col(64, 128, 70), M_INTERIOR), 0.f, true, 1.f);
+        Vector3 pa = I(farU0 + 0.2f, 0, sofaD - 1.0f), pb = I(farU0 + 0.7f, 0, sofaD - 0.5f); // pot and plant: one column
+        plat({std::min(pa.x, pb.x), std::max(pa.x, pb.x), std::min(pa.z, pb.z), std::max(pa.z, pb.z), Y + 1.3f, Y + 1.3f, Y, 0, PK_PROP});
     }
     // pictures on the side walls
     for (int k = 0; k < 3; k++) {

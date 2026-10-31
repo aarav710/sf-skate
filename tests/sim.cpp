@@ -75,6 +75,19 @@ int main() {
         snprintf(b, sizeof b, "air=%d landed=%d peak=%.2fm score=%lld", air, landed, peak, s.p.score);
         check(air && landed && peak > 1.3f && peak < 2.2f && (s.p.score == 100 || s.p.score == 150), "ollie", b);
     }
+    {   // a short tap of I: the grab pose lets go with the key, but the Indy Grab still scores once
+        Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
+        Input in; in.ollie = true;
+        s.run(1, in);
+        Input g; g.grab = true;
+        int held = 0, stuck = 0, f = 0;
+        s.run(6, g, [&](Player& p) { held += p.grabbing; return p.state != Player::AIR; });
+        int indy = 0;
+        for (auto& t : s.p.combo) indy += t == "Indy Grab";
+        s.run(120, Input{}, [&](Player& p) { if (p.state == Player::AIR && p.grabbing) stuck++; f++; return p.state != Player::AIR; });
+        snprintf(b, sizeof b, "pose on %d/6 held frames, %d of %d frames after release; Indy Grab x%d", held, stuck, f, indy);
+        check(held == 6 && stuck == 0 && f > 10 && indy == 1, "grab pose follows I", b);
+    }
     {   // a landing bounces: the board pops back up a little before rolling out
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
         Input in; in.ollie = true; s.run(1, in);

@@ -1656,6 +1656,25 @@ int main() {
         snprintf(b, sizeof b, "%d of %d ledges grindable", grinds, ledges);
         check(ledges == 3 && grinds == ledges, "Union Square ledges grindable", b);
     }
+    {   // City Hall: riding south from Civic Center, the front columns and the portico behind them stop the skater
+        // (they were mesh only, so the skater rode through the column line at z 351 into the portico at z 352..358)
+        float cx = (gx(14) + gx(15)) / 2, cz = (gz(13) + gz(14)) / 2;
+        float worst = -1e9f, worstCol = -1e9f;
+        for (int lane = 0; lane < 2; lane++) {   // between the middle two columns, then straight at one
+            float x = lane == 0 ? cx : cx - 2.5f;
+            Sim s; s.spawn(x, cz - 48, PI / 2, 6);
+            float maxZ = -1e9f;
+            for (int f = 0; f < 60 * 5; f++) {
+                Input in; in.push = s.p.speed < 5.f && s.p.state == Player::RIDE;
+                s.p.update(1.f / 60, in, W);
+                maxZ = std::max(maxZ, s.p.pos.z);
+            }
+            if (lane == 0) worst = maxZ; else worstCol = maxZ;
+        }
+        snprintf(b, sizeof b, "between columns reached z %.2f (portico face %.1f), at a column z %.2f (column face %.1f)", worst, cz - 38,
+                 worstCol, cz - 39.8f);
+        check(worst < cz - 38 && worstCol < cz - 39.8f, "City Hall portico and columns solid", b);
+    }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;
 }

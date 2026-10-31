@@ -364,7 +364,12 @@ void World::buildLandmarks() {
         Color w = col(216, 212, 202, M_HOUSE), roof = col(170, 168, 160);
         addBox(cx - 45, cz - 32, cx + 45, cz + 32, y - 1, y + 24, PK_BUILDING, w, roof);
         m.box({cx - 20, y + 0.5f, cz - 38}, {cx + 20, y + 20, cz - 32}, col(225, 220, 210), roof, 0.9f); // portico
-        for (int k = 0; k < 8; k++) m.prism({cx - 17.5f + k * 5, y + 0.5f, cz - 39}, 8, 0.8f, 0.8f, 19, col(235, 232, 225), w);
+        addPlat({cx - 20, cx + 20, cz - 38, cz - 32, y + 20, y + 20, y - 1, 0, PK_BUILDING});
+        for (int k = 0; k < 8; k++) {   // the front columns, solid like the Palace of Fine Arts' ones
+            float px = cx - 17.5f + k * 5, pz = cz - 39;
+            m.prism({px, y + 0.5f, pz}, 8, 0.8f, 0.8f, 19, col(235, 232, 225), w);
+            addPlat({px - 0.8f, px + 0.8f, pz - 0.8f, pz + 0.8f, y + 19.5f, y + 19.5f, y - 1, 0, PK_POLE});
+        }
         m.prism({cx, y + 24, cz}, 16, 15, 15, 14, w, w);
         Color gold = col(212, 172, 72);
         m.sphere({cx, y + 38, cz}, 15, 12, 18, gold, true);

@@ -5,7 +5,7 @@ static const Color HULL[5] = {{240, 196, 40, 255}, {220, 60, 50, 255}, {50, 130,
 
 // open water inside the playable area: moorings and rides both stay where the skater is allowed to be
 static bool openWater(const World& w, float x, float z) {
-    return w.inPlay(x, z) && x > WX0 + 80 && x < WX1 - 80 && z > WZ0 + 80 && z < WZ1 - 80 && w.terrain(x, z) < 0.05f && !w.solidAt({x, 0.7f, z});
+    return w.inPlay(x, z) && x > WX0 + 80 && x < WX1 - 80 && z > WZ0 + 80 && z < WZ1 - 80 && w.terrain(x, z) < 0.05f && !w.solidAt({x, 0.7f, z}, false, true);
 }
 
 void JetSkis::place(const World& w) {

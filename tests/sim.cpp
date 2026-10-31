@@ -4,6 +4,7 @@
 #include "../src/chase.h"
 #include "../src/traffic.h"
 #include "../src/models.h"
+#include "../src/jetski.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -508,6 +509,39 @@ int main() {
         s.run(300, in);
         snprintf(b, sizeof b, "x=%.2f y=%.1f state=%d", s.p.pos.x, s.p.pos.y, s.p.state);
         check(s.p.pos.x < -1086 && s.p.pos.y > 25, "bridge railing holds", b);
+    }
+    {   // a jet ski at full throttle stops at piers, bridge bases and the Balclutha instead of driving through (#63)
+        struct { const char* name; float x0, z0, x1, z1, sx, sz, yaw; } hits[] = {
+            {"Pier 39", 990, -1300, 1060, -1105, 930, -1200, 0},
+            {"Golden Gate south tower base", -1130, -1264, -1070, -1236, -1200, -1250, 0},
+            {"Embarcadero pier", 1290, 165, 1480, 195, 1570, 180, PI},
+            {"Balclutha", 489.5f, -1235, 500.5f, -1165, 570, -1200, PI},
+            {"Bay Bridge tower base", 1570, 307, 1590, 363, 1580, 240, PI / 2},
+        };
+        int ok = 0, tot = 0;
+        char det[600] = "";
+        for (auto& h : hits) {
+            tot++;
+            JetSkis js;
+            js.skis.push_back({{h.sx, 0, h.sz}, h.yaw, 0});
+            Player p;
+            js.mount(0, p);
+            Input in; in.push = true;
+            int inside = 0;
+            float closest = 1e9f;
+            for (int f = 0; f < 60 * 15; f++) {
+                js.update(1.f / 60, in, false, p, W);
+                float x = p.pos.x, z = p.pos.z;
+                if (x > h.x0 + 0.5f && x < h.x1 - 0.5f && z > h.z0 + 0.5f && z < h.z1 - 0.5f) inside++;
+                float dx = std::max(std::max(h.x0 - x, x - h.x1), 0.f), dz = std::max(std::max(h.z0 - z, z - h.z1), 0.f);
+                closest = std::min(closest, sqrtf(dx * dx + dz * dz));
+            }
+            // it has to have actually reached the structure (not been stuck at the start) and never got inside
+            if (inside == 0 && closest < 3.f) ok++;
+            else snprintf(det + strlen(det), sizeof det - strlen(det), "%s: %d frames inside, closest %.1f m; ", h.name, inside, closest);
+        }
+        snprintf(b, sizeof b, "%d/%d stopped. %.200s", ok, tot, det);
+        check(ok == tot, "jet ski can't drive through piers / bridge bases / ships", b);
     }
     {   // a grind that slows to a stop steps off onto the deck: not over the Golden Gate railing, not into a rail
         struct { float x, z; bool ns; } spots[] = {{-1086.2f, -1500, true}, {-1130, -2377, false}};

@@ -277,11 +277,12 @@ void Player::air(float dt, const Input& in, World& w) {
             speed = std::max(3.5f, hv * fabsf(al));
             Vector2 bf = {cosf(yaw), sinf(yaw)};
             boardslide = fabsf(bf.x * rd.x + bf.y * rd.y) < 0.6f;
+            railFakie = bf.x * vel.x + bf.y * vel.z < 0; // came in backwards: grind fakie rather than snapping round
             balance = 0;
             balanceVel = (GetRandomValue(0, 1) ? 1 : -1) * 0.3f;
             state = GRIND;
             airClip = false;
-            std::string nm = boardslide ? "Boardslide" : "50-50";
+            std::string nm = boardslide ? "Boardslide" : railFakie ? "Fakie 50-50" : "50-50";
             if (r.name) nm += std::string(" (") + r.name + ")";
             addTrick(nm, 250);
             if (airTime > 0.6f && spinAccum != 0) {
@@ -389,7 +390,7 @@ void Player::grind(float dt, const Input& in, World& w) {
     // balance: tap the opposite direction to stay on (D pushes balance, and the HUD marker, right)
     balanceVel += ((GetRandomValue(-100, 100) / 100.f) * 2.4f + balance * 2.4f + in.steer * 4.2f) * dt;
     balance += balanceVel * dt;
-    lean = balance * 0.8f;
+    lean = balance * (railFakie ? -0.8f : 0.8f); // board turned round: mirror, so the rider still tips toward the HUD marker
     if (fabsf(balance) > 1.f) { bail("Lost balance on the rail"); return; }
     if (speed < 1.0f) {
         state = AIR; vel = {dir.x * railDir * 1.5f, 0, dir.y * railDir * 1.5f}; vy = 0; airTime = 0; spinAccum = 0;
@@ -406,7 +407,7 @@ void Player::grind(float dt, const Input& in, World& w) {
         pos = off;
         return;
     }
-    if (!boardslide) yaw = atan2f(dir.y * railDir, dir.x * railDir);
+    if (!boardslide) yaw = wrapPi(atan2f(dir.y * railDir, dir.x * railDir) + (railFakie ? PI : 0.f));
     railT += railDir * speed * dt / Lxz;
     if (railT >= 1.f || railT <= 0.f) {
         railT = clampf(railT, 0, 1);

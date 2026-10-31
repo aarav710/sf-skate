@@ -254,6 +254,42 @@ int main() {
         fakie(1173, -300, 0, false, "roll off a ledge fakie: no snap", 0, 0);
         fakie(1045 + 2.4f, -80, PI / 2, true, "fakie ollie: no snap, no spin", 100, 150);
     }
+    {   // ...a 180 from fakie lands forwards, and it's the 180 that scores, not "to Fakie"
+        Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, -8);
+        Input in; in.ollie = true; s.run(1, in);
+        Input sp; sp.steer = 1; s.run(63, sp, [](Player& p) { return fabsf(p.spinAccum) >= PI; });
+        s.run(120, Input{}, [](Player& p) { return p.state == Player::RIDE; });
+        snprintf(b, sizeof b, "state=%d speed=%.1f banked \"%s\"", s.p.state, s.p.speed, s.p.subPopup.c_str());
+        check(s.p.state == Player::RIDE && s.p.speed > 0 && s.p.subPopup.find("180") != std::string::npos &&
+              s.p.subPopup.find("Fakie") == std::string::npos, "fakie 180 lands forwards", b);
+    }
+    {   // ...and ollieing fakie onto the Embarcadero Plaza Flat Bar grinds fakie, then rolls away fakie
+        int ok = 0, tries = 6; float worst = 0; char last[200] = "";
+        for (int t = 0; t < tries; t++) {
+            SetRandomSeed(4600 + t);
+            Sim s; s.spawn(1186, -238, PI, -7);
+            s.run(60, Input{}, [](Player& p) { return p.pos.x > 1193.5f; });
+            float prev = s.p.yaw, jump = 0;
+            bool grind = false, settled = false;
+            std::string tricks;
+            auto track = [&](Player& p) { jump = std::max(jump, fabsf(wrapPi(p.yaw - prev))); prev = p.yaw; };
+            Input in; in.ollie = true; s.run(1, in, [&](Player& p) { track(p); return false; });
+            for (int f = 0; f < 600 && !settled && s.p.state != Player::BAIL; f++) {
+                Input bal; // follow the HUD meter, as in the grind balance check
+                if (s.p.state == Player::GRIND) bal.steer = s.p.balance > 0.1f ? -1.f : s.p.balance < -0.1f ? 1.f : 0.f;
+                s.run(1, bal, [&](Player& p) { track(p); return false; });
+                if (s.p.state == Player::GRIND) { grind = true; tricks = s.p.combo.back(); }
+                settled = grind && s.p.state == Player::RIDE && !s.p.bouncing;
+            }
+            s.run(10, Input{}, [&](Player& p) { track(p); return false; });
+            worst = std::max(worst, jump);
+            bool good = grind && jump < 0.05f && s.p.state == Player::RIDE && s.p.speed < 0 && tricks.rfind("Fakie 50-50", 0) == 0;
+            ok += good;
+            if (!good || !last[0]) snprintf(last, sizeof last, " (seed %d: grind=%d \"%s\" yaw step %.2f, state=%d speed=%.1f)", t, grind, tricks.c_str(), jump, s.p.state, s.p.speed);
+        }
+        snprintf(b, sizeof b, "%d of %d fakie grinds rolled away fakie, worst yaw step %.2f rad%s", ok, tries, worst, last);
+        check(ok == tries, "fakie grind: no snap", b);
+    }
     {   // ...but flying into a building wall at a steep angle is still a crash
         int bailed = 0, tot = 0;
         for (float sp : {8.f, 10.f})

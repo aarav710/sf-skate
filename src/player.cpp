@@ -47,6 +47,7 @@ void Player::bankCombo() {
 void Player::bail(const char* why) {
     if (state == BAIL) return;
     airClip = false;
+    if (state == GRIND && railFakie) yaw = wrapPi(yaw + PI); // fakie 50-50: fall along the rail travel, not back up it
     Vector3 f = state == AIR ? vel : Vector3Scale(fwd(), speed);
     if (state == AIR) {
         float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
@@ -84,7 +85,7 @@ void Player::update(float dt, const Input& in, World& w) {
     popupT -= dt;
     evPop = evLand = evBail = evSplash = evGrindStart = false;
     Vector3 before = pos;
-    if (state != AIR) bouncing = ollieQueued = false;
+    if (state != AIR) bouncing = ollieQueued = grabbing = false;
     switch (state) {
     case RIDE: ride(dt, in, w); break;
     case AIR: air(dt, in, w); break;
@@ -123,6 +124,12 @@ void Player::ride(float dt, const Input& in, World& w) {
     Vector3 f = fwd();
     float hF = w.ground(pos.x + f.x * 0.7f, pos.z + f.z * 0.7f, pos.y + 0.2f);
     float hB = w.ground(pos.x - f.x * 0.7f, pos.z - f.z * 0.7f, pos.y + 0.2f);
+    // a sample past a drop edge is not a slope (a flat deck near its edge would pull the skater over it):
+    // continue the surface under the board from the other sample instead
+    bool edgeF = hF < pos.y - STEP_UP, edgeB = hB < pos.y - STEP_UP;
+    if (edgeF && edgeB) hF = hB = pos.y;
+    else if (edgeF) hF = 2 * pos.y - hB;
+    else if (edgeB) hB = 2 * pos.y - hF;
     float slope = clampf((hF - hB) / 1.4f, -1.5f, 1.5f);
     pitch = lerpf(pitch, atanf(slope), 1 - expf(-dt * 14));
     float acc = -9.8f * slope / sqrtf(1 + slope * slope);
@@ -131,7 +138,7 @@ void Player::ride(float dt, const Input& in, World& w) {
     pushAmt = lerpf(pushAmt, pushing ? 1.f : 0.f, 1 - expf(-dt * 6));
     if (pushAmt > 0.05f) pushPhase += dt * 5.5f;
     if (in.brake) {
-        if (fabsf(speed) < 0.5f) speed = 0;
+        if (fabsf(speed) < 0.5f) speed = acc = 0;   // held: no creep from the slope
         else acc += speed > 0 ? -8.f : 8.f;
     }
     float drag = (in.tuck ? 0.0010f : 0.0026f) * speed * speed + 0.15f;
@@ -159,8 +166,8 @@ void Player::ride(float dt, const Input& in, World& w) {
     }
     float g = w.ground(np.x, np.z, pos.y);
     float predicted = pos.y + rideVy * dt - 0.5f * GRAVITY * dt * dt;
-    if (g < predicted - 0.06f && fabsf(speed) > 1.5f) {
-        // the ground dropped away: we're flying (ramp lip, stairs, crest)
+    if (g < predicted - 0.06f && (fabsf(speed) > 1.5f || g < pos.y - STEP_UP)) {
+        // the ground dropped away: we're flying (ramp lip, stairs, crest, or rolling slowly off a real drop)
         pos = np;
         pos.y = predicted;
         vel = Vector3Scale(f, speed);
@@ -168,8 +175,7 @@ void Player::ride(float dt, const Input& in, World& w) {
         state = AIR;
         airTime = 0;
         spinAccum = 0;
-        grabbed = false;
-        if (speed < 0) { yaw = wrapPi(yaw + PI); }
+        grabbed = false;   // rolling fakie keeps its yaw: the air and the landing read it from yaw vs velocity
         return;
     }
     Vector3 f2 = fwd();
@@ -186,7 +192,6 @@ void Player::ride(float dt, const Input& in, World& w) {
         return;
     }
     if (in.ollie && fabsf(speed) < 40) {
-        if (speed < 0) { yaw = wrapPi(yaw + PI); speed = -speed; } // pop out of fakie rolling
         ollie(7.4f + clampf(fabsf(speed) * 0.03f, 0, 0.6f));
         // going uphill, pop off the slope rather than off flat ground: keep the climb the board already had,
         // or a fast ollie up a steep hill leaves the skater inside the rising hillside
@@ -231,7 +236,8 @@ void Player::air(float dt, const Input& in, World& w) {
         shoveAngle = 180.f * clampf(shoveT / shoveDur, 0, 1);
         if (shoveT >= shoveDur) { shoveT = -1; shoveAngle = 0; }
     }
-    if (in.grab && flipT < 0 && shoveT < 0 && !bouncing) {
+    grabbing = in.grab && flipT < 0 && shoveT < 0 && !bouncing;
+    if (grabbing) {
         if (!grabbed) { grabbed = true; addTrick("Indy Grab", 300); }
         grabT += dt;
         comboPts += 500 * dt;
@@ -278,11 +284,12 @@ void Player::air(float dt, const Input& in, World& w) {
             speed = std::max(3.5f, hv * fabsf(al));
             Vector2 bf = {cosf(yaw), sinf(yaw)};
             boardslide = fabsf(bf.x * rd.x + bf.y * rd.y) < 0.6f;
+            railFakie = !boardslide && bf.x * vel.x + bf.y * vel.z < 0; // came in backwards: grind fakie rather than snapping round
             balance = 0;
             balanceVel = (GetRandomValue(0, 1) ? 1 : -1) * 0.3f;
             state = GRIND;
             airClip = false;
-            std::string nm = boardslide ? "Boardslide" : "50-50";
+            std::string nm = boardslide ? "Boardslide" : railFakie ? "Fakie 50-50" : "50-50";
             if (r.name) nm += std::string(" (") + r.name + ")";
             addTrick(nm, 250);
             if (airTime > 0.6f && spinAccum != 0) {
@@ -324,10 +331,15 @@ void Player::land(World& w, float g) {
     if (shoveT >= 0 && shoveT < shoveDur * 0.75f) { bail("Didn't finish the shove-it"); return; }
     if (vy < -21.f) { bail("Way too much drop"); return; }
     float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
-    float diff = hv > 1.f ? wrapPi(yaw - atan2f(vel.z, vel.x)) : 0.f;
+    // barely moving: forgive the angle, but keep a backwards drift backwards
+    float diff = hv > 1.f ? wrapPi(yaw - atan2f(vel.z, vel.x)) : (vel.x * cosf(yaw) + vel.z * sinf(yaw) < 0 ? PI : 0.f);
     bool fakie = false;
     if (fabsf(diff) > 0.65f) {
-        if (fabsf(fabsf(diff) - PI) < 0.65f) { fakie = true; yaw = wrapPi(yaw + PI); diff = wrapPi(yaw - atan2f(vel.z, vel.x)); }
+        if (fabsf(fabsf(diff) - PI) < 0.65f) {
+            // an odd number of half spins brought it round: ride out the other way. No spin: it left the ground
+            // rolling fakie, so it rolls on fakie (negative speed) instead of snapping round
+            if ((int)roundf(fabsf(spinAccum) / PI) % 2) { fakie = true; yaw = wrapPi(yaw + PI); diff = wrapPi(yaw - atan2f(vel.z, vel.x)); }
+        }
         else { bail("Landed sideways"); return; }
     }
     flipT = shoveT = -1;
@@ -386,7 +398,7 @@ void Player::grind(float dt, const Input& in, World& w) {
     // balance: tap the opposite direction to stay on (D pushes balance, and the HUD marker, right)
     balanceVel += ((GetRandomValue(-100, 100) / 100.f) * 2.4f + balance * 2.4f + in.steer * 4.2f) * dt;
     balance += balanceVel * dt;
-    lean = balance * 0.8f;
+    lean = balance * (railFakie ? -0.8f : 0.8f); // board turned round: mirror, so the rider still tips toward the HUD marker
     if (fabsf(balance) > 1.f) { bail("Lost balance on the rail"); return; }
     if (speed < 1.0f) {
         state = AIR; vel = {dir.x * railDir * 1.5f, 0, dir.y * railDir * 1.5f}; vy = 0; airTime = 0; spinAccum = 0;
@@ -403,7 +415,7 @@ void Player::grind(float dt, const Input& in, World& w) {
         pos = off;
         return;
     }
-    if (!boardslide) yaw = atan2f(dir.y * railDir, dir.x * railDir);
+    if (!boardslide) yaw = wrapPi(atan2f(dir.y * railDir, dir.x * railDir) + (railFakie ? PI : 0.f));
     railT += railDir * speed * dt / Lxz;
     if (railT >= 1.f || railT <= 0.f) {
         railT = clampf(railT, 0, 1);
@@ -434,6 +446,11 @@ void Player::bailUpdate(float dt, World& w) {
     // board tumbles away
     boardVel.y -= GRAVITY * dt;
     boardPos = Vector3Add(boardPos, Vector3Scale(boardVel, dt));
+    Vector2 bn;   // walls: bounce off them (damped) rather than tumbling into the building
+    if (w.collide(boardPos, 0.3f, boardPos.y, 0.3f, &bn)) {
+        float into = -(boardVel.x * bn.x + boardVel.z * bn.y);
+        if (into > 0) { boardVel.x += bn.x * into * 1.4f; boardVel.z += bn.y * into * 1.4f; }
+    }
     float bg = w.ground(boardPos.x, boardPos.z, boardPos.y + 0.3f);
     if (boardPos.y < bg) { boardPos.y = bg; boardVel = Vector3Scale(boardVel, 0.6f); boardVel.y = fabsf(boardVel.y) * 0.3f; }
     boardYaw += dt * 6 * clampf(Vector3Length(boardVel) / 5, 0, 1);
@@ -572,7 +589,7 @@ void Player::draw() const {
     Vector3 shF = {chest.x + 0.16f, chest.y - 0.02f, chest.z}, shB = {chest.x - 0.16f, chest.y - 0.02f, chest.z};
     Vector3 handF = {0.55f, chest.y - 0.3f + armWave + lean * 0.2f, 0.12f};
     Vector3 handB = {-0.55f, chest.y - 0.25f - armWave - lean * 0.2f, 0.05f};
-    if (state == AIR && grabbed && flipT < 0 && shoveT < 0) handF = {0.08f, 0.16f + lift, 0.11f};
+    if (state == AIR && grabbing && flipT < 0 && shoveT < 0) handF = {0.08f, 0.16f + lift, 0.11f};
     if (pushAmt > 0.05f && state == RIDE) handB = {-0.35f, chest.y - 0.45f, 0.25f};
     limb(shF, handF, 0.05f, shirt);
     limb(shB, handB, 0.05f, shirt);

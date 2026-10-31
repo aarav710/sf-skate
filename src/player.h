@@ -43,7 +43,8 @@ struct Player {
     float comboPts = 0;
     long long score = 0;
     int bestCombo = 0;
-    bool grabbed = false;
+    bool grabbed = false;     // Indy Grab already scored this jump
+    bool grabbing = false;    // holding the board right now (the pose follows this)
     std::string popup; float popupT = 0; Color popupCol = WHITE;
     std::string subPopup;
     std::string landNote;     // how the last landing went, shown with the banked combo
@@ -55,6 +56,7 @@ struct Player {
     // grind
     int rail = -1; float railT = 0; int railDir = 1; float balance = 0, balanceVel = 0;
     bool boardslide = false;
+    bool railFakie = false;   // 50-50 riding backwards along the rail
 
     // respawn
     Vector3 safePos{}; float safeYaw = 0; float safeT = 0;

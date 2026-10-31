@@ -75,6 +75,19 @@ int main() {
         snprintf(b, sizeof b, "air=%d landed=%d peak=%.2fm score=%lld", air, landed, peak, s.p.score);
         check(air && landed && peak > 1.3f && peak < 2.2f && (s.p.score == 100 || s.p.score == 150), "ollie", b);
     }
+    {   // a short tap of I: the grab pose lets go with the key, but the Indy Grab still scores once
+        Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
+        Input in; in.ollie = true;
+        s.run(1, in);
+        Input g; g.grab = true;
+        int held = 0, stuck = 0, f = 0;
+        s.run(6, g, [&](Player& p) { held += p.grabbing; return p.state != Player::AIR; });
+        int indy = 0;
+        for (auto& t : s.p.combo) indy += t == "Indy Grab";
+        s.run(120, Input{}, [&](Player& p) { if (p.state == Player::AIR && p.grabbing) stuck++; f++; return p.state != Player::AIR; });
+        snprintf(b, sizeof b, "pose on %d/6 held frames, %d of %d frames after release; Indy Grab x%d", held, stuck, f, indy);
+        check(held == 6 && stuck == 0 && f > 10 && indy == 1, "grab pose follows I", b);
+    }
     {   // a landing bounces: the board pops back up a little before rolling out
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
         Input in; in.ollie = true; s.run(1, in);
@@ -169,6 +182,32 @@ int main() {
         snprintf(b, sizeof b, "worst heading error: velocity %.1f deg, travel %.1f deg", worst * RAD2DEG, worstPos * RAD2DEG);
         check(worst < 0.02f && worstPos < 0.02f, "bail throws board along heading", b);
     }
+    {   // slamming a building wall: the tumbling board bounces off it instead of flying inside (issue #41)
+        int slams = 0, inside = 0; float deepest = 0; Vector3 worstAt = {};
+        for (float x = 120; x <= 480 && slams < 24; x += 45)
+            for (float z = 300; z <= 660 && slams < 24; z += 45)
+                for (int d = 0; d < 4; d++) {
+                    float yaw = d * PI / 2;
+                    Sim s; s.spawn(x, z, yaw, 12);
+                    s.run(240, Input{}, [](Player& p) { return p.state != Player::RIDE; });
+                    if (s.p.state != Player::BAIL || s.p.subPopup != "Slammed into a wall") continue;
+                    slams++;
+                    bool in = false;
+                    s.run(100, Input{}, [&](Player& p) {
+                        Vector3 c = p.boardPos; Vector2 n;
+                        if (W.collide(c, 0.01f, p.boardPos.y, 0.3f, &n)) {
+                            in = true;
+                            float dd = Vector2Length({c.x - p.boardPos.x, c.z - p.boardPos.z});
+                            if (dd > deepest) { deepest = dd; worstAt = p.boardPos; }
+                        }
+                        return p.state != Player::BAIL;
+                    });
+                    inside += in;
+                }
+        snprintf(b, sizeof b, "%d of %d slams left the board in a wall, deepest %.2f m at (%.1f, %.1f, %.1f)",
+                 inside, slams, deepest, worstAt.x, worstAt.y, worstAt.z);
+        check(slams >= 8 && inside == 0, "bail board stays out of walls", b);
+    }
     {   // 360 spin
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
         Input in; in.ollie = true; s.run(1, in);
@@ -196,6 +235,75 @@ int main() {
         }
         snprintf(b, sizeof b, "deflected %d of 2, landed clean %d, board off line %.0f deg, spin trick=%d", deflected, ok, worst * RAD2DEG, spinTrick);
         check(deflected == 2 && ok == 2 && worst < 0.05f && !spinTrick, "mid-air pole clip lands", b);
+    }
+    {   // rolling fakie off the Embarcadero Plaza deck, or ollieing fakie, keeps the board facing the same way (issue #46)
+        auto fakie = [&](float x, float z, float yaw, bool pop, const char* name, long long okLo, long long okHi, float spd = -4) {
+            Sim s; s.spawn(x, z, yaw, spd);
+            float jump = 0, prev = s.p.yaw;
+            bool air = false;
+            if (pop) { Input in; in.ollie = true; s.run(1, in); air = s.p.state == Player::AIR; jump = fabsf(wrapPi(s.p.yaw - prev)); prev = s.p.yaw; }
+            s.run(150, Input{}, [&](Player& p) {   // takeoff, landing and bounce, then rolling on
+                air |= p.state == Player::AIR;
+                jump = std::max(jump, fabsf(wrapPi(p.yaw - prev)));
+                prev = p.yaw;
+                return false;
+            });
+            snprintf(b, sizeof b, "air=%d max yaw step %.2f rad, state=%d speed=%.1f score=%lld %s", air, jump, s.p.state, s.p.speed, s.p.score, s.p.subPopup.c_str());
+            check(air && jump < 0.05f && s.p.state == Player::RIDE && s.p.speed < 0 && s.p.score >= okLo && s.p.score <= okHi, name, b);
+        };
+        fakie(1173, -300, 0, false, "roll off a ledge fakie: no snap", 0, 0);
+        fakie(1045 + 2.4f, -80, PI / 2, true, "fakie ollie: no snap, no spin", 100, 150);
+        fakie(1045 + 2.4f, -80, PI / 2, true, "slow fakie ollie stays fakie", 100, 150, -0.8f);
+    }
+    {   // ...a 180 from fakie lands forwards, and it's the 180 that scores, not "to Fakie"
+        Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, -8);
+        Input in; in.ollie = true; s.run(1, in);
+        Input sp; sp.steer = 1; s.run(63, sp, [](Player& p) { return fabsf(p.spinAccum) >= PI; });
+        s.run(120, Input{}, [](Player& p) { return p.state == Player::RIDE; });
+        snprintf(b, sizeof b, "state=%d speed=%.1f banked \"%s\"", s.p.state, s.p.speed, s.p.subPopup.c_str());
+        check(s.p.state == Player::RIDE && s.p.speed > 0 && s.p.subPopup.find("180") != std::string::npos &&
+              s.p.subPopup.find("Fakie") == std::string::npos, "fakie 180 lands forwards", b);
+    }
+    {   // ...and ollieing fakie onto the Embarcadero Plaza Flat Bar grinds fakie, then rolls away fakie
+        int ok = 0, tries = 6; float worst = 0; char last[200] = "";
+        for (int t = 0; t < tries; t++) {
+            SetRandomSeed(4600 + t);
+            Sim s; s.spawn(1186, -238, PI, -7);
+            s.run(60, Input{}, [](Player& p) { return p.pos.x > 1193.5f; });
+            float prev = s.p.yaw, jump = 0;
+            bool grind = false, settled = false;
+            std::string tricks;
+            auto track = [&](Player& p) { jump = std::max(jump, fabsf(wrapPi(p.yaw - prev))); prev = p.yaw; };
+            Input in; in.ollie = true; s.run(1, in, [&](Player& p) { track(p); return false; });
+            for (int f = 0; f < 600 && !settled && s.p.state != Player::BAIL; f++) {
+                Input bal; // follow the HUD meter, as in the grind balance check
+                if (s.p.state == Player::GRIND) bal.steer = s.p.balance > 0.1f ? -1.f : s.p.balance < -0.1f ? 1.f : 0.f;
+                s.run(1, bal, [&](Player& p) { track(p); return false; });
+                if (s.p.state == Player::GRIND) { grind = true; tricks = s.p.combo.back(); }
+                settled = grind && s.p.state == Player::RIDE && !s.p.bouncing;
+            }
+            s.run(10, Input{}, [&](Player& p) { track(p); return false; });
+            worst = std::max(worst, jump);
+            bool good = grind && jump < 0.05f && s.p.state == Player::RIDE && s.p.speed < 0 && tricks.rfind("Fakie 50-50", 0) == 0;
+            ok += good;
+            if (!good || !last[0]) snprintf(last, sizeof last, " (seed %d: grind=%d \"%s\" yaw step %.2f, state=%d speed=%.1f)", t, grind, tricks.c_str(), jump, s.p.state, s.p.speed);
+        }
+        snprintf(b, sizeof b, "%d of %d fakie grinds rolled away fakie, worst yaw step %.2f rad%s", ok, tries, worst, last);
+        check(ok == tries, "fakie grind: no snap", b);
+    }
+    {   // ...and losing balance on a fakie 50-50 throws the board and rider on along the rail (+x), not back up it
+        SetRandomSeed(4700);
+        Sim s; s.spawn(1186, -238, PI, -7);
+        s.run(60, Input{}, [](Player& p) { return p.pos.x > 1193.5f; });
+        Input in; in.ollie = true; s.run(1, in);
+        bool grind = s.run(90, Input{}, [](Player& p) { return p.state == Player::GRIND; });
+        Input lean; lean.steer = 1;   // push the balance off the meter
+        s.run(240, lean, [](Player& p) { return p.state != Player::GRIND; });
+        bool bailed = s.p.state == Player::BAIL;
+        Vector3 bv = s.p.boardVel; float x0 = s.p.pos.x;
+        s.run(30, Input{});
+        snprintf(b, sizeof b, "grind=%d bailed=%d board vel %.1f,%.1f, rider moved %.2f m in x", grind, bailed, bv.x, bv.z, s.p.pos.x - x0);
+        check(grind && bailed && bv.x > 1.f && s.p.pos.x - x0 > 0.2f, "fakie grind bail goes along travel", b);
     }
     {   // ...but flying into a building wall at a steep angle is still a crash
         int bailed = 0, tot = 0;
@@ -291,6 +399,51 @@ int main() {
         bool air = s.run(90, Input{}, [](Player& p) { return p.state == Player::AIR; });
         snprintf(b, sizeof b, "air=%d x=%.1f vy=%.1f", air, s.p.pos.x, s.p.vy);
         check(air && s.p.pos.x > 1241, "kicker launches", b);
+    }
+    {   // at rest half a metre from the Embarcadero deck's drop edge (x 1170), facing it or backed up to it: stays put
+        int held = 0; char got[96] = "";
+        for (float yaw : {PI, 0.f}) {
+            Sim s; s.spawn(1170.5f, -300, yaw, 0);
+            float y0 = s.p.pos.y;
+            s.run(120, Input{});
+            if (s.p.state == Player::RIDE && fabsf(s.p.pos.y - y0) < 0.01f && fabsf(s.p.pos.x - 1170.5f) < 0.05f) held++;
+            else if (!got[0]) snprintf(got, sizeof got, " (yaw %.1f: x %.2f, dy %.2f, speed %.2f)", yaw, s.p.pos.x, s.p.pos.y - y0, s.p.speed);
+        }
+        snprintf(b, sizeof b, "%d of 2 rested at the deck edge%s", held, got);
+        check(held == 2, "no pull over a drop edge", b);
+    }
+    {   // rolling slowly off that edge still drops through the air and lands, not a one-frame teleport down
+        Sim s; s.spawn(1171.5f, -300, PI, 1.0f);
+        float y0 = s.p.pos.y; bool air = false, landed = false;
+        s.run(240, Input{}, [&](Player& q) {
+            air |= q.state == Player::AIR;
+            landed |= air && q.evLand;
+            return landed;
+        });
+        snprintf(b, sizeof b, "air=%d landed=%d dropped %.2f m", air, landed, y0 - s.p.pos.y);
+        check(air && landed && y0 - s.p.pos.y > 1.4f, "slow roll off a drop goes airborne", b);
+    }
+    {   // ...and rolling slowly off it fakie keeps going away from the edge after landing, not back into the deck (#46)
+        int ok = 0; char got[160] = "";
+        for (float spd : {-0.6f, -1.0f}) {
+            Sim s; s.spawn(1170.4f, -300, 0, spd);
+            float y0 = s.p.pos.y; bool air = false;
+            s.run(180, Input{}, [&](Player& q) { air |= q.state == Player::AIR; return false; });
+            bool good = air && y0 - s.p.pos.y > 1.4f && s.p.state == Player::RIDE && s.p.speed < 0 && s.p.pos.x < 1169.5f;
+            ok += good;
+            if (!good && !got[0]) snprintf(got, sizeof got, " (%.1f m/s: air=%d dropped %.2f, x %.2f, speed %.2f, state %d)", spd, air, y0 - s.p.pos.y, s.p.pos.x, s.p.speed, s.p.state);
+        }
+        snprintf(b, sizeof b, "%d of 2 slow fakie roll-offs kept rolling away from the edge%s", ok, got);
+        check(ok == 2, "slow fakie roll off a drop", b);
+    }
+    {   // braking at rest on a steep hill holds without creeping
+        Sim s; s.spawn(-282, 878, -0.6f, 0);
+        Vector3 p0 = s.p.pos;
+        Input in; in.brake = true;
+        s.run(180, in);
+        float moved = Vector3Distance(p0, s.p.pos);
+        snprintf(b, sizeof b, "moved %.3f m in 3 s, speed %.3f", moved, s.p.speed);
+        check(moved < 0.01f && s.p.state == Player::RIDE, "brake holds on a hill", b);
     }
     {   // rolling downhill from Twin Peaks gains speed without pushing
         Sim s; s.spawn(-282, 878, -0.6f, 0);
@@ -415,6 +568,51 @@ int main() {
         }
         snprintf(b, sizeof b, "%d bad of %d", bad, (int)W.tokens.size());
         check(bad == 0, "tokens are not inside walls", b);
+    }
+    {   // tourists stand on the ground at their landmark: on the terrain (or a kerb a step up from it), or on a deck
+        // or pier (SFO's departures level, out over the water) -- never up on a roof or a monument, never inside
+        // one, and never out in the traffic on a car path or a city street
+        auto road = [](float x, float z, bool deck) {
+            for (size_t k = 0; k < W.carPaths.size(); k++) {
+                const Path& P = W.carPaths[k];
+                if (P.onDeck != deck) continue;
+                for (size_t s = 0; s + 1 < P.p.size(); s++)
+                    if (distToSeg2D(x, z, P.p[s].x, P.p[s].y, P.p[s + 1].x, P.p[s + 1].y) < W.carPathLanes[k] * 4.f) return true;
+            }
+            if (deck) return false;
+            for (const Grid* g : {&W.sf, &W.oak, &W.mp})
+                for (int j = 0; j < g->nj; j++)
+                    for (int i = 0; i < g->ni; i++)
+                        for (int d : {0, 2}) {
+                            if (!g->edge(i, j, d)) continue;
+                            Vector2 m = g->node(i, j), e = g->node(i + DI[d], j + DJ[d]);
+                            if (distToSeg2D(x, z, m.x, m.y, e.x, e.y) < g->roadHalf) return true;
+                        }
+            return false;
+        };
+        int bad = 0, roof = 0, inside = 0, floating = 0, inRoad = 0, decks = 0;
+        for (const Vector3& t : W.tourists) {
+            float terr = W.terrain(t.x, t.z), g = W.ground(t.x, t.z, t.y);
+            bool deck = false;
+            for (const Platform& pl : W.plats)
+                deck |= (pl.kind == PK_PIER || pl.kind == PK_DECK) && pl.contains(t.x, t.z) && std::min(pl.x1 - pl.x0, pl.z1 - pl.z0) > 4.f &&
+                        fabsf(pl.top(t.x, t.z) - t.y) < 0.05f && t.y <= std::max(terr, 0.f) + 10.f;
+            bool over = !deck && (terr < 0.15f || t.y - terr > STEP_UP + 0.1f);
+            Vector3 q = t;
+            Vector2 n;
+            bool in = W.collide(q, 0.3f, t.y, 1.7f, &n) || W.solidAt({t.x, t.y + 0.6f, t.z}, true);
+            bool fl = fabsf(g - t.y) > 0.05f || t.y < terr - 0.05f || W.isWater(t.x, t.z, t.y);
+            bool rd = road(t.x, t.z, deck);
+            if (over || in || fl || rd) {
+                if (bad++ < 6) printf("      tourist at %.0f,%.0f (%s) y %.2f, ground %.2f, terrain %.2f%s%s%s%s\n", t.x, t.z, W.district(t.x, t.z),
+                                      t.y, g, terr, over ? " up high" : "", in ? " inside a solid" : "", fl ? " not on a surface" : "",
+                                      rd ? " in a roadway" : "");
+            }
+            roof += over; inside += in; floating += fl; inRoad += rd; decks += deck;
+        }
+        snprintf(b, sizeof b, "%d of %d tourists misplaced (%d up high, %d inside a solid, %d off a surface, %d in a roadway; %d on decks)",
+                 bad, (int)W.tourists.size(), roof, inside, floating, inRoad, decks);
+        check(W.tourists.size() > 100 && bad == 0, "Tourists stand on the ground", b);
     }
     {   // streetcar lines exist and run through the city
         std::string names;
@@ -1127,6 +1325,40 @@ int main() {
         snprintf(b, sizeof b, "%d cars stood over a minute; longest stop %.0f s on the grid, %.0f s on the main roads",
                  stuck, longGrid, longMain);
         check(stuck == 0 && longMain < 60, "Main-road crossings don't lock up", b);
+    }
+    {   // a stopped vehicle is solid all the way to its ends: roll at 3 m/s into each end of each type, on the axis and
+        // near a corner, on the runway (flat and open), and the skater stops at the body (or bails), not inside it
+        int bad = 0, tot = 0;
+        std::string det;
+        struct { int type; const char* n; } kinds[] = {{CT_SEDAN, "car"}, {CT_BUS, "bus"}, {CT_CABLECAR, "cable car"},
+                                                       {CT_STREETCAR, "streetcar"}, {CT_LRV, "LRV"}, {CT_PEDALBUS, "pedal bus"}};
+        for (auto& k : kinds) {
+            int type = k.type;
+            const CarModel& m = carModel(type);
+            float worst = 1e9f;
+            for (int end = -1; end <= 1; end += 2)
+                for (float lat : {0.f, m.halfWid - 0.2f}) {
+                    Traffic T;
+                    Car c; c.type = type; c.speed = 0; c.stopT = 1e9f; c.placed = true;
+                    c.pos = {1950, W.ground(1950, 2262, 500), 2262};
+                    T.cars.push_back(c);
+                    Sim s; s.spawn(1950 + end * (m.halfLen + 2.5f), 2262 + lat, end > 0 ? PI : 0, 3);
+                    float reach = 1e9f;
+                    for (int f = 0; f < 60 * 3 && s.p.state != Player::BAIL; f++) {
+                        s.run(1, Input{});
+                        T.interact(s.p);
+                        reach = std::min(reach, fabsf(s.p.pos.x - 1950));
+                    }
+                    tot++;
+                    if (s.p.state != Player::BAIL && reach < m.halfLen + 0.2f) bad++;
+                    if (s.p.state != Player::BAIL) worst = std::min(worst, reach - m.halfLen);
+                }
+            char one[64];
+            snprintf(one, sizeof one, "%s%s %+.2f", det.empty() ? "" : ", ", k.n, worst);
+            det += one;
+        }
+        snprintf(b, sizeof b, "%d of %d rides got inside; closest stop, m outside the body: %s", bad, tot, det.c_str());
+        check(bad == 0, "Vehicles are solid to their ends", b);
     }
     {   // the "SFO Airport" label covers the airport fill, and not the East Bay shore and hills beyond it
         int wrong = 0, land = 0, missed = 0, fill = 0;

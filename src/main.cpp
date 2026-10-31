@@ -906,7 +906,7 @@ int main() {
             auto freeFrac = [&](float cyy) {
                 Vector3 d = {-cosf(cyy) * dist, hgt, -sinf(cyy) * dist};
                 for (int i = 1; i <= 14; i++)
-                    if (W.solidAt(Vector3Add(target, Vector3Scale(d, i / 14.f)))) return (i - 1) / 14.f;
+                    if (W.solidAt(Vector3Add(target, Vector3Scale(d, i / 14.f)), true)) return (i - 1) / 14.f;
                 return 1.f;
             };
             {
@@ -928,7 +928,7 @@ int main() {
             float best = 1.f;
             for (int i = 1; i <= 14; i++) {
                 float t = i / 14.f;
-                if (W.solidAt(Vector3Add(target, Vector3Scale(dir, t)))) { best = std::max(0.12f, (i - 1) / 14.f); break; }
+                if (W.solidAt(Vector3Add(target, Vector3Scale(dir, t)), true)) { best = std::max(0.12f, (i - 1) / 14.f); break; }
             }
             desired = Vector3Add(target, Vector3Scale(dir, best));
             if (best < 0.6f) {

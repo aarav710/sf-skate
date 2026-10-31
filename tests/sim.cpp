@@ -2103,6 +2103,32 @@ int main() {
                  worstCol, cz - 39.8f);
         check(worst < cz - 38 && worstCol < cz - 39.8f, "City Hall portico and columns solid", b);
     }
+    {   // every Embarcadero pier deck stands out of the bay, and you can skate onto it from the promenade (issue #64:
+        // the northernmost one, at z -800, was built a metre under the bay where the shore has run out past the seawall)
+        int piers = 0, dry = 0, rides = 0, rode = 0;
+        float worstX = 1e9f;
+        for (const Platform& p : W.plats) {
+            if (p.kind != PK_PIER || p.x1 != 1480 || p.z1 - p.z0 != 30) continue;
+            piers++;
+            float zc = (p.z0 + p.z1) * 0.5f;
+            if (p.h0 > 2.f && !W.isWater(1300, zc + 14.2f, p.h0) && W.ground(1300, zc + 14.2f, p.h0 + 1) > p.h0 - 0.1f) dry++;
+            for (float z : {zc - 14.2f, zc + 14.2f}) {   // the open strips of deck either side of the shed
+                rides++;
+                Sim s; s.spawn(1260, z, 0, 3);   // on the promenade (the Embarcadero roadway, south of its north end)
+                bool bad = false;
+                for (int f = 0; f < 60 * 15 && s.p.pos.x < 1305; f++) {
+                    Input in; in.push = s.p.speed < 5.f && s.p.state == Player::RIDE;
+                    s.p.update(1.f / 60, in, W);
+                    bad |= s.p.state == Player::BAIL || s.p.splashed;
+                }
+                worstX = std::min(worstX, s.p.pos.x);
+                if (!bad && s.p.pos.x >= 1305 && s.p.pos.y > p.h0 - 0.1f) rode++;
+            }
+        }
+        snprintf(b, sizeof b, "%d piers, %d decks above the water, %d of %d rides from the promenade onto the deck (least x %.1f)", piers, dry,
+                 rode, rides, worstX);
+        check(piers == 7 && dry == piers && rode == rides, "Embarcadero piers skateable from shore", b);
+    }
     {   // roads far from the origin are draped whole: strips laid in Menlo Park (El Camino Real), Oakland and out east,
         // straight and diagonal, wide and paint-thin, cover their full area on the ground (float rounding in world
         // coordinates once dropped pieces there). Runs last: it adds geometry to the world.

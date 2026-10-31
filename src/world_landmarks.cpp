@@ -599,16 +599,29 @@ void World::buildWaterfront() {
     }
     // Piers along the Embarcadero
     for (float zc : {-800.f, -660.f, -520.f, -380.f, 50.f, 180.f, 480.f}) {
-        float y = terrain(1290, zc) + 0.02f;
-        float x0 = 1290, x1 = 1480;
+        float root = 1290, x1 = 1480;   // the shed and the piles stand from the root out
+        float x0 = root, y = terrain(root, zc) + 0.02f;
+        if (y < 2.4f) {
+            // The north end of the promenade runs out past the seawall: at z -800 the shore has already dropped into
+            // the bay at the root. Run the deck back west over the shore to where the promenade is still up at its
+            // height across the whole width, and build it at that height, so you roll straight off the promenade
+            // onto it (never under the bay, and no step up out of the water at its end).
+            auto lowest = [&](float x) {
+                float h = 1e9f;
+                for (float z = zc - 15; z <= zc + 15; z += 2.5f) h = std::min(h, terrain(x, z));
+                return h;
+            };
+            while (x0 > root - 40 && lowest(x0) < 2.4f) x0 -= 1;
+            y = std::max(lowest(x0), 2.0f) + 0.02f;
+        }
         MeshBuilder& m = mb(1380, zc);
         m.box({x0, -3, zc - 15}, {x1, y, zc + 15}, col(110, 100, 90), wood, 0.7f);
         addPlat({x0, x1, zc - 15, zc + 15, y, y, -4, 0, PK_PIER});
-        for (float x = x0 + 10; x < x1; x += 15)
+        for (float x = root + 10; x < x1; x += 15)
             for (int sd = -1; sd <= 1; sd += 2) m.beam({x, -4, zc + sd * 14}, {x, y - 0.5f, zc + sd * 14}, 0.6f, 0.6f, col(80, 70, 60));
-        addBox(x0 + 12, zc - 11, x1 - 8, zc + 11, y - 0.5f, y + 11, PK_BUILDING, pale, roof);
-        addBox(x0 + 4, zc - 13, x0 + 12, zc + 13, y - 0.5f, y + 14, PK_BUILDING, col(236, 230, 214, M_HOUSE), col(200, 195, 185));
-        m.gable(x0 + 12, x1 - 8, zc - 11, zc + 11, y + 11, 3.5f, 0, roof, pale);
+        addBox(root + 12, zc - 11, x1 - 8, zc + 11, y - 0.5f, y + 11, PK_BUILDING, pale, roof);
+        addBox(root + 4, zc - 13, root + 12, zc + 13, y - 0.5f, y + 14, PK_BUILDING, col(236, 230, 214, M_HOUSE), col(200, 195, 185));
+        m.gable(root + 12, x1 - 8, zc - 11, zc + 11, y + 11, 3.5f, 0, roof, pale);
     }
     // Pier 39
     {

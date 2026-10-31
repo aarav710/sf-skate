@@ -430,7 +430,7 @@ const char* World::district(float x, float z) const {
         if (x < -1400) return "Pacific Ocean";
         return "San Francisco Bay";
     }
-    if (x > AX0 + 50 && z > AZ0) return "SFO Airport";
+    if (x > AX0 + 50 && x < AX1 && z > AZ0 && z < AZ1) return "SFO Airport";
     if (z < -2200) return "Marin Headlands";
     if (x > 3900) return "Oakland";
     if (x > 2400) return z < 50 ? "Treasure Island" : "Yerba Buena Island";

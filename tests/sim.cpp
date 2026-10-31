@@ -5,6 +5,7 @@
 #include "../src/traffic.h"
 #include "../src/models.h"
 #include <cstdio>
+#include <cstring>
 #include <algorithm>
 
 static World W;
@@ -962,6 +963,19 @@ int main() {
         snprintf(b, sizeof b, "%d grid cars, off the main roads: overlapping %.1f s, longest stop %.0f s (%.0f s in an intersection); average speed %.1f m/s",
                  (int)grid.size(), gridOv, longest, longestIn, avg);
         check(gridOv < 15 && longest < 120 && longestIn < 30 && avg > 6.5f, "Grid traffic takes turns", b);
+    }
+    {   // the "SFO Airport" label stays on the airport, not on the East Bay shore and hills beyond it
+        int wrong = 0, land = 0;
+        for (float x = AX0; x < WX1; x += 40)
+            for (float z = AZ0; z < WZ1; z += 40) {
+                if (x >= AX0 && x <= AX1 && z >= AZ0 && z <= AZ1) continue;
+                if (W.terrain(x, z) < 0.3f) continue;
+                land++;
+                if (!strcmp(W.district(x, z), "SFO Airport")) wrong++;
+            }
+        const char* sfo = W.district(2010, 2095);
+        snprintf(b, sizeof b, "airport: %s; %d of %d land spots outside it also say SFO Airport", sfo, wrong, land);
+        check(!strcmp(sfo, "SFO Airport") && wrong == 0, "SFO label only at the airport", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

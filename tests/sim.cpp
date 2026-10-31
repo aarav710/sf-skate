@@ -296,6 +296,23 @@ int main() {
         snprintf(b, sizeof b, "splash=%d respawned at x=%.1f y=%.1f state=%d", splash, s.p.pos.x, s.p.pos.y, s.p.state);
         check(splash && s.p.pos.y > 0.5f && s.p.state == Player::RIDE, "splash + respawn", b);
     }
+    {   // the splash message names the water: bay, fountain, lake, pool (rolling in and dropping in)
+        float sea = -1440;
+        while (!W.isWater(sea, 0, 0) && sea > -3000) sea -= 5;
+        const Pond* pool = nullptr;   // a peninsula backyard pool, up on the hills
+        for (auto& pd : W.ponds) if (std::string(pd.kind) == "pool") { pool = &pd; break; }
+        struct { float x, z; const char* msg; } spots[] = {
+            {sea - 20, 0, "Splash! Into the bay"}, {1244.5f, -304, "Splash! Into the fountain"}, {-800, 387, "Splash! Into the lake"},
+            {pool ? (pool->x0 + pool->x1) / 2 : 0, pool ? (pool->z0 + pool->z1) / 2 : 0, "Splash! Into the pool"}};
+        for (auto& sp : spots)
+            for (int air = 0; air < 2; air++) {
+                Sim s; s.spawn(sp.x, sp.z, 0);
+                if (air) { s.p.state = Player::AIR; s.p.pos.y += 2; }
+                bool splash = s.run(120, Input{}, [](Player& p) { return p.splashed; });
+                snprintf(b, sizeof b, "%s: splash=%d \"%s\"", air ? "drop" : "roll", splash, s.p.subPopup.c_str());
+                check(splash && s.p.subPopup == sp.msg, "splash message names the water", b);
+            }
+    }
     {   // the Golden Gate railing keeps you on the deck
         Sim s; s.spawn(-1100, -1500, 0, 8); // heading east toward the railing
         Input in; in.push = true;

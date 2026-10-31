@@ -178,7 +178,7 @@ void Player::ride(float dt, const Input& in, World& w) {
     if (w.isWater(pos.x, pos.z, pos.y)) {
         splashed = true;
         evSplash = true;
-        bail("Splash! Into the bay");
+        bail(("Splash! Into the " + std::string(w.waterKind(pos.x, pos.z, pos.y))).c_str());
         return;
     }
     if (in.ollie && fabsf(speed) < 40) {
@@ -313,7 +313,7 @@ void Player::land(World& w, float g) {
     if (w.isWater(pos.x, pos.z, g)) {
         splashed = true;
         evSplash = true;
-        bail("Splash! Into the bay");
+        bail(("Splash! Into the " + std::string(w.waterKind(pos.x, pos.z, g))).c_str());
         return;
     }
     if (flipT >= 0 && flipT < flipDur * 0.8f) { bail("Didn't finish the flip"); return; }

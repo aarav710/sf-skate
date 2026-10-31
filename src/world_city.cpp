@@ -1573,7 +1573,7 @@ void World::buildParks() {
     // Golden Gate Park: forest with meadows, JFK Drive through the middle, Stow Lake
     float pz0 = gz(12) + 8, pz1 = gz(14) - 8;
     roadStrip(*this, {gx(0) - 60, 335}, {gx(8), 335}, 5.0f, 5.0f, 0, 0.08f, C_ASPHALT);
-    ponds.push_back({-840, 365, -760, 410});
+    ponds.push_back({-840, 365, -760, 410, "lake"});
     {
         MeshBuilder& m = mb(-800, 387);
         float y = terrain(-800, 387) - 0.3f;

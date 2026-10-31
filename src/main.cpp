@@ -566,7 +566,7 @@ int main() {
                 }
             }
         }
-        if (!title && !picker && IsKeyPressed(KEY_R)) { if (JS.riding) { JS.skis[JS.cur].pos = P.pos; JS.riding = false; JS.cur = -1; } if (SP.riding) { SP.riding = false; SP.cur = -1; } P.spawn(P.safePos, P.safeYaw); P.say("Reset", WHITE); }
+        if (!title && !picker && IsKeyPressed(KEY_R)) { if (JS.riding) { JS.skis[JS.cur].pos = P.pos; JS.riding = false; JS.cur = -1; } if (SP.riding) { SP.riding = false; SP.cur = -1; } P.respawnSafe(W); P.say("Reset", WHITE); }
 
         Input in;
         in.steer = (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT) ? 1.f : 0.f) - (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT) ? 1.f : 0.f);

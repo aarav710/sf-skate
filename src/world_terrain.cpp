@@ -425,7 +425,7 @@ const char* World::district(float x, float z) const {
     if (x > gx(9) - 8 && x < gx(11) && z > gz(11) - 8 && z < gz(12) + 8) return "Alamo Square";
     if (z > 315 && z < 355 && x > 1300 && x < 4000) return x > 2420 && x < 2820 ? "Yerba Buena Island" : "Bay Bridge";
     float h = terrain(x, z);
-    if (h < 0.3f) {
+    if (h < 0.3f && !overPier(x, z)) {   // a pier stands over the seabed: name it after the shore it belongs to
         if (z < -1150 && x < -300) return "Golden Gate Strait";
         if (x < -1400) return "Pacific Ocean";
         return "San Francisco Bay";
@@ -435,7 +435,7 @@ const char* World::district(float x, float z) const {
     if (z < -2200) return "Marin Headlands";
     if (x > 3900) return "Oakland";
     if (x > 2400) return z < 50 ? "Treasure Island" : "Yerba Buena Island";
-    if (x > 200 && x < 420 && z < -1800) return "Alcatraz";
+    if (x > 200 && x < 460 && z < -1800) return "Alcatraz";   // the island, Building 64 and its dock out to x 455
     if (sq(x + 295) + sq(z - 895) < sq(200)) return "Twin Peaks";
     if (x > gx(23) && z > gz(16) && z < gz(18)) return "Oracle Park";
     if (x > 1255) return "The Embarcadero";
@@ -570,6 +570,14 @@ int World::addPlat(const Platform& p) {
     return idx;
 }
 
+bool World::overPier(float x, float z) const {
+    int i = (int)floorf((x - PG_X0) / PG_CELL), j = (int)floorf((z - PG_Z0) / PG_CELL);
+    if (i < 0 || j < 0 || i >= pgW || j >= pgH) return false;
+    for (int idx : pgrid[(size_t)j * pgW + i])
+        if (plats[idx].kind == PK_PIER && plats[idx].contains(x, z)) return true;
+    return false;
+}
+
 float World::ground(float x, float z, float yRef) const {
     float h = terrain(x, z);
     int i = (int)floorf((x - PG_X0) / PG_CELL), j = (int)floorf((z - PG_Z0) / PG_CELL);
@@ -674,6 +682,23 @@ bool World::doorBlocked(float x, float z, float pad) const {
             for (auto it = r.first; it != r.second; ++it)
                 if (distToSeg2D(x, z, it->second.x, it->second.y, it->second.z, it->second.w) < pad) return true;
         }
+    return false;
+}
+
+// Street furniture asks this before it goes down, so no lamp, tree or bin ends up inside a building or landmark
+// (Coit Tower's base used to swallow the lamps and trees of the hilltop, a lamp head poking out of its roof).
+bool World::buildingAt(float x, float z, float pad, float y0, float y1) const {
+    if (pgrid.empty()) return false;
+    int i0 = std::max((int)floorf((x - pad - PG_X0) / PG_CELL), 0), i1 = std::min((int)floorf((x + pad - PG_X0) / PG_CELL), pgW - 1);
+    int j0 = std::max((int)floorf((z - pad - PG_Z0) / PG_CELL), 0), j1 = std::min((int)floorf((z + pad - PG_Z0) / PG_CELL), pgH - 1);
+    i1 = std::max(i1, 0); j1 = std::max(j1, 0); i0 = std::min(i0, pgW - 1); j0 = std::min(j0, pgH - 1);   // clamp like addPlat
+    for (int j = j0; j <= j1; j++)
+        for (int i = i0; i <= i1; i++)
+            for (int idx : pgrid[(size_t)j * pgW + i]) {
+                const Platform& pl = plats[idx];
+                if (pl.kind != PK_BUILDING || !pl.contains(x, z, pad)) continue;
+                if (pl.base < y1 && std::max(pl.h0, pl.h1) > y0) return true;
+            }
     return false;
 }
 

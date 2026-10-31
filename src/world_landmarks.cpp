@@ -389,7 +389,7 @@ void World::buildLandmarks() {
             m.box({px - 1.5f, py + 12, pz - 1.5f}, {px + 1.5f, py + 13.5f, pz + 1.5f}, peach);
             addPlat({px - 1, px + 1, pz - 1, pz + 1, py + 12, py + 12, py - 1, 0, PK_POLE});
         }
-        ponds.push_back({cx + 25, cz - 30, cx + 90, cz + 25});
+        ponds.push_back({cx + 25, cz - 30, cx + 90, cz + 25, "lagoon"});
         float py = terrain(cx + 55, cz) - 0.3f;
         m.quad({cx + 25, py, cz - 30}, {cx + 90, py, cz - 30}, {cx + 90, py, cz + 25}, {cx + 25, py, cz + 25}, col(50, 100, 110, M_WATER));
     }
@@ -682,7 +682,7 @@ void World::buildSkateSpots() {
         addRamp(1240, -244, 1243, -238, 0.9f, 0, true);     // kicker
         addRamp(1222, -300, 1225, -294, 0.9f, 0, true);     // kicker
         // Vaillancourt Fountain
-        ponds.push_back({1236, -312, 1253, -296});
+        ponds.push_back({1236, -312, 1253, -296, "fountain"});
         MeshBuilder& m = mb(1245, -304);
         m.quad({1236, y - 0.25f, -312}, {1253, y - 0.25f, -312}, {1253, y - 0.25f, -296}, {1236, y - 0.25f, -296}, col(60, 110, 120, M_WATER));
         RNG r(12);

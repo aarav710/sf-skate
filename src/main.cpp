@@ -436,11 +436,16 @@ int main() {
             CH.on = on;
             CH.reset(8);
         };
+        // get off whatever is being ridden before a teleport: the train ride ends, the jet ski stays moored
+        // where it was (it follows the rider while ridden) and the seaplane is back at its mooring
+        auto leaveVehicles = [&]() {
+            ride.on = false;
+            if (JS.riding) { JS.riding = false; JS.cur = -1; JS.speed = 0; }
+            if (SP.riding) { SP.riding = false; SP.cur = -1; }
+        };
         auto startAt = [&](int idx) {
             justStarted = true;
-            ride.on = false;
-            JS.riding = false; JS.cur = -1;
-            if (SP.riding) { SP.riding = false; SP.cur = -1; }
+            leaveVehicles();
             P.spawn(W.spots[idx].pos, W.spots[idx].yaw);
             camYaw = P.yaw;
             camPos = {P.pos.x - cosf(P.yaw) * 6, P.pos.y + 3, P.pos.z - sinf(P.yaw) * 6};
@@ -514,6 +519,7 @@ int main() {
                 int idx = k;
                 if (k == 9 && !IsKeyPressed(KEY_ZERO)) continue;
                 if (idx < (int)W.spots.size()) {
+                    leaveVehicles();
                     P.spawn(W.spots[idx].pos, W.spots[idx].yaw);
                     camYaw = P.yaw;
                     camPos = {P.pos.x - cosf(P.yaw) * 6, P.pos.y + 3, P.pos.z - sinf(P.yaw) * 6};

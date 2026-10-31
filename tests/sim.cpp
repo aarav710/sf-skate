@@ -423,6 +423,19 @@ int main() {
         snprintf(b, sizeof b, "air=%d landed=%d dropped %.2f m", air, landed, y0 - s.p.pos.y);
         check(air && landed && y0 - s.p.pos.y > 1.4f, "slow roll off a drop goes airborne", b);
     }
+    {   // ...and rolling slowly off it fakie keeps going away from the edge after landing, not back into the deck (#46)
+        int ok = 0; char got[160] = "";
+        for (float spd : {-0.6f, -1.0f}) {
+            Sim s; s.spawn(1170.4f, -300, 0, spd);
+            float y0 = s.p.pos.y; bool air = false;
+            s.run(180, Input{}, [&](Player& q) { air |= q.state == Player::AIR; return false; });
+            bool good = air && y0 - s.p.pos.y > 1.4f && s.p.state == Player::RIDE && s.p.speed < 0 && s.p.pos.x < 1169.5f;
+            ok += good;
+            if (!good && !got[0]) snprintf(got, sizeof got, " (%.1f m/s: air=%d dropped %.2f, x %.2f, speed %.2f, state %d)", spd, air, y0 - s.p.pos.y, s.p.pos.x, s.p.speed, s.p.state);
+        }
+        snprintf(b, sizeof b, "%d of 2 slow fakie roll-offs kept rolling away from the edge%s", ok, got);
+        check(ok == 2, "slow fakie roll off a drop", b);
+    }
     {   // braking at rest on a steep hill holds without creeping
         Sim s; s.spawn(-282, 878, -0.6f, 0);
         Vector3 p0 = s.p.pos;

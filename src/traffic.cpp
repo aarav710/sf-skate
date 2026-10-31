@@ -418,6 +418,39 @@ void Traffic::update(float dt, World& w, const Player& pl) {
         }
     }
     Vector3 pp = pl.pos;
+    // every car keeps its distance from the others, near the skater or not (or they'd merge out on the bridges and
+    // still be inside each other when you get there): bucket them into 40 m cells so each only looks at its neighbors
+    const float CELL = 40.f;
+    auto cellKey = [](int cx, int cz) { return (uint64_t)((uint32_t)(cx + 2048) << 12 | (uint32_t)(cz + 2048)); };
+    carCells.clear();
+    for (size_t k = 0; k < cars.size(); k++)
+        if (cars[k].placed)
+            carCells.push_back(cellKey((int)floorf(cars[k].pos.x / CELL), (int)floorf(cars[k].pos.z / CELL)) << 32 | k);
+    std::sort(carCells.begin(), carCells.end());
+    // is b in a's way: ahead of it and across its lane (counting where b will be in a moment), within stopping reach.
+    // gap: a is waiting to cross a whole road, so it wants b well clear of it, near lanes and far.
+    // fwd: count the road just ahead of b as well (the rest of its way across)
+    auto inWay = [](const Car& a, const Car& b, bool gap, float fwd) {
+        const CarModel &ma = carModel(a.type), &mb = carModel(b.type);
+        Vector2 f = {cosf(a.yaw), sinf(a.yaw)}, g = {cosf(b.yaw), sinf(b.yaw)};
+        float rx = b.pos.x + g.x * fwd * 0.5f - a.pos.x, rz = b.pos.z + g.y * fwd * 0.5f - a.pos.z;
+        float along = rx * f.x + rz * f.y, l = -rx * f.y + rz * f.x;
+        float ga = fabsf(Vector2DotProduct(g, f)), gl = -g.x * f.y + g.y * f.x;
+        float hl = mb.halfLen + fwd * 0.5f;
+        float extA = ga * hl + fabsf(gl) * mb.halfWid;                 // b's body, along a's heading and across it
+        float extL = fabsf(gl) * hl + ga * mb.halfWid;
+        float vl = b.speed * gl;                                        // b's speed across a's lane
+        if (vl * l < 0) extL += fabsf(vl) * (gap ? 2.5f : 0.8f);       // heading into it
+        return along + extA > 0 && along - extA < ma.halfLen + 3 + a.speed * 0.9f + (gap ? 20 : 0) && fabsf(l) < extL + ma.halfWid + 0.4f;
+    };
+    // a road car on a path drives a loop: out along its lane, U-turn, back on the other side, U-turn. Where it is
+    // around that loop, so cars sharing a lane can tell who's ahead even halfway round a U-turn
+    auto loopPos = [&](const Car& k, float* loop) {
+        float L = w.carPaths[k.path].len, Lu = PI * std::max(k.lane, 1.f);
+        *loop = 2 * (L + Lu);
+        float u = k.pdir > 0 ? (k.uturn >= 0 ? L + k.uturn : k.s) : (k.uturn >= 0 ? 2 * L + Lu + k.uturn : L + Lu + L - k.s);
+        return u;
+    };
     for (auto& c : cars) {
         float distP = sqrtf(sq(c.pos.x - pp.x) + sq(c.pos.z - pp.z));
         // target speed: stop for the skater and for cars ahead
@@ -434,18 +467,54 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             }
         }
         c.honkCD -= dt;
-        if (c.placed && distP < 350) {
-            for (auto& o : cars) {
-                if (&o == &c) continue;
-                float rx = o.pos.x - c.pos.x, rz = o.pos.z - c.pos.z;
-                if (fabsf(rx) > 20 || fabsf(rz) > 20) continue;
-                float along = rx * f.x + rz * f.y, lat = fabsf(-rx * f.y + rz * f.x);
-                float gap = carModel(c.type).halfLen + carModel(o.type).halfLen + 2.5f;
-                if (along > 0 && along < gap + c.speed * 0.6f && lat < 1.6f && fabsf(o.pos.y - c.pos.y) < 3) {
-                    float of = cosf(o.yaw) * f.x + sinf(o.yaw) * f.y;
-                    if (of > 0.3f) target = std::min(target, along < gap ? 0.f : o.speed);
+        float backOff = 0;   // how far this car's body is into the one ahead of it
+        if (c.placed) {
+            int cx = (int)floorf(c.pos.x / CELL), cz = (int)floorf(c.pos.z / CELL);
+            for (int zz = cz - 1; zz <= cz + 1; zz++)
+                for (int xx = cx - 1; xx <= cx + 1; xx++) {
+                    uint64_t key = cellKey(xx, zz) << 32;
+                    for (auto it = std::lower_bound(carCells.begin(), carCells.end(), key); it != carCells.end() && (*it >> 32) == (key >> 32); ++it) {
+                        Car& o = cars[(uint32_t)*it];
+                        if (&o == &c) continue;
+                        float rx = o.pos.x - c.pos.x, rz = o.pos.z - c.pos.z;
+                        bool sameLane = c.mode == 1 && o.mode == 1 && c.path == o.path && c.type != CT_STREETCAR && o.type != CT_STREETCAR;
+                        if (sameLane && c.lane != o.lane) continue;   // lanes of a road (and their U-turns) never meet
+                        // (the same lane is the same road, however steep the ramp between them)
+                        if (fabsf(rx) > CELL || fabsf(rz) > CELL || (!sameLane && fabsf(o.pos.y - c.pos.y) >= 3)) continue;
+                        float along = rx * f.x + rz * f.y, lat = fabsf(-rx * f.y + rz * f.x);
+                        float gap = carModel(c.type).halfLen + carModel(o.type).halfLen + 2.5f;
+                        float of = cosf(o.yaw) * f.x + sinf(o.yaw) * f.y;
+                        if (sameLane) {
+                            float loop, uc = loopPos(c, &loop);
+                            along = fmodf(loopPos(o, &loop) - uc + loop, loop);   // how far round the lane it is ahead
+                            lat = 0; of = 1;
+                        }
+                        // the car ahead in the lane (two cars level with each other: the later one in the list waits)
+                        bool ahead = along > 0 || (along == 0 && &o < &c);
+                        // brake in time to stop short of it, even coming up on a queue at bridge speeds
+                        bool cross = c.mode != o.mode && c.mode <= 1 && o.mode <= 1;   // main road against grid: see below
+                        if (!cross && of > 0.3f && ahead && along < gap + c.speed * 1.4f && lat < 1.6f) {
+                            float room = std::max(0.f, along - gap - c.speed * 0.4f);
+                            target = std::min(target, along < gap ? 0.f : sqrtf(sq(o.speed) + 24 * room));
+                            backOff = std::max(backOff, gap - 2.f - along);
+                        }
+                        // crossing paths (Market St and the Embarcadero against the street grid): the main road has
+                        // the right of way. A grid car waits back from it for a gap; a car on it stops short of a grid
+                        // car already out in the road and the rest of its way across, and that one, once it's held
+                        // someone up, just clears the road. (Cars stuck out there waiting on each other would leave
+                        // everyone waiting on everyone.)
+                        if (cross) {
+                            const float ACROSS = 12;
+                            if (c.mode == 1) {
+                                if (inWay(c, o, false, ACROSS)) { target = 0; o.acrossT = clock; }
+                            } else {
+                                bool cNow = inWay(c, o, false, 0), oNow = inWay(o, c, false, ACROSS);
+                                bool across = clock - c.acrossT < 0.25f;
+                                if ((cNow && (!oNow || o.stopT > 0)) || (!across && !oNow && inWay(c, o, true, 0))) target = 0;
+                            }
+                        }
+                    }
                 }
-            }
         }
         // slow down for corners and U-turns, braking gently on the way in
         {
@@ -484,6 +553,7 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             if (c.pd < 0) c.pd = c.d;
             if (c.nd < 0) c.nd = pickGridDir(g, c.i + DI[c.d], c.j + DJ[c.d], c.d, r);
             c.t += c.speed * dt / g.sp;
+            if (backOff > 0) c.t = std::max(0.f, c.t - std::min(backOff, 3 * dt) / g.sp);   // ease back out of the car ahead
             int guard = 0;
             while (c.t >= 1 && guard++ < 4) {
                 c.t -= 1;
@@ -508,9 +578,10 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             bool rail = c.mode >= 2 || c.type == CT_STREETCAR;
             float step = c.speed * dt, Lu = PI * std::max(c.lane, 1.f);
             if (c.uturn >= 0) {
-                c.uturn += step;
+                c.uturn = std::max(0.f, c.uturn + step - std::min(backOff, 3 * dt));
                 if (c.uturn >= Lu) { c.uturn = -1; c.pdir = -c.pdir; }
             } else {
+                if (backOff > 0) c.s = clampf(c.s - c.pdir * std::min(backOff, 3 * dt), 0, P.len);   // ease back out of the car ahead
                 float before = c.s;
                 c.s += c.pdir * step;
                 c.xover += step;

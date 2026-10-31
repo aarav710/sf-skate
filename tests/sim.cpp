@@ -1029,18 +1029,25 @@ int main() {
                  (int)grid.size(), gridOv, longest, longestIn, avg);
         check(gridOv < 15 && longest < 120 && longestIn < 30 && avg > 6.5f, "Grid traffic takes turns", b);
     }
-    {   // the "SFO Airport" label stays on the airport, not on the East Bay shore and hills beyond it
-        int wrong = 0, land = 0;
-        for (float x = AX0; x < WX1; x += 40)
-            for (float z = AZ0; z < WZ1; z += 40) {
-                if (x >= AX0 && x <= AX1 && z >= AZ0 && z <= AZ1) continue;
+    {   // the "SFO Airport" label covers the airport fill, and not the East Bay shore and hills beyond it
+        int wrong = 0, land = 0, missed = 0, fill = 0;
+        for (float x = AX0 + 10; x < WX1; x += 40)
+            for (float z = AZ0 + 10; z < WZ1; z += 40) {
                 if (W.terrain(x, z) < 0.3f) continue;
-                land++;
-                if (!strcmp(W.district(x, z), "SFO Airport")) wrong++;
+                bool sfo = !strcmp(W.district(x, z), "SFO Airport");
+                if (x < AX1 + 25 && z < AZ1 + 65) { fill++; if (!sfo) missed++; }
+                else { land++; if (sfo) wrong++; }
             }
-        const char* sfo = W.district(2010, 2095);
-        snprintf(b, sizeof b, "airport: %s; %d of %d land spots outside it also say SFO Airport", sfo, wrong, land);
-        check(!strcmp(sfo, "SFO Airport") && wrong == 0, "SFO label only at the airport", b);
+        snprintf(b, sizeof b, "%d of %d airport spots not labelled SFO; %d of %d land spots beyond it labelled SFO", missed, fill, wrong, land);
+        check(missed == 0 && wrong == 0, "SFO label only at the airport", b);
+    }
+    {   // a skater who somehow ends up outside the play area is put back, not left skating out there
+        Sim s; s.spawn(1045 + 2.4f, -80, PI / 2);
+        s.p.pos = {-2700, W.ground(-2700, -2327, 500), -2327}; s.p.yaw = 0;   // on the Marin hills, heading east along them
+        Input in; in.push = true;
+        s.run(60 * 3, in);
+        snprintf(b, sizeof b, "after 3 s at x=%.0f z=%.0f (%s)", s.p.pos.x, s.p.pos.z, W.district(s.p.pos.x, s.p.pos.z));
+        check(W.inPlay(s.p.pos.x, s.p.pos.z), "out of bounds puts you back", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

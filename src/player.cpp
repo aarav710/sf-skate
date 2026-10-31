@@ -96,15 +96,18 @@ void Player::update(float dt, const Input& in, World& w) {
         pos.x = before.x; pos.z = before.z;
         if (state == RIDE) speed *= 0.5f;
         if (state == AIR) vel = Vector3Scale(vel, 0.3f);
+    } else if (!w.inPlay(pos.x, pos.z) && w.inPlay(safePos.x, safePos.z)) {
+        spawn(safePos, safeYaw);   // already outside (dropped off out there somehow): back to the last safe spot
+        return;
     }
     // remember the last safe spot for respawns after a splash
     safeT += dt;
-    if (state == RIDE && safeT > 0.5f && w.terrain(pos.x, pos.z) > 1.0f && fabsf(speed) < 20) {
+    if (state == RIDE && safeT > 0.5f && w.terrain(pos.x, pos.z) > 1.0f && fabsf(speed) < 20 && w.inPlay(pos.x, pos.z)) {
         safeT = 0;
         safePos = pos;
         safeYaw = yaw;
     }
-    if (state == RIDE && w.onBridge(pos.x, pos.z) && safeT > 0.5f) {
+    if (state == RIDE && w.onBridge(pos.x, pos.z) && safeT > 0.5f && w.inPlay(pos.x, pos.z)) {
         safeT = 0;
         safePos = pos;
         safeYaw = yaw;

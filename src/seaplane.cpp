@@ -19,14 +19,14 @@ void Seaplanes::place(const World& w) {
     // the few places you'll find one: off the north waterfront by the Wharf, on the Marin shore across the Gate,
     // and on the bay by SFO. Each takes the nearest bit of shore with plenty of open water around it.
     struct Anchor { float x, z; Color body; };
-    const Anchor anchors[] = {{350, -1200, {200, 40, 44, 255}}, {-650, -2550, {240, 196, 40, 255}}, {1900, 2450, {40, 110, 180, 255}}};
+    const Anchor anchors[] = {{350, -1200, {200, 40, 44, 255}}, {-650, -2550, {240, 196, 40, 255}}, {1900, 1560, {40, 110, 180, 255}}};
     for (auto& an : anchors) {
         float bd = 1e9f;
         Moor best{};
         for (float x = an.x - 700; x <= an.x + 700; x += 20)
             for (float z = an.z - 700; z <= an.z + 700; z += 20) {
                 float h = w.terrain(x, z);
-                if (h < 0.4f || h > 6.f) continue;
+                if (h < 0.4f || h > 6.f || !w.inPlay(x, z)) continue;   // a shore you're allowed to climb out onto
                 float d0 = sq(x - an.x) + sq(z - an.z);
                 if (d0 >= bd) continue;
                 for (int k = 0; k < 8; k++) {
@@ -35,6 +35,7 @@ void Seaplanes::place(const World& w) {
                     while (d < 24 && !openWater(w, x + ca * d, z + sa * d)) d += 1;
                     if (d >= 24) continue;
                     float px = x + ca * (d + 11), pz = z + sa * (d + 11);
+                    if (!w.inPlay(px, pz)) continue;
                     bool ok = true;   // room for the wings, and a clear run straight out for the takeoff
                     for (float r2 = 0; r2 <= 120 && ok; r2 += 20) ok = openWater(w, px + ca * r2, pz + sa * r2);
                     for (int q = 0; q < 8 && ok; q++) ok = openWater(w, px + cosf(q * TAU_F / 8) * 6, pz + sinf(q * TAU_F / 8) * 6);
@@ -80,7 +81,7 @@ bool Seaplanes::dismount(Player& p, World& w) {
         for (int k = 0; k < 16; k++) {
             float a = k * TAU_F / 16, x = pos.x + cosf(a) * d, z = pos.z + sinf(a) * d;
             float h = w.terrain(x, z);
-            if (h < 0.5f || w.isWater(x, z, h) || w.solidAt({x, h + 1.2f, z})) continue;
+            if (h < 0.5f || !w.inPlay(x, z) || w.isWater(x, z, h) || w.solidAt({x, h + 1.2f, z})) continue;
             if (d < bd) { bd = d; best = {x, h, z}; }
         }
     if (bd > 1e8f) return false;

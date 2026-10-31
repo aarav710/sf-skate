@@ -99,12 +99,11 @@ void JetSkis::update(float dt, const Input& in, bool boost, Player& p, const Wor
     Vector3 np = {p.pos.x + vel.x * dt, 0, p.pos.z + vel.z * dt};
     if (!openWater(w, np.x, np.z)) {
         bool xOK = openWater(w, np.x, p.pos.z), zOK = openWater(w, p.pos.x, np.z);
-        float hit = sqrtf(vel.x * vel.x + vel.z * vel.z);
-        if (xOK) { np.z = p.pos.z; vel.z *= -0.3f; }
-        else if (zOK) { np.x = p.pos.x; vel.x *= -0.3f; }
-        else { np.x = p.pos.x; np.z = p.pos.z; vel.x *= -0.3f; vel.z *= -0.3f; }
+        float hit;   // speed into whatever stopped us, so scraping along a shore or the edge of the map stays quiet
+        if (xOK) { hit = fabsf(vel.z); np.z = p.pos.z; vel.z *= -0.3f; }
+        else if (zOK) { hit = fabsf(vel.x); np.x = p.pos.x; vel.x *= -0.3f; }
+        else { hit = sqrtf(vel.x * vel.x + vel.z * vel.z); np.x = p.pos.x; np.z = p.pos.z; vel.x *= -0.3f; vel.z *= -0.3f; }
         if (hit > 6 && hitCD <= 0) { evCrash = true; hitCD = 0.6f; }
-        vf *= 0.35f;
     }
     // the visible speed along the ski
     speed = vel.x * fwdX + vel.z * fwdZ;

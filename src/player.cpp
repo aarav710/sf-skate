@@ -435,6 +435,11 @@ void Player::bailUpdate(float dt, World& w) {
     // board tumbles away
     boardVel.y -= GRAVITY * dt;
     boardPos = Vector3Add(boardPos, Vector3Scale(boardVel, dt));
+    Vector2 bn;   // walls: bounce off them (damped) rather than tumbling into the building
+    if (w.collide(boardPos, 0.3f, boardPos.y, 0.3f, &bn)) {
+        float into = -(boardVel.x * bn.x + boardVel.z * bn.y);
+        if (into > 0) { boardVel.x += bn.x * into * 1.4f; boardVel.z += bn.y * into * 1.4f; }
+    }
     float bg = w.ground(boardPos.x, boardPos.z, boardPos.y + 0.3f);
     if (boardPos.y < bg) { boardPos.y = bg; boardVel = Vector3Scale(boardVel, 0.6f); boardVel.y = fabsf(boardVel.y) * 0.3f; }
     boardYaw += dt * 6 * clampf(Vector3Length(boardVel) / 5, 0, 1);

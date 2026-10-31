@@ -1174,7 +1174,7 @@ void World::buildMeta() {
     tok("Dolores Park", gx(12) + 55, gz(17) + 30);
     tok("Sutro Tower", -470, 800);
     tok("Port of Oakland", 4040, 900);
-    tok("Pier 39", 1025, -1280);
+    tok("Pier 39", 1025, -1265);   // on the deck just south of the carousel (+z) (1018..1032, -1292..-1278), not on its 8 m roof
     tok("Salesforce Tower", 1100, 210);
     tok("Embarcadero Plaza", 1230, -256);
     tok("SFO Runway 28R", 1560, 2262);

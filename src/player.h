@@ -33,6 +33,7 @@ struct Player {
     float grabT = 0;
     float bailT = 0;
     bool splashed = false;
+    bool airClip = false;      // brushed a wall or pole this jump: the landing can't be a stomp
     Vector3 boardPos{}, boardVel{};
     float boardYaw = 0;
 

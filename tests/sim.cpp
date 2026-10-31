@@ -1500,6 +1500,20 @@ int main() {
         snprintf(b, sizeof b, "%d of %d ledges grindable", grinds, ledges);
         check(ledges == 3 && grinds == ledges, "Union Square ledges grindable", b);
     }
+    {   // every Embarcadero pier deck stands out of the bay (issue #64), and rolling east along it stays on the deck
+        int piers = 0, dry = 0, rode = 0;
+        for (const Platform& p : W.plats) {
+            if (p.kind != PK_PIER || p.x0 != 1290 || p.x1 != 1480) continue;
+            piers++;
+            float z = p.z1 - 0.8f;   // the open strip of deck along the side of the shed
+            if (p.h0 > 1.5f && !W.isWater(1300, z, p.h0) && W.ground(1300, z, p.h0 + 1) > p.h0 - 0.1f) dry++;
+            Sim s; s.spawn(1300, z, 0, 5);
+            bool bailed = s.run(120, Input{}, [](Player& q) { return q.state == Player::BAIL; });
+            if (!bailed && s.p.pos.y > p.h0 - 0.1f) rode++;
+        }
+        snprintf(b, sizeof b, "%d piers, %d decks above the water, %d ridden", piers, dry, rode);
+        check(piers == 7 && dry == piers && rode == piers, "Embarcadero piers above the bay", b);
+    }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;
 }

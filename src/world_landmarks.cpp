@@ -548,7 +548,9 @@ void World::buildWaterfront() {
     }
     // Piers along the Embarcadero
     for (float zc : {-800.f, -660.f, -520.f, -380.f, 50.f, 180.f, 480.f}) {
-        float y = terrain(1290, zc) + 0.02f;
+        // (the north end of the promenade runs out past the seawall, so the shore at the root of the -800 pier is
+        // under the bay: keep every deck up out of the water, as Pier 39 does)
+        float y = std::max(terrain(1290, zc), 2.0f) + 0.02f;
         float x0 = 1290, x1 = 1480;
         MeshBuilder& m = mb(1380, zc);
         m.box({x0, -3, zc - 15}, {x1, y, zc + 15}, col(110, 100, 90), wood, 0.7f);

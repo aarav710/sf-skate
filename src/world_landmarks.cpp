@@ -1154,19 +1154,46 @@ void World::buildMeta() {
                {1277, -170, 5, 10},    {gx(19) + 55, gz(6) + 55, 25, 14}, {1815, 1880, 25, 16}, {2380, 9400, 14, 10}, {1900, 9418, 30, 10},
                {360, -1900, 4, 6},     {263, -1900, 10, 8},    {438, -1886, 8, 5}};   // Alcatraz: by the front door, in the yard, on the pier
     // tourists stand on the ground (the terrain, or a kerb or plaza a step up from it), not on whatever roof or
-    // monument top is highest there; out over the water they stand on the pier deck instead. A spot inside a
-    // building or a monument is skipped and another one tried, so each landmark still gets its crowd
-    auto feet = [&](float x, float z) {
-        float y = ground(x, z, terrain(x, z));
-        return isWater(x, z, y) ? ground(x, z, 3.f) : y;
+    // monument top is highest there. Where that ground is a roadway or the water, they stand on a deck or pier
+    // above it instead (SFO's departures level, the piers), if there is one. A spot inside a building or a
+    // monument, or out in the traffic, is skipped and another one tried, so each landmark still gets its crowd
+    auto road = [&](float x, float z, bool deck) {   // on a car path (on a deck or not), or a city-grid street
+        for (size_t k = 0; k < carPaths.size(); k++) {
+            const Path& P = carPaths[k];
+            if (P.onDeck != deck) continue;
+            for (size_t s = 0; s + 1 < P.p.size(); s++)
+                if (distToSeg2D(x, z, P.p[s].x, P.p[s].y, P.p[s + 1].x, P.p[s + 1].y) < carPathLanes[k] * 4.f) return true;
+        }
+        if (deck) return false;
+        for (const Grid* g : {&sf, &oak, &mp})
+            for (int j = 0; j < g->nj; j++)
+                for (int i = 0; i < g->ni; i++)
+                    for (int d : {0, 2}) {
+                        if (!g->edge(i, j, d)) continue;
+                        Vector2 m = g->node(i, j), e = g->node(i + DI[d], j + DJ[d]);
+                        if (distToSeg2D(x, z, m.x, m.y, e.x, e.y) < g->roadHalf) return true;
+                    }
+        return false;
+    };
+    auto deckOver = [&](float x, float z, float y) {   // the lowest deck or pier over y (up to 10 m up), else 1e9
+        float best = 1e9f, lim = std::max(terrain(x, z), 0.f) + 10.f;
+        for (const Platform& pl : plats)
+            if ((pl.kind == PK_DECK || pl.kind == PK_PIER) && pl.contains(x, z) && std::min(pl.x1 - pl.x0, pl.z1 - pl.z0) > 4.f) {
+                float t = pl.top(x, z);
+                if (t > y + STEP_UP && t <= lim) best = std::min(best, t);
+            }
+        return best;
     };
     for (auto& t : ts)
         for (int k = 0, tries = 0; k < t.n && tries < t.n * 10; tries++) {
             float a = r.range(0, TAU_F), d = r.range(2, t.rad);
             float x = t.x + cosf(a) * d, z = t.z + sinf(a) * d;
             if (onBridge(x, z) || fabsf(x + 1100) < 17) continue;
-            Vector3 p = {x, feet(x, z), z};
-            if (isWater(x, z, p.y)) continue;
+            Vector3 p = {x, ground(x, z, terrain(x, z)), z};
+            if (isWater(x, z, p.y) || road(x, z, false)) {
+                p.y = deckOver(x, z, p.y);
+                if (p.y > 1e8f || ground(x, z, p.y) > p.y + 0.05f || road(x, z, true)) continue;
+            }
             Vector3 tmp = p;
             Vector2 n;
             if (collide(tmp, 0.5f, p.y, 1.8f, &n)) continue;

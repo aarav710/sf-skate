@@ -6,10 +6,20 @@
 namespace {
 constexpr float CABLE_GAP = 1.5f;     // each cable sits this far to the side of the centerline
 constexpr float CLEARANCE = 15.f;     // cable height above the ground at the least
-constexpr float STATION_TOP = 9.5f;   // where the cable meets the station, above its ground
 constexpr float CABLE_SPEED = 6.f;
+constexpr float TERMINAL_H = 5.2f;    // terminal walls above its (lowest) ground
+constexpr float ROOF_SLAB = 0.38f;    // the roof slab's top above the walls (centre +0.2, half-height 0.18)
+constexpr float ROOF_R = 7.2f * 1.4143f + 1.6f;   // roof slab half-diagonal plus a cabin's half-width and its swing
+constexpr float CABIN_CLEAR = 0.8f;   // gap left between a cabin's floor and the roof below it
 
-struct Node { float x, z, y; bool station; float top; };   // y: ground; top: cable height above ground
+struct Node { float x, z, y; bool station; float top; float gy = 0; };   // y: ground; top: cable height above ground; gy: terminal ground
+
+// the terminal stands on the lowest ground under its 12 m footprint
+float terminalGround(const World& w, float x, float z) {
+    float gy = w.terrain(x, z);
+    for (float dx = -6; dx <= 6; dx += 6) for (float dz = -6; dz <= 6; dz += 6) gy = std::min(gy, w.terrain(x + dx, z + dz));
+    return gy;
+}
 
 Vector2 peakNear(const World& w, float cx, float cz, float r) {
     Vector2 best = {cx, cz};
@@ -51,7 +61,11 @@ void World::buildGondolas() {
                     nodes.push_back({x, z, terrain(x, z), false, 24.f});
                 }
             }
-            nodes.push_back({keys[k].x, keys[k].y, terrain(keys[k].x, keys[k].y), true, STATION_TOP});
+            Node st{keys[k].x, keys[k].y, terrain(keys[k].x, keys[k].y), true, 0};
+            st.gy = terminalGround(*this, st.x, st.z);
+            // the cable meets the station high enough that a hanging cabin clears the terminal roof
+            st.top = st.gy + TERMINAL_H + ROOF_SLAB + GONDOLA_CABIN_DROP + CABIN_CLEAR - st.y;
+            nodes.push_back(st);
         }
         // raise towers until every span clears the ground below it
         for (int it = 0; it < 60; it++) {
@@ -72,6 +86,24 @@ void World::buildGondolas() {
                 }
             }
             if (!changed) break;
+        }
+        // the cable can still dip toward a lower neighbour (and sags) while it is over a terminal's roof:
+        // raise the station until every point of it within reach of the roof keeps the cabin clear
+        for (size_t i = 0; i < nodes.size(); i++) {
+            Node& st = nodes[i];
+            if (!st.station) continue;
+            float need = st.gy + TERMINAL_H + ROOF_SLAB + GONDOLA_CABIN_DROP + CABIN_CLEAR, raise = 0;
+            for (int nb = -1; nb <= 1; nb += 2) {
+                if ((nb < 0 && i == 0) || (nb > 0 && i + 1 == nodes.size())) continue;
+                const Node& o = nodes[i + nb];
+                float span = hypotf(o.x - st.x, o.z - st.z);
+                for (float dd = 0; dd <= std::min(ROOF_R, span); dd += 0.5f) {
+                    float t = dd / span;   // from the station toward the neighbour (sag is symmetric in t)
+                    float y = lerpf(st.y + st.top, o.y + o.top, t) - sagAt(t, span);
+                    if (y < need) raise = std::max(raise, (need - y) / std::max(1.f - t, 0.5f));
+                }
+            }
+            st.top += raise;
         }
         // centerline with sag, every ~10 m
         GondolaLine gl;
@@ -127,9 +159,8 @@ void World::buildGondolas() {
             MeshBuilder& m = mb(n.x, n.z);
             if (n.station) {
                 // a low concrete terminal with a glass front, a flat roof, and a frame carrying the bullwheel
-                float gy = n.y;
-                for (float dx = -6; dx <= 6; dx += 6) for (float dz = -6; dz <= 6; dz += 6) gy = std::min(gy, terrain(n.x + dx, n.z + dz));
-                float base = gy - 1.2f, top = gy + 5.2f;
+                float gy = n.gy;
+                float base = gy - 1.2f, top = gy + TERMINAL_H;
                 addBox(n.x - 6, n.z - 6, n.x + 6, n.z + 6, base, top, PK_PROP, conc, roofC, 0.85f);
                 m.obox({n.x, top + 0.2f, n.z}, {7.2f, 0.18f, 7.2f}, yaw, 0, roofC);
                 m.obox({n.x + cosf(yaw) * 3.3f, gy + 2.6f, n.z + sinf(yaw) * 3.3f}, {2.9f, 1.1f, 5.4f}, yaw, 0, col(120, 170, 200, M_GLASS)); // window band toward the line
@@ -241,6 +272,7 @@ void Gondolas::draw(const World& w, const Vector3& cam) const {
         DrawCube({0, -4.2f, 0}, 2.3f, 1.7f, 2.1f, TINT[c.tint]);                 // body
         DrawCube({0, -3.95f, 0}, 2.36f, 0.8f, 2.0f, glass);                      // window band
         DrawCube({0, -4.95f, 0}, 2.2f, 0.14f, 2.0f, g.accent);                   // belt
+        // (the body's floor, -4.2 - 0.85, is GONDOLA_CABIN_DROP below the cable)
         rlPopMatrix();
     }
 }

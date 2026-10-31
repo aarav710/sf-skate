@@ -151,6 +151,7 @@ struct World {
     float ceiling(float x, float z, float feetY) const;        // lowest underside above the feet (1e9 if open sky)
     int houseAt(float x, float z, float y) const;              // index into houses if inside one, else -1
     bool doorBlocked(float x, float z, float pad) const;       // is (x,z) on the way from the sidewalk to a front door?
+    bool buildingAt(float x, float z, float pad, float y0, float y1) const; // does a building box overlap x/z +-pad between heights y0..y1?
     bool isWater(float x, float z, float y) const;
     const char* waterKind(float x, float z, float y) const;   // what isWater found there: "bay", "ocean", or the pond's kind
     const Pond* pondAt(float x, float z, float y) const;      // the pond (lake, pool, ...) whose water is at this spot, if any

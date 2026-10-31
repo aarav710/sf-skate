@@ -4,6 +4,7 @@
 #include "../src/chase.h"
 #include "../src/traffic.h"
 #include "../src/models.h"
+#include "../src/gondola.h"
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -275,6 +276,22 @@ int main() {
         check(s.p.state == Player::RIDE && s.p.speed > 0 && s.p.subPopup.find("180") != std::string::npos &&
               s.p.subPopup.find("Fakie") == std::string::npos, "fakie 180 lands forwards", b);
     }
+    {   // ...and a forwards 180 lands fakie: keeps the yaw it landed with and rolls on backwards, no snap round (issue #92)
+        Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
+        Input in; in.ollie = true; s.run(1, in);
+        Input sp; sp.steer = 1; s.run(63, sp, [](Player& p) { return fabsf(p.spinAccum) >= PI; });
+        float jump = 0, prev = s.p.yaw;
+        bool landed = false;
+        s.run(150, Input{}, [&](Player& p) {   // touchdown, landing bounce, then rolling on
+            jump = std::max(jump, fabsf(wrapPi(p.yaw - prev)));
+            prev = p.yaw;
+            landed |= p.evLand;
+            return false;
+        });
+        snprintf(b, sizeof b, "landed=%d max yaw step %.2f rad, state=%d speed=%.1f banked \"%s\"", landed, jump, s.p.state, s.p.speed, s.p.subPopup.c_str());
+        check(landed && jump < 0.05f && s.p.state == Player::RIDE && s.p.speed < -4.f &&
+              s.p.subPopup.find("FS 180 to Fakie") != std::string::npos, "forwards 180 rolls away fakie", b);
+    }
     {   // ...and ollieing fakie onto the Embarcadero Plaza Flat Bar grinds fakie, then rolls away fakie
         int ok = 0, tries = 6; float worst = 0; char last[200] = "";
         for (int t = 0; t < tries; t++) {
@@ -508,6 +525,31 @@ int main() {
             check(s2.p.pos.x < tgt->x0, "buildings are solid", b);
         }
     }
+    {   // Oracle Park's grandstand, scoreboard, Coke bottle and glove are solid (issue #67): push across the field into each
+        struct Run { const char* name; float x, z, yaw; bool alongX; float wall; int dir; };
+        const Run runs[] = {
+            {"grandstand", 1215, 775, PI, true, 1195, -1},          // westward into the stand's 2 m front wall
+            {"scoreboard", 1284, 725, -PI / 2, false, 708, -1},     // north into the scoreboard
+            {"bottle", 1268, 715, 0, true, 1287.5f, 1},             // east into the bottle's plinth
+            {"glove", 1268, 735, 0, true, 1287.5f, 1},              // east into the glove's pedestal
+        };
+        int ok = 0;
+        std::string why;
+        for (const Run& r : runs) {
+            Sim s; s.spawn(r.x, r.z, r.yaw, 2);
+            Input in; in.push = true;
+            float deepest = -1e9f;   // furthest past the face, in the direction of travel
+            s.run(400, in, [&](Player& q) {
+                float c = r.alongX ? q.pos.x : q.pos.z;
+                deepest = std::max(deepest, (c - r.wall) * r.dir);
+                return false;
+            });
+            if (deepest < 0) ok++;
+            else if (why.empty()) { char w[96]; snprintf(w, sizeof w, " (first miss: %s, %.1f m past its face)", r.name, deepest); why = w; }
+        }
+        snprintf(b, sizeof b, "%d of 4 ballpark structures stopped the skater%s", ok, why.c_str());
+        check(ok == 4, "Oracle Park structures are solid", b);
+    }
     {   // ride into the Pacific
         Sim s; s.spawn(-1440, 0, PI, 6);
         Input in; in.push = true;
@@ -531,6 +573,42 @@ int main() {
             if (std::string(W.district(sp.x, sp.z)) != sp.want && !bad++)
                 snprintf(b, sizeof b, "(%.0f,%.0f) says %s, want %s", sp.x, sp.z, W.district(sp.x, sp.z), sp.want);
         check(bad == 0, "piers and Alcatraz dock have the right district", b);
+    }
+    {   // after a splash off a gentle shore, the respawn stays put: it doesn't roll back into the water (#90)
+        struct { float x, z; } starts[] = {{4007.8f, -2575.6f}, {2825.3f, -713.9f}, {-751.0f, -1073.1f}};
+        int bad = 0, tried = 0;
+        std::string worst;
+        for (auto& st : starts) {
+            float best = 1e9f, yaw = 0;   // head for the nearest water
+            for (int k = 0; k < 64; k++) {
+                float a = k * (2 * PI / 64);
+                for (float r = 1; r < 40 && r < best; r += 1)
+                    if (W.isWater(st.x + cosf(a) * r, st.z + sinf(a) * r, 0)) { best = r; yaw = a; }
+            }
+            if (best > 39) continue;
+            // from the start itself, and from 4 m short of the water: too close for any spot on the way to be
+            // saved, so the respawn is the (unchecked) start spot, on the shore slope facing the water
+            for (float back : {best, 4.f}) {
+                float sx = st.x + cosf(yaw) * (best - back), sz = st.z + sinf(yaw) * (best - back);
+                Sim s; s.spawn(sx, sz, yaw, 3);
+                Input in; in.push = true;
+                if (!s.run(60 * 20, in, [](Player& p) { return p.splashed; })) continue;
+                tried++;
+                int again = 0;
+                for (int f = 0; f < 60 * 15; f++) {
+                    s.p.update(1.f / 60, Input{}, W);
+                    if (s.p.evSplash) again++;
+                }
+                if (again || s.p.state != Player::RIDE) {
+                    bad++;
+                    char t[96];
+                    snprintf(t, sizeof t, " (%.0f,%.0f): %d more splashes", sx, sz, again);
+                    worst += t;
+                }
+            }
+        }
+        snprintf(b, sizeof b, "%d/%d shores re-splashed%s", bad, tried, worst.c_str());
+        check(tried > 0 && bad == 0, "splash respawn stays out of water", b);
     }
     {   // the splash message names the water: ocean, bay, fountain, lake, lagoon, pool, salt pond (rolling in and dropping in)
         float sea = -1440;   // the Pacific, west of the city
@@ -641,6 +719,22 @@ int main() {
         snprintf(b, sizeof b, "%d bad of %d", bad, (int)W.spots.size());
         check(bad == 0, "teleport spots are safe", b);
     }
+    {   // teleporting is not a free token: idling at a spawn point (rolling down its slope, no input) never
+        // brings the skater into a token's pickup radius (the game's test: feet + 1 m within 3 m)
+        int bad = 0;
+        for (auto& sp : W.spots) {
+            Sim s; s.spawn(sp.pos.x, sp.pos.z, sp.yaw);
+            const char* hit = nullptr;
+            s.run(60 * 3, Input{}, [&](Player& p) {
+                for (auto& t : W.tokens)
+                    if (Vector3Distance(t.pos, {p.pos.x, p.pos.y + 1.0f, p.pos.z}) < 3.0f) { hit = t.name; return true; }
+                return false;
+            });
+            if (hit) { bad++; printf("      spot %s collects token %s with no input\n", sp.name, hit); }
+        }
+        snprintf(b, sizeof b, "%d of %d", bad, (int)W.spots.size());
+        check(bad == 0, "no token is collected just by teleporting", b);
+    }
     {   // every token is reachable-ish: above ground, not inside a wall
         int bad = 0;
         for (auto& t : W.tokens) {
@@ -651,6 +745,40 @@ int main() {
         }
         snprintf(b, sizeof b, "%d bad of %d", bad, (int)W.tokens.size());
         check(bad == 0, "tokens are not inside walls", b);
+    }
+    {   // street lamps, trees and curb clutter are never built inside a building or landmark base (issue #88:
+        // Coit Tower's base swallowed the hilltop's lamps and trees, a lamp head poking out of its roof)
+        std::unordered_map<long long, std::vector<const Platform*>> blds;   // building boxes bucketed by 32 m cell
+        auto cell = [](float x, float z) { return (long long)floorf(x / 32.f) * 1000003LL + (long long)floorf(z / 32.f); };
+        for (auto& pl : W.plats) {
+            if (pl.kind != PK_BUILDING || pl.x1 - pl.x0 > 600 || pl.z1 - pl.z0 > 600) continue;
+            for (float x = floorf(pl.x0 / 32.f) * 32.f; x <= pl.x1; x += 32.f)
+                for (float z = floorf(pl.z0 / 32.f) * 32.f; z <= pl.z1; z += 32.f) blds[cell(x + 1, z + 1)].push_back(&pl);
+        }
+        auto inside = [&](const Platform& p) {   // pole centre inside a building box that overlaps its height
+            float x = (p.x0 + p.x1) / 2, z = (p.z0 + p.z1) / 2, top = std::max(p.h0, p.h1);
+            auto it = blds.find(cell(x, z));
+            if (it == blds.end()) return false;
+            for (const Platform* bl : it->second)
+                if (bl->contains(x, z) && bl->base < top - 0.5f && std::max(bl->h0, bl->h1) > p.base + 1.2f) return true;
+            return false;
+        };
+        int coit = 0, coitBad = 0, city = 0, cityBad = 0;
+        for (auto& p : W.plats) {
+            if (p.kind != PK_POLE || p.x1 - p.x0 > 1.8f || p.z1 - p.z0 > 1.8f) continue;
+            float x = (p.x0 + p.x1) / 2, z = (p.z0 + p.z1) / 2, tall = std::max(p.h0, p.h1) - p.base;
+            if (x > 840 && x < 920 && z > -920 && z < -840) {   // Telegraph Hill around Coit Tower: everything small
+                coit++;
+                if (inside(p)) { coitBad++; printf("      pole at %.1f, %.1f inside Coit Tower's base\n", x, z); }
+            }
+            // city-wide: street lamps / signal poles (7.3-7.5 m boxes) and trees (6 m boxes) on the SF grid
+            if (x > -1460 && x < 1340 && z > -1080 && z < 1820 && tall > 5.9f && tall < 7.6f) {
+                city++;
+                if (inside(p)) { cityBad++; if (cityBad <= 5) printf("      lamp/tree at %.1f, %.1f inside a building\n", x, z); }
+            }
+        }
+        snprintf(b, sizeof b, "Coit hill: %d of %d inside; city lamps/trees: %d of %d inside", coitBad, coit, cityBad, city);
+        check(coitBad == 0 && city > 1000 && cityBad == 0, "no street furniture inside buildings", b);
     }
     {   // tourists stand on the ground at their landmark: on the terrain (or a kerb a step up from it), or on a deck
         // or pier (SFO's departures level, out over the water) -- never up on a roof or a monument, never inside
@@ -1170,6 +1298,34 @@ int main() {
         snprintf(b, sizeof b, "%d of %d towers ridden through", through, towers);
         check(towers > 0 && through == towers, "Ride between gondola tower legs", b);
     }
+    {   // gondola cabins clear the station roofs: wherever the cable passes over a terminal, the cabin's floor
+        // stays above the roof slab (terminal: a 12 m PK_PROP box under the station; slab top 0.38 m above it)
+        int stations = 0, clear = 0;
+        float worst = 1e9f;
+        for (const GondolaLine& g : W.gondolas)
+            for (float ss : g.stationS) {
+                size_t k = std::lower_bound(g.cum.begin(), g.cum.end(), ss) - g.cum.begin();
+                Vector3 c = g.path[std::min(k, g.path.size() - 1)];
+                const Platform* term = nullptr;
+                for (const Platform& q : W.plats)
+                    if (q.kind == PK_PROP && fabsf(q.x1 - q.x0 - 12.f) < 0.01f && fabsf(q.z1 - q.z0 - 12.f) < 0.01f &&
+                        fabsf((q.x0 + q.x1) * 0.5f - c.x) < 1.f && fabsf((q.z0 + q.z1) * 0.5f - c.z) < 1.f) term = &q;
+                if (!term) continue;
+                stations++;
+                float roof = term->h0 + 0.38f, gap = 1e9f;
+                for (float s = std::max(0.f, ss - 30.f); s <= std::min(g.len, ss + 30.f); s += 0.5f) {
+                    size_t i = std::min(std::max<size_t>(std::upper_bound(g.cum.begin(), g.cum.end(), s) - g.cum.begin(), 1), g.path.size() - 1);
+                    float t = clampf((s - g.cum[i - 1]) / std::max(g.cum[i] - g.cum[i - 1], 1e-4f), 0, 1);
+                    Vector3 p = Vector3Lerp(g.path[i - 1], g.path[i], t);
+                    if (sq(p.x - c.x) + sq(p.z - c.z) > sq(7.2f * 1.4143f + 1.2f)) continue;   // not over the roof
+                    gap = std::min(gap, p.y - GONDOLA_CABIN_DROP - roof);
+                }
+                worst = std::min(worst, gap);
+                if (gap > 0) clear++;
+            }
+        snprintf(b, sizeof b, "%d of %d stations clear, tightest %.2f m", clear, stations, worst);
+        check(stations >= 7 && clear == stations, "Gondola cabins clear station roofs", b);
+    }
     {   // Lombard planters: the collision box is the drawn shrub (same layout as World::buildLombard)
         float x0 = gx(16) + 6, x1 = gx(17) - 6, zc = gz(3);
         std::vector<Vector2> pts;
@@ -1410,6 +1566,27 @@ int main() {
                  stuck, longGrid, longMain);
         check(std::max(longGrid, longMain) < 90 && longMain < 60, "Main-road crossings don't lock up", b);
     }
+    {   // the Golden Gate walkways have people on them, on the deck: not on the seabed 45 m below or walking inside
+        // the approach deck (#87). Skater standing mid-span, 30 s, every walker on a deck path checked twice a second,
+        // near (full update) and far (route only) alike
+        Traffic T; T.init(W);
+        Player pl; pl.spawn({-1100, W.ground(-1100, -1500, 1e5f), -1500}, -PI / 2);
+        int tot = 0, bad = 0, near = 0;
+        float worst = 0;
+        for (int f = 0; f <= 60 * 30; f++) {
+            if (f > 0) T.update(1.f / 60, W, pl);
+            if (f % 30) continue;
+            for (const Ped& p : T.peds) {
+                if (p.mode != 1 || !W.pedPaths[p.path].onDeck) continue;
+                float g = W.ground(p.pos.x, p.pos.z, 1e5f), d = fabsf(p.pos.y - p.evY - g);
+                tot++;
+                near += sq(p.pos.x - pl.pos.x) + sq(p.pos.z - pl.pos.z) < 120 * 120;
+                if (d > 0.3f) { bad++; worst = std::max(worst, d); }
+            }
+        }
+        snprintf(b, sizeof b, "%d of %d walkway samples (%d within 120 m) off the deck, worst %.1f m", bad, tot, near, worst);
+        check(tot > 61 * 200 && near > 61 * 10 && bad == 0, "Golden Gate walkers stay on the deck", b);
+    }
     {   // a stopped vehicle is solid all the way to its ends: roll at 3 m/s into each end of each type, on the axis and
         // near a corner, on the runway (flat and open), and the skater stops at the body (or bails), not inside it
         int bad = 0, tot = 0;
@@ -1559,6 +1736,25 @@ int main() {
         }
         snprintf(b, sizeof b, "%d of %d ledges grindable", grinds, ledges);
         check(ledges == 3 && grinds == ledges, "Union Square ledges grindable", b);
+    }
+    {   // City Hall: riding south from Civic Center, the front columns and the portico behind them stop the skater
+        // (they were mesh only, so the skater rode through the column line at z 351 into the portico at z 352..358)
+        float cx = (gx(14) + gx(15)) / 2, cz = (gz(13) + gz(14)) / 2;
+        float worst = -1e9f, worstCol = -1e9f;
+        for (int lane = 0; lane < 2; lane++) {   // between the middle two columns, then straight at one
+            float x = lane == 0 ? cx : cx - 2.5f;
+            Sim s; s.spawn(x, cz - 48, PI / 2, 6);
+            float maxZ = -1e9f;
+            for (int f = 0; f < 60 * 5; f++) {
+                Input in; in.push = s.p.speed < 5.f && s.p.state == Player::RIDE;
+                s.p.update(1.f / 60, in, W);
+                maxZ = std::max(maxZ, s.p.pos.z);
+            }
+            if (lane == 0) worst = maxZ; else worstCol = maxZ;
+        }
+        snprintf(b, sizeof b, "between columns reached z %.2f (portico face %.1f), at a column z %.2f (column face %.1f)", worst, cz - 38,
+                 worstCol, cz - 39.8f);
+        check(worst < cz - 38 && worstCol < cz - 39.8f, "City Hall portico and columns solid", b);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

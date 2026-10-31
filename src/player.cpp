@@ -6,8 +6,8 @@ static const Color C_RED = {255, 80, 70, 255};
 
 // how fast the ground under a board at p rolling at speed along f rises (+) or falls (-), m/s
 static float groundRate(World& w, Vector3 p, Vector3 f, float speed) {
-    float hF = w.ground(p.x + f.x * 0.5f, p.z + f.z * 0.5f, p.y + 0.2f);
-    float hB = w.ground(p.x - f.x * 0.5f, p.z - f.z * 0.5f, p.y + 0.2f);
+    float hF = w.skaterGround(p.x + f.x * 0.5f, p.z + f.z * 0.5f, p.y + 0.2f);
+    float hB = w.skaterGround(p.x - f.x * 0.5f, p.z - f.z * 0.5f, p.y + 0.2f);
     return clampf(speed * (hF - hB), -30, 30);
 }
 
@@ -124,8 +124,8 @@ void Player::ride(float dt, const Input& in, World& w) {
     lean = lerpf(lean, in.steer * clampf(spd / 6.f, 0, 1), 1 - expf(-dt * 8));
 
     Vector3 f = fwd();
-    float hF = w.ground(pos.x + f.x * 0.7f, pos.z + f.z * 0.7f, pos.y + 0.2f);
-    float hB = w.ground(pos.x - f.x * 0.7f, pos.z - f.z * 0.7f, pos.y + 0.2f);
+    float hF = w.skaterGround(pos.x + f.x * 0.7f, pos.z + f.z * 0.7f, pos.y + 0.2f);
+    float hB = w.skaterGround(pos.x - f.x * 0.7f, pos.z - f.z * 0.7f, pos.y + 0.2f);
     // a sample past a drop edge is not a slope (a flat deck near its edge would pull the skater over it):
     // continue the surface under the board from the other sample instead
     bool edgeF = hF < pos.y - STEP_UP, edgeB = hB < pos.y - STEP_UP;
@@ -166,7 +166,7 @@ void Player::ride(float dt, const Input& in, World& w) {
             speed = copysignf(s * perFrame60(0.85f, dt), speed);   // scraping along a wall
         }
     }
-    float g = w.ground(np.x, np.z, pos.y);
+    float g = w.skaterGround(np.x, np.z, pos.y);
     float predicted = pos.y + rideVy * dt - 0.5f * GRAVITY * dt * dt;
     if (g < predicted - 0.06f && (fabsf(speed) > 1.5f || g < pos.y - STEP_UP)) {
         // the ground dropped away: we're flying (ramp lip, stairs, crest, or rolling slowly off a real drop)
@@ -181,8 +181,8 @@ void Player::ride(float dt, const Input& in, World& w) {
         return;
     }
     Vector3 f2 = fwd();
-    float hF2 = w.ground(np.x + f2.x * 0.5f, np.z + f2.z * 0.5f, g + 0.2f);
-    float hB2 = w.ground(np.x - f2.x * 0.5f, np.z - f2.z * 0.5f, g + 0.2f);
+    float hF2 = w.skaterGround(np.x + f2.x * 0.5f, np.z + f2.z * 0.5f, g + 0.2f);
+    float hB2 = w.skaterGround(np.x - f2.x * 0.5f, np.z - f2.z * 0.5f, g + 0.2f);
     // same edge rule as the slope above: a sample past a lip reads the ground far below, which would make
     // the climb off a kicker a huge plunge (and the roll-off a "Way too much drop" bail). Continue the surface instead
     bool edgeF2 = hF2 < g - STEP_UP, edgeB2 = hB2 < g - STEP_UP;
@@ -210,7 +210,7 @@ void Player::ride(float dt, const Input& in, World& w) {
 void Player::air(float dt, const Input& in, World& w) {
     airTime += dt;
     // bounced off an edge into a real drop: controls back. Hills are fine: the ground is expected to keep its slope under the hop
-    if (bouncing && w.ground(pos.x, pos.z, pos.y + 0.2f) < bounceY + bounceRate * airTime - 1.0f) bouncing = ollieQueued = false;
+    if (bouncing && w.skaterGround(pos.x, pos.z, pos.y + 0.2f) < bounceY + bounceRate * airTime - 1.0f) bouncing = ollieQueued = false;
     pitch = lerpf(pitch, 0.f, 1 - expf(-dt * 3));
     float prevY = pos.y;
     vy -= GRAVITY * dt;
@@ -312,7 +312,7 @@ void Player::air(float dt, const Input& in, World& w) {
     }
 
     // landing
-    float g = w.ground(pos.x, pos.z, std::max(prevY, pos.y));
+    float g = w.skaterGround(pos.x, pos.z, std::max(prevY, pos.y));
     if (pos.y <= g && vy <= 0) {
         bool pop = bouncing && (ollieQueued || in.ollie); // Space during a landing bounce pops as it touches down
         bouncing = ollieQueued = false;
@@ -418,7 +418,7 @@ void Player::grind(float dt, const Input& in, World& w) {
         float best = -1e9f;
         for (int side = 1; side >= -1; side -= 2) {
             Vector3 q = {pos.x - dir.y * 0.6f * side, pos.y, pos.z + dir.x * 0.6f * side};
-            float g = w.ground(q.x, q.z, pos.y);
+            float g = w.skaterGround(q.x, q.z, pos.y);
             Vector3 c = q; Vector2 n;
             float score = g - (w.collide(c, 0.35f, g, 1.7f, &n) ? 100.f : 0.f) - (w.isWater(q.x, q.z, g) ? 1000.f : 0.f);
             if (score > best) { best = score; off = q; }
@@ -462,7 +462,7 @@ void Player::bailUpdate(float dt, World& w) {
         float into = -(boardVel.x * bn.x + boardVel.z * bn.y);
         if (into > 0) { boardVel.x += bn.x * into * 1.4f; boardVel.z += bn.y * into * 1.4f; }
     }
-    float bg = w.ground(boardPos.x, boardPos.z, boardPos.y + 0.3f);
+    float bg = w.skaterGround(boardPos.x, boardPos.z, boardPos.y + 0.3f);
     if (boardPos.y < bg) { boardPos.y = bg; boardVel = Vector3Scale(boardVel, 0.6f); boardVel.y = fabsf(boardVel.y) * 0.3f; }
     boardYaw += dt * 6 * clampf(Vector3Length(boardVel) / 5, 0, 1);
     // rider slides and falls
@@ -471,7 +471,7 @@ void Player::bailUpdate(float dt, World& w) {
         Vector3 np = Vector3Add(pos, Vector3Scale(fwd(), speed * dt));
         Vector2 n;
         w.collide(np, 0.35f, pos.y, 1.7f, &n);
-        float g = w.ground(np.x, np.z, pos.y);
+        float g = w.skaterGround(np.x, np.z, pos.y);
         vy -= GRAVITY * dt;
         np.y = pos.y + vy * dt;
         if (np.y < g) { np.y = g; vy = 0; }

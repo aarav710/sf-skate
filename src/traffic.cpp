@@ -1139,6 +1139,7 @@ void Traffic::update(float dt, World& w, const Player& pl) {
         float x = p.pos.x + p.dogOff.x, z = p.pos.z + p.dogOff.y;
         p.dog = {x, w.ground(x, z, std::max(w.terrain(x, z), to.y)), z};
     }
+    publishRoofs(w, pp);
     // Caltrain: accelerate, brake for the next station, dwell, reverse at the ends
     float lineEnd = w.railLen() - 25, lineStart = w.stations.empty() ? 0 : w.stations[0].s;
     for (auto& t : trains) {
@@ -1155,6 +1156,24 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             t.s = stop; t.v = 0; t.dwell = 16;
             if (stop == lineEnd || stop == lineStart) { t.dir = -t.dir; t.dwell = 30; }
         }
+    }
+}
+
+// The roof of a vehicle as the skater lands on it: the whole footprint, 0.1 m below the top of the model (as the
+// PK_CAR platforms of parked cars), tilted with the body as it's drawn (yaw, then pitch about its center).
+static VehicleTop roofOf(const Car& c) {
+    const CarModel& m = carModel(c.type);
+    float cp = cosf(c.pitch);
+    return {c.pos.x, c.pos.z, cosf(c.yaw), sinf(c.yaw), m.halfLen * cp, m.halfWid, c.pos.y + (m.height - 0.1f) * cp, tanf(c.pitch)};
+}
+
+void Traffic::publishRoofs(World& w, Vector3 at) const {
+    w.vehicleTops.clear();
+    for (const Car& c : cars) {
+        if (!c.placed) continue;
+        const CarModel& m = carModel(c.type);
+        if (sq(c.pos.x - at.x) + sq(c.pos.z - at.z) > sq(40 + m.halfLen)) continue;   // the skater covers < 1 m a frame
+        w.vehicleTops.push_back(roofOf(c));
     }
 }
 
@@ -1184,7 +1203,10 @@ void Traffic::interact(Player& pl) {
         float lx = dx * f0 + dz * f1, lz = -dx * f1 + dz * f0;
         float px = m.halfLen + 0.35f - fabsf(lx), pz = m.halfWid + 0.35f - fabsf(lz);
         if (px <= 0 || pz <= 0) continue;
-        if (pl.pos.y > c.pos.y + m.height - 0.2f || pl.pos.y < c.pos.y - 1.5f) continue;
+        // on (or over) the roof: riding on top, not into the side. The roof is ground for the skater (see
+        // World::skaterGround), so a drop onto it lands there rather than sinking into the body
+        VehicleTop roof = roofOf(c);
+        if (pl.pos.y > roof.y + clampf(lx, -roof.halfLen, roof.halfLen) * roof.slope - 0.2f || pl.pos.y < c.pos.y - 1.5f) continue;
         Vector2 pv = pl.state == Player::AIR ? Vector2{pl.vel.x, pl.vel.z} : Vector2{cosf(pl.yaw) * pl.speed, sinf(pl.yaw) * pl.speed};
         Vector2 cv = {f0 * c.speed, f1 * c.speed};
         float rel = Vector2Length(Vector2Subtract(pv, cv));

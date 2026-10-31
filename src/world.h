@@ -43,6 +43,18 @@ struct Platform {
 
 struct Rail { Vector3 a, b; const char* name; };
 
+// The roof of a vehicle out in traffic, for the skater to land and ride on (Traffic publishes the ones near the
+// skater every frame; parked cars are plain PK_CAR platforms instead). The footprint is a box around (x, z) facing
+// (fx, fz), and the roof rises `slope` per m forward from height y over the center (cars pitch on SF's hills).
+struct VehicleTop {
+    float x, z, fx, fz, halfLen, halfWid, y, slope;
+    // roof height over (px, pz), or -1e9 outside the footprint
+    float at(float px, float pz) const {
+        float dx = px - x, dz = pz - z, lx = dx * fx + dz * fz, lz = -dx * fz + dz * fx;
+        return fabsf(lx) <= halfLen && fabsf(lz) <= halfWid ? y + lx * slope : -1e9f;
+    }
+};
+
 // An aerial gondola: stations on summits joined by cables on lattice towers. path is the sagging centerline
 // (stations at stationS along it), and the cabins ride a loop up one cable and back down the other.
 struct GondolaLine {
@@ -146,6 +158,9 @@ struct World {
     float terrain(float x, float z) const;                    // bare ground height, exactly as the ground mesh draws it
     float terrainRaw(float x, float z) const;                 // the 4 m heightfield itself (what the mesh is built from)
     float ground(float x, float z, float yRef) const;         // highest walkable surface <= yRef+STEP_UP
+    // ground for the skater: the same, plus the roofs of the vehicles in vehicleTops (the cars' own placement and
+    // everyone else keep to ground(), or a car on a bridge deck would climb onto its own roof)
+    float skaterGround(float x, float z, float yRef) const;
     bool collide(Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size = nullptr) const; // push out of walls; size = widest box hit
     bool solidAt(Vector3 p, bool bigProps = false) const;      // buildings/decks (+ big prop boxes: the camera)
     float ceiling(float x, float z, float feetY) const;        // lowest underside above the feet (1e9 if open sky)
@@ -183,6 +198,7 @@ struct World {
     std::vector<Platform> plats;
     std::vector<std::vector<int>> pgrid; int pgW = 0, pgH = 0;
     std::vector<Rail> rails;
+    std::vector<VehicleTop> vehicleTops;   // the traffic near the skater, as of the last Traffic::update
     std::vector<Pond> ponds;
     Grid sf, oak, mp;
     std::vector<Path> carPaths;      // bridges, Market St

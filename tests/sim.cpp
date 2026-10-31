@@ -1428,6 +1428,45 @@ int main() {
         snprintf(b, sizeof b, "%d of %d rides got inside; closest stop, m outside the body: %s", bad, tot, det.c_str());
         check(bad == 0, "Vehicles are solid to their ends", b);
     }
+    {   // the roof of a vehicle stopped in traffic is ground: drop onto it from 1 m up at 3 and 5 m/s (along it, from
+        // just inside its back end) and the skater lands on top and rides, rather than sinking into it or bailing
+        int bad = 0, tot = 0;
+        std::string det;
+        struct { int type; const char* n; } kinds[] = {{CT_SEDAN, "car"}, {CT_BUS, "bus"}, {CT_CABLECAR, "cable car"},
+                                                       {CT_STREETCAR, "streetcar"}, {CT_LRV, "LRV"}, {CT_PEDALBUS, "pedal bus"}};
+        for (auto& k : kinds)
+            for (float spd : {3.f, 5.f}) {
+                const CarModel& m = carModel(k.type);
+                Traffic T;
+                Car c; c.type = k.type; c.speed = 0; c.stopT = 1e9f; c.placed = true;
+                c.pos = {1950, W.ground(1950, 2262, 500), 2262};
+                T.cars.push_back(c);
+                float roof = c.pos.y + m.height - 0.1f;
+                Sim s; s.spawn(1950 - m.halfLen + 0.3f, 2262, 0, spd);
+                s.p.pos.y = roof + 1; s.p.state = Player::AIR; s.p.vel = {spd, 0, 0}; s.p.vy = 0;
+                bool rode = false;
+                float low = 1e9f;
+                for (int f = 0; f < 60 && s.p.state != Player::BAIL; f++) {
+                    T.publishRoofs(W, s.p.pos);
+                    s.run(1, Input{});
+                    T.interact(s.p);
+                    if (fabsf(s.p.pos.x - 1950) < m.halfLen - 0.3f) low = std::min(low, s.p.pos.y);
+                    if (s.p.state == Player::RIDE && fabsf(s.p.pos.y - roof) < 0.05f) rode = true;
+                }
+                tot++;
+                bool ok = rode && s.p.state != Player::BAIL && low > roof - 0.05f;
+                if (!ok) {
+                    char one[96];
+                    snprintf(one, sizeof one, "%s%s at %.0f m/s: %s, lowest %+.2f", det.empty() ? "" : "; ", k.n, spd,
+                             s.p.state == Player::BAIL ? s.p.popup.c_str() : rode ? "rode" : "never rode on top", low - roof);
+                    det += one;
+                    bad++;
+                }
+            }
+        W.vehicleTops.clear();
+        snprintf(b, sizeof b, "%d of %d drops onto a stopped vehicle missed the roof%s%s", bad, tot, det.empty() ? "" : ": ", det.c_str());
+        check(bad == 0, "Stopped vehicles have a roof to land on", b);
+    }
     {   // the "SFO Airport" label covers the airport fill, and not the East Bay shore and hills beyond it
         int wrong = 0, land = 0, missed = 0, fill = 0;
         for (float x = AX0 + 10; x < WX1; x += 40)

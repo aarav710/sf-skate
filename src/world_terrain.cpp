@@ -585,6 +585,15 @@ float World::ground(float x, float z, float yRef) const {
     return h;
 }
 
+float World::skaterGround(float x, float z, float yRef) const {
+    float h = ground(x, z, yRef);
+    for (const VehicleTop& v : vehicleTops) {
+        float t = v.at(x, z);
+        if (t <= yRef + STEP_UP && t > h) h = t;
+    }
+    return h;
+}
+
 bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size) const {
     bool hit = false;
     if (size) *size = 0;

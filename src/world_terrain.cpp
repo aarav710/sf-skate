@@ -1469,11 +1469,11 @@ void World::freeInteriors() {
     interiorMesh.clear();
 }
 
-int World::drawCasters(Matrix lightView, float half, float zFar, const Shader& sh) {
+int World::drawCasters(Matrix lightView, float half, float zFar, const Shader& sh, bool far) {
     beginStatic(sh);
     int n = 0;
     for (auto& ch : chunks) {
-        if (ch.layer == LAYER_FAR || ch.layer == LAYER_INTERIOR) continue;
+        if (ch.layer == (far ? LAYER_DETAIL : LAYER_FAR) || ch.layer == LAYER_INTERIOR) continue;
         // the chunk box in light space must overlap the shadow map's square and depth range
         Vector3 lo = {1e9f, 1e9f, 1e9f}, hi = {-1e9f, -1e9f, -1e9f};
         for (int k = 0; k < 8; k++) {

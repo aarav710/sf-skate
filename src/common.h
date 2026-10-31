@@ -26,6 +26,9 @@ inline float wrapPi(float a) {
     return a;
 }
 inline float lerpAngle(float a, float b, float t) { return a + wrapPi(b - a) * t; }
+// A per-frame factor that was tuned at 60 fps (e.g. "keep 80% of the speed each frame against a wall"), scaled to
+// this frame's length so it does the same per second at any frame rate. At dt = 1/60 it returns k.
+inline float perFrame60(float k, float dt) { return powf(k, dt * 60.f); }
 inline Vector3 V3(float x, float y, float z) { return Vector3{x, y, z}; }
 inline Vector2 V2(float x, float y) { return Vector2{x, y}; }
 

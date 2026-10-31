@@ -135,8 +135,9 @@ struct World {
     // slim: position and color only (the far pass)
     void drawPass(const Camera3D& cam, float nearD, float farD, const Shader& sh, bool slim);
     void drawWater(const Shader& sh, bool slim);
-    // shadow maps: draw every chunk inside the light's box (lightView space: |x|,|y| < half, -zFar < z < 0)
-    int drawCasters(Matrix lightView, float half, float zFar, const Shader& sh);
+    // shadow maps: draw every chunk inside the light's box (lightView space: |x|,|y| < half, -zFar < z < 0).
+    // far: for the wide far cascade, with the low-poly canopies in place of every leaf
+    int drawCasters(Matrix lightView, float half, float zFar, const Shader& sh, bool far = false);
     // build the rooms near the camera (nearest first, for about budget seconds) and free the far ones
     InteriorStats updateInteriors(Vector3 cam, double budget);
     void freeInteriors();
@@ -197,6 +198,7 @@ struct World {
     std::vector<uint8_t> signals;    // per SF grid node (j * ni + i): 1 where the intersection has traffic lights
     std::vector<SignalHead> signalHeads;
     std::vector<Vector3> steamVents; // manholes letting off steam
+    std::vector<Vector3> lamps;      // street lamp heads (they light the street at night)
     Image mapImg{};
     std::vector<Chunk> chunks;
     Chunk water{};

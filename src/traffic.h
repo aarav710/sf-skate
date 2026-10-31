@@ -23,6 +23,7 @@ struct Car {
     float yaw = 0, pitch = 0;
     bool braking = false, placed = false;
     float pedal = 0;            // crank angle (pedal buses)
+    float acrossT = -1;         // grid cars: when a car on a main road last stopped for this one (Traffic::clock)
 };
 
 struct Ped {
@@ -50,6 +51,9 @@ struct Ped {
     uint8_t pet = 0;            // 0 none, 1 a dog on a leash
     Color petC{}, petC2{};      // coat and the darker ears / patches
     float petS = 1;             // dog size
+    Vector3 dog{};              // where the dog stands: on the ground there and clear of walls (see dogSpot in traffic.cpp)
+    Vector2 dogOff{};           // its offset from the walker, eased so it trots over rather than jumping when the spot moves
+    float dogSide = 1;          // which side of the walker it keeps to (+1 / -1); it only switches when that side is blocked
     // looks: hair style, what they carry, what they do while standing, build, and the bag / hat color
     uint8_t hairStyle = 0, carry = 0, idle = 0;
     float build = 1;
@@ -82,6 +86,7 @@ struct Traffic {
     float clock = 0;            // drives the traffic signals
     Vector3 view = {1e6f, 0, 1e6f};   // the camera, as of last frame: people near it get the full update too
     int farTurn = 0;            // which slice of the far-away people gets its catch-up update this frame
+    std::vector<uint64_t> carCells;   // (40 m cell << 32 | car index), sorted: who's near whom, for every car each frame
 
     void init(World& w);
     void update(float dt, World& w, const Player& p);

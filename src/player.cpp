@@ -140,9 +140,9 @@ void Player::ride(float dt, const Input& in, World& w) {
             if (s > 0.5f) {
                 float ny = atan2f(v.z, v.x);
                 if (speed < 0) ny = wrapPi(ny + PI);
-                yaw = lerpAngle(yaw, ny, 0.5f);
+                yaw = lerpAngle(yaw, ny, 1 - perFrame60(0.5f, dt));
             }
-            speed = copysignf(s * 0.85f, speed);
+            speed = copysignf(s * perFrame60(0.85f, dt), speed);   // scraping along a wall
         }
     }
     float g = w.ground(np.x, np.z, pos.y);
@@ -307,13 +307,14 @@ void Player::land(World& w, float g) {
     float impact = -vy;
     float quality = 1.f - clampf(fabsf(fabsf(diff) > PI / 2 ? fabsf(diff) - PI : diff) / 0.5f, 0.f, 1.f) * 0.7f - clampf((impact - 9.f) / 12.f, 0.f, 1.f) * 0.5f;
     bool stomp = quality > 0.85f && impact > 3.f, sketchy = quality < 0.45f;
+    // spins and Big Air are part of the combo too, so add them before the landing scales it
+    int halves = (int)roundf(fabsf(spinAccum) / PI);
+    if (halves > 0) addTrick(std::string(spinAccum > 0 ? "FS " : "BS ") + std::to_string(halves * 180), 300.f * halves);
+    if (airTime > 1.6f) addTrick("Big Air", 400);
     landNote.clear();
     if (stomp) { comboPts *= 1.15f; landNote = "STOMPED +15%"; }
     else if (sketchy) { comboPts *= 0.8f; landNote = "sketchy landing -20%"; }
     landShake = clampf(impact / 18.f, 0.f, 1.f);
-    int halves = (int)roundf(fabsf(spinAccum) / PI);
-    if (halves > 0) addTrick(std::string(spinAccum > 0 ? "FS " : "BS ") + std::to_string(halves * 180), 300.f * halves);
-    if (airTime > 1.6f) addTrick("Big Air", 400);
     if (fakie && !combo.empty()) combo.back() += " to Fakie";
     speed = hv * cosf(diff) * (sketchy ? 0.78f : 0.97f);
     rideVy = 0;

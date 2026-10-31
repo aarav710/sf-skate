@@ -142,9 +142,11 @@ void Player::ride(float dt, const Input& in, World& w) {
         else acc += speed > 0 ? -8.f : 8.f;
     }
     float drag = (in.tuck ? 0.0010f : 0.0026f) * speed * speed + 0.15f;
+    float speed0 = speed;
     speed += acc * dt;
     if (fabsf(speed) > 0.01f) speed -= copysignf(std::min(drag * dt, fabsf(speed)), speed);
-    speed = clampf(speed, -9, 40);
+    // fakie never builds past 9, but a fast 180 landed fakie carries its speed on and lets drag wear it down
+    speed = clampf(speed, std::max(-40.f, std::min(-9.f, speed0)), 40);
     crouch = lerpf(crouch, in.tuck ? 0.85f : (in.ollieHeld ? 0.6f : 0.12f), 1 - expf(-dt * 10));
 
     Vector3 np = Vector3Add(pos, Vector3Scale(f, speed * dt));
@@ -336,9 +338,10 @@ void Player::land(World& w, float g) {
     bool fakie = false;
     if (fabsf(diff) > 0.65f) {
         if (fabsf(fabsf(diff) - PI) < 0.65f) {
-            // an odd number of half spins brought it round: ride out the other way. No spin: it left the ground
-            // rolling fakie, so it rolls on fakie (negative speed) instead of snapping round
-            if ((int)roundf(fabsf(spinAccum) / PI) % 2) { fakie = true; yaw = wrapPi(yaw + PI); diff = wrapPi(yaw - atan2f(vel.z, vel.x)); }
+            // landed backwards: keep the yaw it landed with and roll on fakie (negative speed) rather than snapping
+            // the board round. An odd number of half spins (a forwards 180/540) is what brought it round: "to Fakie".
+            // No spin (or 360s): it left the ground rolling fakie and simply carries on fakie
+            fakie = (int)roundf(fabsf(spinAccum) / PI) % 2;
         }
         else { bail("Landed sideways"); return; }
     }

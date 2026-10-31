@@ -84,8 +84,10 @@ void Player::bankCombo() {
 void Player::bail(const char* why) {
     if (state == BAIL) return;
     airClip = false;
-    if (state == GRIND && railFakie) yaw = wrapPi(yaw + PI); // fakie 50-50: fall along the rail travel, not back up it
+    // grinding: fall along the rail travel, not back up it (fakie 50-50) or off its side (boardslide)
+    if (state == GRIND) yaw = atan2f(railTravel.y, railTravel.x);
     Vector3 f = state == AIR ? vel : Vector3Scale(fwd(), speed);
+    float kick = state != AIR && speed < 0 ? -1.5f : 1.5f; // rolling backwards: travel is opposite the facing
     if (state == AIR) {
         float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
         if (hv > 0.5f) yaw = atan2f(vel.z, vel.x);
@@ -95,7 +97,7 @@ void Player::bail(const char* why) {
     state = BAIL;
     bailT = 0;
     boardPos = pos;
-    boardVel = Vector3Add(Vector3Scale(f, 0.8f), Vector3Scale(fwd(), 1.5f)); // kick along the heading, not world +x
+    boardVel = Vector3Add(Vector3Scale(f, 0.8f), Vector3Scale(fwd(), kick)); // kick the way the rider travels, not world +x
     boardVel.y = 3.0f;
     if (Vector3Length(boardVel) < 0.1f) boardVel = Vector3Scale(fwd(), 2);
     boardYaw = yaw;
@@ -212,6 +214,12 @@ void Player::ride(float dt, const Input& in, World& w) {
     Vector3 f2 = fwd();
     float hF2 = w.ground(np.x + f2.x * 0.5f, np.z + f2.z * 0.5f, g + 0.2f);
     float hB2 = w.ground(np.x - f2.x * 0.5f, np.z - f2.z * 0.5f, g + 0.2f);
+    // same edge rule as the slope above: a sample past a lip reads the ground far below, which would make
+    // the climb off a kicker a huge plunge (and the roll-off a "Way too much drop" bail). Continue the surface instead
+    bool edgeF2 = hF2 < g - STEP_UP, edgeB2 = hB2 < g - STEP_UP;
+    if (edgeF2 && edgeB2) hF2 = hB2 = g;
+    else if (edgeF2) hF2 = 2 * g - hB2;
+    else if (edgeB2) hB2 = 2 * g - hF2;
     rideVy = clampf(speed * (hF2 - hB2), -30, 30);
     pos = np;
     pos.y = g;
@@ -312,6 +320,7 @@ void Player::air(float dt, const Input& in, World& w) {
             rail = i;
             railT = t;
             railDir = al > 0 ? 1 : -1;
+            railTravel = {rd.x * railDir, rd.y * railDir};
             speed = std::max(3.5f, hv * fabsf(al));
             Vector2 bf = {cosf(yaw), sinf(yaw)};
             boardslide = fabsf(bf.x * rd.x + bf.y * rd.y) < 0.6f;
@@ -422,6 +431,7 @@ void Player::grind(float dt, const Input& in, World& w) {
     float Lxz = sqrtf(d.x * d.x + d.z * d.z);
     Vector2 dir = {d.x / Lxz, d.z / Lxz};
     float slope = d.y / Lxz * railDir;
+    railTravel = {dir.x * railDir, dir.y * railDir};
     pitch = lerpf(pitch, atanf(slope), 1 - expf(-dt * 14));
     speed += (-9.8f * slope * 0.8f - 0.7f) * dt;
     comboPts += 300 * dt;
@@ -433,6 +443,7 @@ void Player::grind(float dt, const Input& in, World& w) {
     if (fabsf(balance) > 1.f) { bail("Lost balance on the rail"); return; }
     if (speed < 1.0f) {
         state = AIR; vel = {dir.x * railDir * 1.5f, 0, dir.y * railDir * 1.5f}; vy = 0; airTime = 0; spinAccum = 0;
+        if (boardslide) yaw = atan2f(vel.z, vel.x); // swing the crosswise board round to the travel, as the other exits do
         // step off sideways, to whichever side has floor and no wall (a bridge railing has the bay on one side)
         Vector3 off = pos;
         float best = -1e9f;

@@ -371,6 +371,32 @@ void Traffic::farPedUpdate(Ped& p, float dt, World& w, RNG& r) {
     p.phase += dt * p.gait * 5.2f;
 }
 
+// Where a walker's dog goes: a little ahead and off to one side (beside them when they stop), standing on the
+// ground right there rather than at the walker's height, and never inside a wall or a pole. A blocked side sends
+// it round to the other; if both are blocked (a narrow gap, a doorway) it's pulled in close, and failing that it
+// takes the spot the wall pushes it out to. Usually one ground and one wall query per dog.
+static Vector3 dogSpot(Ped& p, const World& w) {
+    float s = p.petS, cy = cosf(p.yaw), sy = sinf(p.yaw), feet = p.pos.y - p.evY;
+    bool sit = p.mode == 2 || p.knock > 0;
+    float ax = sit ? 0.15f : 0.95f, az = sit ? 0.65f : 0.5f;
+    // the wall check is a circle round the middle of the body (it runs from the tail to the nose along x)
+    float r = 0.3f * s + 0.05f, mid = 0.15f * s, h = 0.8f * s;
+    const float tries[4][2] = {{ax, az * p.dogSide}, {ax, -az * p.dogSide}, {ax * 0.45f, 0.3f * p.dogSide}, {ax * 0.45f, -0.3f * p.dogSide}};
+    Vector3 pushed = {0, 0, 0};
+    for (int k = 0; k < 4; k++) {
+        float x = p.pos.x + tries[k][0] * cy - tries[k][1] * sy, z = p.pos.z + tries[k][0] * sy + tries[k][1] * cy;
+        float y = w.ground(x, z, std::max(w.terrain(x, z), feet));
+        Vector3 c = {x + mid * cy, y, z + mid * sy};
+        if (!w.collide(c, r, y, h, nullptr)) {
+            if (tries[k][1] * p.dogSide < 0) p.dogSide = -p.dogSide;   // stays on its new side until that's blocked too
+            return {x, y, z};
+        }
+        if (k == 0) pushed = {c.x - mid * cy, 0, c.z - mid * sy};
+    }
+    pushed.y = w.ground(pushed.x, pushed.z, std::max(w.terrain(pushed.x, pushed.z), feet));
+    return pushed;
+}
+
 void Traffic::update(float dt, World& w, const Player& pl) {
     RNG& r = gR;
     evHonk = false;
@@ -704,6 +730,20 @@ void Traffic::update(float dt, World& w, const Player& pl) {
             p.phase += dt * vs * 5.2f;
         }
     }
+    // dogs: worked out here, where the world is to hand, so drawDog can stand them on the ground clear of walls.
+    // Only the ones that can be drawn (within 150 m of the camera); they ease over when the spot changes
+    // (sitting down, switching sides) and jump straight there when far off (just come into range).
+    for (auto& p : peds) {
+        if (!p.pet) continue;
+        if (std::min(sq(p.pos.x - pp.x) + sq(p.pos.z - pp.z), sq(p.pos.x - view.x) + sq(p.pos.z - view.z)) > 160 * 160) continue;
+        Vector3 to = dogSpot(p, w);
+        Vector2 off = {to.x - p.pos.x, to.z - p.pos.z}, go = Vector2Subtract(off, p.dogOff);
+        if (sq(to.x - p.dog.x) + sq(to.z - p.dog.z) > 3 * 3 || Vector2LengthSqr(go) < 1e-4f) { p.dogOff = off; p.dog = to; continue; }
+        // ease the offset from the walker, not the position, so a walking dog keeps up instead of trailing
+        p.dogOff = Vector2Add(p.dogOff, Vector2Scale(go, 1 - expf(-dt * 10)));
+        float x = p.pos.x + p.dogOff.x, z = p.pos.z + p.dogOff.y;
+        p.dog = {x, w.ground(x, z, std::max(w.terrain(x, z), to.y)), z};
+    }
     // Caltrain: accelerate, brake for the next station, dwell, reverse at the ends
     float lineEnd = w.railLen() - 25, lineStart = w.stations.empty() ? 0 : w.stations[0].s;
     for (auto& t : trains) {
@@ -835,7 +875,7 @@ static void drawDog(const Ped& p, float now) {
     float s = p.petS, cy = cosf(p.yaw), sy = sinf(p.yaw);
     bool sit = p.mode == 2 || p.knock > 0;
     auto W = [&](float x, float y, float z) { return Vector3{p.pos.x + x * cy - z * sy, p.pos.y + y, p.pos.z + x * sy + z * cy}; };
-    Vector3 at = sit ? W(0.15f, 0, 0.65f) : W(0.95f, 0, 0.5f);
+    Vector3 at = p.dog;   // on the ground there and clear of walls: see dogSpot
     inst::push();
     inst::translate(at.x, at.y, at.z);
     inst::rotate(-p.yaw * RAD2DEG, 0, 1, 0);
@@ -863,7 +903,7 @@ static void drawDog(const Ped& p, float now) {
     // the leash, from the walker's hand to the collar, sagging a little
     float ps = p.scale;
     Vector3 hand = W(0.12f * ps, 0.86f * ps, 0.27f * ps);
-    Vector3 collar = sit ? W(0.15f + 0.3f * s, 0.62f * s, 0.65f) : W(0.95f + 0.3f * s, 0.6f * s, 0.5f);
+    Vector3 collar = {at.x + 0.3f * s * cy, at.y + (sit ? 0.62f : 0.6f) * s, at.z + 0.3f * s * sy};
     Vector3 mid = Vector3Lerp(hand, collar, 0.5f);
     mid.y -= 0.12f;
     DrawLine3D(hand, mid, {150, 30, 40, 255});

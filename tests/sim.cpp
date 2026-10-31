@@ -569,6 +569,42 @@ int main() {
         snprintf(b, sizeof b, "%d bad of %d", bad, (int)W.tokens.size());
         check(bad == 0, "tokens are not inside walls", b);
     }
+    {   // every token can be reached from the surrounding ground: flood backwards from the surface under the token on
+        // a 1 m grid, stepping onto a neighbour only if the skater there could get up to this cell (at most one ollie,
+        // ~2 m, higher), and see that the flood gets 30 m out. A token parked on top of something tall and isolated
+        // (Pier 39's was on the 8 m carousel roof, 8.4 m from the deck -- out of the 3 m pickup range) never gets out.
+        const float CLIMB = 2.0f, OUT = 30;
+        const int N = (int)OUT * 2 + 5, C = N / 2;
+        // Port of Oakland: the token sits on a container stack, 2.6 m a layer -- a known, separate problem
+        auto known = [](const char* n) { return strcmp(n, "Port of Oakland") == 0; };
+        int bad = 0;
+        std::vector<float> h((size_t)N * N);
+        std::vector<int> q;
+        for (auto& t : W.tokens) {
+            std::fill(h.begin(), h.end(), -1e9f);
+            q.clear();
+            h[(size_t)C * N + C] = t.pos.y - 1.4f;
+            q.push_back(C * N + C);
+            bool out = false;
+            for (size_t k = 0; k < q.size() && !out; k++) {
+                int i = q[k] % N, j = q[k] / N;
+                float hc = h[q[k]];
+                if (sq((float)(i - C)) + sq((float)(j - C)) >= OUT * OUT) out = true;
+                for (int d = 0; d < 4 && !out; d++) {
+                    int ni = i + (d == 0) - (d == 1), nj = j + (d == 2) - (d == 3);
+                    if (ni < 0 || nj < 0 || ni >= N || nj >= N || h[(size_t)nj * N + ni] > -1e8f) continue;
+                    float x = t.pos.x + (ni - C), z = t.pos.z + (nj - C);
+                    float hn = W.ground(x, z, hc + CLIMB);
+                    if (hc > hn + CLIMB || W.isWater(x, z, hn)) continue;
+                    h[(size_t)nj * N + ni] = hn;
+                    q.push_back(nj * N + ni);
+                }
+            }
+            if (!out && !known(t.name)) { bad++; printf("      token %s unreachable (y %.1f)\n", t.name, t.pos.y); }
+        }
+        snprintf(b, sizeof b, "%d bad of %d", bad, (int)W.tokens.size());
+        check(bad == 0, "tokens are reachable from the ground", b);
+    }
     {   // tourists stand on the ground at their landmark: on the terrain (or a kerb a step up from it), or on a deck
         // or pier (SFO's departures level, out over the water) -- never up on a roof or a monument, never inside
         // one, and never out in the traffic on a car path or a city street

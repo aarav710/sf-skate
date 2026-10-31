@@ -705,13 +705,21 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
         Facade F{m, x0, z0, x1, z1, facing};
         Vector3 po = F.P(fi.cDoor, 0, fi.side ? 0.8f : fi.ns * fi.tread + 0.7f), pi = F.P(fi.cDoor, 0, -1.6f), pf = F.P(fi.uA, 0, 0.7f);
         Vector2 doorOut = {po.x, po.z}, doorIn = {pi.x, pi.z}, foot = {pf.x, pf.z};
+        // remember each step box, so sidewalk walkers can go round the front of it instead of through it
+        Vector2 toStreet = facing == 0 ? Vector2{0, -1} : facing == 1 ? Vector2{0, 1} : facing == 2 ? Vector2{-1, 0} : Vector2{1, 0};
+        auto addStoop = [&](float sx0, float sx1, float sz0, float sz1) {
+            stoops.emplace((int)floorf((sx0 + sx1) * 0.5f / 16.f) * 4096 + (int)floorf((sz0 + sz1) * 0.5f / 16.f),
+                           Stoop{sx0, sx1, sz0, sz1, toStreet});
+        };
         if (fi.side) {   // collision for the flight along the front and its landing
             float ulo = std::min(fi.uA, fi.uL), uhi = std::max(fi.uA, fi.uL);
             Vector3 a = F.P(ulo, 0, 0), b = F.P(uhi, 0, 1.4f);
             float h0 = fi.uA < fi.uL ? fi.yStart : fi.doorY, h1 = fi.uA < fi.uL ? fi.doorY : fi.yStart;
             addPlat({std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z), h0, h1, fi.yStart - 2.f, (uint8_t)(facing < 2 ? 0 : 1), PK_PROP});
+            addStoop(std::min(a.x, b.x), std::max(a.x, b.x), std::min(a.z, b.z), std::max(a.z, b.z));
             Vector3 la = F.P(fi.lu0, 0, 0), lb = F.P(fi.lu1, 0, 1.4f);
             addPlat({std::min(la.x, lb.x), std::max(la.x, lb.x), std::min(la.z, lb.z), std::max(la.z, lb.z), fi.doorY, fi.doorY, fi.gd - 2.f, 0, PK_PROP});
+            addStoop(std::min(la.x, lb.x), std::max(la.x, lb.x), std::min(la.z, lb.z), std::max(la.z, lb.z));
         } else {   // collision for the front steps: a flat top step, then a smooth ramp down to the street so you roll up
             // instead of bouncing off each tread (it follows the front edges of the drawn steps)
             float W2 = fi.ns * fi.tread;
@@ -722,6 +730,7 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
                 Vector3 a = F.P(fi.cDoor - 0.9f, 0, dep0), b = F.P(fi.cDoor + 0.9f, 0, dep1);
                 float x0s = std::min(a.x, b.x), x1s = std::max(a.x, b.x), z0s = std::min(a.z, b.z), z1s = std::max(a.z, b.z);
                 float base2 = fi.gd - 0.4f;
+                addStoop(x0s, x1s, z0s, z1s);
                 switch (facing) { // wall side is the near end
                 case 0: addPlat({x0s, x1s, z0s, z1s, yFar2, yNear, base2, 1, PK_PROP}); break;
                 case 1: addPlat({x0s, x1s, z0s, z1s, yNear, yFar2, base2, 1, PK_PROP}); break;

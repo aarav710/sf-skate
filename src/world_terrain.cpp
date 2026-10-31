@@ -668,6 +668,38 @@ bool World::doorBlocked(float x, float z, float pad) const {
     return false;
 }
 
+Vector2 World::stoopDetour(float x, float z, Vector2 routeDir) const {
+    // The walking line runs ~2 m out from the house fronts, and a tall stoop reaches up to 3 m out: a walker
+    // following it would go straight through the steps (too tall to step onto from the side, and far from the
+    // skater nothing pushes them out of a wall). So they swing out round the front of each stoop, easing over
+    // in the few metres before it and back after, with room for their body.
+    if (stoops.empty()) return {0, 0};
+    const float R = 0.45f, L = 1.8f;   // clearance for the body; how long the swing out and back takes
+    float best = 0;
+    Vector2 bestN = {0, 0};
+    for (int dx = -1; dx <= 1; dx++)
+        for (int dz = -1; dz <= 1; dz++) {
+            auto r = stoops.equal_range(doorCell(x + dx * 16.f, z + dz * 16.f));
+            for (auto it = r.first; it != r.second; ++it) {
+                const Stoop& st = it->second;
+                Vector2 n = st.out, t = {-n.y, n.x};
+                // a route heading toward or away from the house (the cross street at a corner) passes beside it
+                if ((routeDir.x != 0 || routeDir.y != 0) && fabsf(routeDir.x * n.x + routeDir.y * n.y) > 0.7f) continue;
+                float sa = n.x * st.x0 + n.y * st.z0, sb = n.x * st.x1 + n.y * st.z1;
+                float ta = t.x * st.x0 + t.y * st.z0, tb = t.x * st.x1 + t.y * st.z1;
+                float s0 = std::min(sa, sb), s1 = std::max(sa, sb), t0 = std::min(ta, tb), t1 = std::max(ta, tb);
+                float ps = n.x * x + n.y * z, pt = t.x * x + t.y * z;
+                if (ps >= s1 + R || ps < s0 - 0.5f) continue;   // already clear in front, or beside the house itself
+                float off = std::max(std::max(t0 - R - pt, pt - t1 - R), 0.f);   // how far before / after the steps
+                if (off >= L) continue;
+                float k = 1.f - off / L, ease = k * k * (3 - 2 * k);
+                float d = (s1 + R - ps) * ease;
+                if (d > best) { best = d; bestN = n; }
+            }
+        }
+    return {bestN.x * best, bestN.y * best};
+}
+
 int World::houseAt(float x, float z, float y) const {
     for (int i = 0; i < (int)houses.size(); i++) {
         const House& h = houses[i];

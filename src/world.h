@@ -151,6 +151,9 @@ struct World {
     float ceiling(float x, float z, float feetY) const;        // lowest underside above the feet (1e9 if open sky)
     int houseAt(float x, float z, float y) const;              // index into houses if inside one, else -1
     bool doorBlocked(float x, float z, float pad) const;       // is (x,z) on the way from the sidewalk to a front door?
+    // how far to step a sidewalk walker at (x,z), out toward the street, to keep them clear of the front steps
+    // of a house (routeDir: the way their route runs, or zero); zero when no stoop is near
+    Vector2 stoopDetour(float x, float z, Vector2 routeDir) const;
     bool isWater(float x, float z, float y) const;
     const char* waterKind(float x, float z, float y) const;   // what isWater found there: "bay", or the pond's kind
     bool onBridge(float x, float z) const;
@@ -179,6 +182,8 @@ struct World {
     std::vector<House> houses;
     int rowhouseCount = 0, houseTooSteep = 0, houseTooHigh = 0;   // generation stats: street fronts built, and why some stay closed
     std::unordered_multimap<int, Vector4> doorWays; // coarse grid of door approach segments (ax, az, bx, bz)
+    struct Stoop { float x0, x1, z0, z1; Vector2 out; };   // a house's front-step collision box, and the way to the street
+    std::unordered_multimap<int, Stoop> stoops;     // same coarse grid, by the box's centre
     std::vector<Platform> plats;
     std::vector<std::vector<int>> pgrid; int pgW = 0, pgH = 0;
     std::vector<Rail> rails;

@@ -292,6 +292,27 @@ int main() {
         snprintf(b, sizeof b, "air=%d x=%.1f vy=%.1f", air, s.p.pos.x, s.p.vy);
         check(air && s.p.pos.x > 1241, "kicker launches", b);
     }
+    {   // at rest half a metre from the Embarcadero deck's drop edge (x 1170), facing it or backed up to it: stays put
+        int held = 0; char got[96] = "";
+        for (float yaw : {PI, 0.f}) {
+            Sim s; s.spawn(1170.5f, -300, yaw, 0);
+            float y0 = s.p.pos.y;
+            s.run(120, Input{});
+            if (s.p.state == Player::RIDE && fabsf(s.p.pos.y - y0) < 0.01f && fabsf(s.p.pos.x - 1170.5f) < 0.05f) held++;
+            else if (!got[0]) snprintf(got, sizeof got, " (yaw %.1f: x %.2f, dy %.2f, speed %.2f)", yaw, s.p.pos.x, s.p.pos.y - y0, s.p.speed);
+        }
+        snprintf(b, sizeof b, "%d of 2 rested at the deck edge%s", held, got);
+        check(held == 2, "no pull over a drop edge", b);
+    }
+    {   // braking at rest on a steep hill holds without creeping
+        Sim s; s.spawn(-282, 878, -0.6f, 0);
+        Vector3 p0 = s.p.pos;
+        Input in; in.brake = true;
+        s.run(180, in);
+        float moved = Vector3Distance(p0, s.p.pos);
+        snprintf(b, sizeof b, "moved %.3f m in 3 s, speed %.3f", moved, s.p.speed);
+        check(moved < 0.01f && s.p.state == Player::RIDE, "brake holds on a hill", b);
+    }
     {   // rolling downhill from Twin Peaks gains speed without pushing
         Sim s; s.spawn(-282, 878, -0.6f, 0);
         s.run(240, Input{});

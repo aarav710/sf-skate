@@ -361,9 +361,11 @@ static void victorianFront(const World& w, MeshBuilder& m, float x0, float z0, f
         float uA = doorLow ? fu1 - 0.5f : fu0 + 0.5f;
         float uL = doorLow ? cDoor + 1.15f : cDoor - 1.15f;
         Vector3 sP = F.P(uA, 0, 0.7f), sQ = F.P(uA, 0, 2.2f);
-        float yS = std::min(L0 - 0.1f, std::min(w.terrain(sP.x, sP.z), w.terrain(sQ.x, sQ.z)) + 0.3f);
+        float gS = std::min(w.terrain(sP.x, sP.z), w.terrain(sQ.x, sQ.z));
         float run = fabsf(uA - uL);
-        if (run < 3.5f || (L0 - yS) / run > 0.72f) return false;
+        if (run < 3.5f || (L0 - std::min(L0 - 0.1f, gS + 0.3f)) / run > 0.72f) return false;
+        // its foot is a curb-sized step up from the street (under ROLL_UP), so a rolling board rides onto the flight
+        float yS = std::min(L0 - 0.1f, gS + ROLL_UP - 0.03f);
         info.side = true;
         info.uA = uA; info.uL = uL; info.yStart = yS;
         info.lu0 = std::max(fu0 + 0.3f, cDoor - 1.15f);
@@ -727,7 +729,8 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
             float W2 = fi.ns * fi.tread;
             // the far end of the ramp meets the street wherever the street actually is there, a short step up from it
             Vector3 farP = F.P(fi.cDoor, 0, W2 + 0.4f), farQ = F.P(fi.cDoor, 0, W2);
-            float yFar = std::min(fi.doorY - 0.05f, std::min(terrain(farP.x, farP.z), terrain(farQ.x, farQ.z)) + 0.36f);
+            // (under ROLL_UP: a rolling board rides onto it like a curb)
+            float yFar = std::min(fi.doorY - 0.05f, std::min(terrain(farP.x, farP.z), terrain(farQ.x, farQ.z)) + ROLL_UP - 0.03f);
             auto stepPlat = [&](float dep0, float dep1, float yNear, float yFar2, bool slope) {
                 Vector3 a = F.P(fi.cDoor - 0.9f, 0, dep0), b = F.P(fi.cDoor + 0.9f, 0, dep1);
                 float x0s = std::min(a.x, b.x), x1s = std::max(a.x, b.x), z0s = std::min(a.z, b.z), z1s = std::max(a.z, b.z);
@@ -741,8 +744,12 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
                 }
                 (void)slope;
             };
-            if (fi.ns >= 1) stepPlat(0, std::min(fi.tread, W2), fi.doorY, fi.doorY, false);
-            if (fi.ns >= 2) stepPlat(fi.tread, W2, fi.doorY, yFar, true);
+            if (fi.ns >= 2) {
+                stepPlat(0, std::min(fi.tread, W2), fi.doorY, fi.doorY, false);
+                stepPlat(fi.tread, W2, fi.doorY, yFar, true);
+            } else if (fi.ns == 1) {
+                stepPlat(0, W2, fi.doorY, yFar, true);   // a single step (up to ~22 cm): its tread slopes down to a curb-sized lip
+            }
         }
         if (fi.ns >= 1 || fi.side) {   // keep trees, lamps and parked cars off the way to the door
             Vector2 out = Vector2Normalize({doorOut.x - doorIn.x, doorOut.y - doorIn.y});

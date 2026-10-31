@@ -424,6 +424,45 @@ int main() {
         snprintf(b, sizeof b, "%d of 3 Embarcadero seams gave a Coping grind%s", snaps, got);
         check(snaps == 0, "no grind on Embarcadero flat tops", b);
     }
+    {   // #82: a rolling board only rides up curb-sized lips. The Embarcadero stairs (0.32 m risers, x 1176-1199,
+        // z -286..-278, deck to the north) and the 0.45 m ledge (z -258..-257.2) stop it until it ollies; ramps still
+        // carry it up (the funbox's 1 m ramp tops out flush onto its box at x 1226)
+        int climbed = 0, tries = 0; char got[128] = "";
+        auto note = [&](const char* what, float v, float dy) {
+            if (!got[0]) snprintf(got, sizeof got, " (%s at %.0f m/s: up %.2f m)", what, v, dy);
+        };
+        for (float v : {3.f, 6.f})
+            for (bool push : {false, true}) {   // into the stairs, coasting or pushing
+                Sim s; s.spawn(1187, -274, -PI / 2, v);
+                float y0 = s.p.pos.y, top = y0;
+                Input in; in.push = push;
+                s.run(180, in, [&](Player& q) { if (q.state == Player::RIDE) top = std::max(top, q.pos.y); return q.state == Player::BAIL; });
+                tries++;
+                if (top - y0 > 0.2f) { climbed++; note(push ? "stairs, pushing" : "stairs", v, top - y0); }
+            }
+        for (float v : {2.f, 4.f, 7.f}) {   // into the 0.45 m ledge
+            Sim s; s.spawn(1181, -252, -PI / 2, v);
+            float y0 = s.p.pos.y, top = y0;
+            s.run(120, Input{}, [&](Player& q) { if (q.state == Player::RIDE) top = std::max(top, q.pos.y); return q.state == Player::BAIL; });
+            tries++;
+            if (top - y0 > 0.2f) { climbed++; note("0.45 m ledge", v, top - y0); }
+        }
+        // an ollie still gets onto that ledge: rolling along it, pop and grind its edge
+        Sim o; o.spawn(1166, -257.96f, 0, 7);
+        o.run(60, Input{}, [](Player& q) { return q.pos.x > 1169.5f; });
+        Input pop; pop.ollie = true; o.run(1, pop);
+        bool onLedge = o.run(90, Input{}, [](Player& q) { return q.state == Player::GRIND; });
+        // and ramps still roll up, slow or fast
+        int rampOk = 0;
+        for (float v : {10.f, 20.f, 30.f}) {
+            Sim s; s.spawn(1212, -256, 0, v);
+            float y0 = s.p.pos.y;
+            if (s.run(120, Input{}, [&](Player& q) { return q.state == Player::RIDE && q.pos.x > 1227 && q.pos.y > y0 + 0.95f; })) rampOk++;
+        }
+        snprintf(b, sizeof b, "%d of %d rolls climbed stairs or a ledge%s, ollie onto ledge=%d, %d of 3 funbox ramps ridden up",
+                 climbed, tries, got, onLedge, rampOk);
+        check(climbed == 0 && onLedge && rampOk == 3, "stairs and ledges take an ollie", b);
+    }
     {   // kicker ramp launches you
         Sim s; s.spawn(1233, -241, 0, 9);
         bool air = s.run(90, Input{}, [](Player& p) { return p.state == Player::AIR; });
@@ -1873,7 +1912,8 @@ int main() {
         snprintf(b, sizeof b, "reached deck=%d, biggest drop %.2f m, west lip %.2f m above the ground", onDeck, maxDrop, westLip);
         check(onDeck && maxDrop < STEP_UP && westLip < 0.3f, "Union Square stairs reach the deck", b);
 
-        // ride up the stairs from the plaza below, pushing, in the middle and along both edges
+        // push into the stairs from the plaza below, in the middle and along both edges: a rolling board can't
+        // climb 0.34 m risers (#82), it takes an ollie
         int rides = 0, upOk = 0;
         std::string why;
         for (float v : {4.f, 6.f, 9.f, 12.f})
@@ -1888,11 +1928,10 @@ int main() {
                     return bailed || on;
                 });
                 rides++;
-                if (on && !bailed) upOk++;
-                else if (why.empty()) { char w[96]; snprintf(w, sizeof w, " (first miss: %.0f m/s at z %.0f, bailed=%d, stopped at x %.1f)", v, z, bailed, s.p.pos.x); why = w; }
+                if (on) { upOk++; if (why.empty()) { char w[96]; snprintf(w, sizeof w, " (first: %.0f m/s at z %.0f)", v, z); why = w; } }
             }
         snprintf(b, sizeof b, "%d of %d pushes up the stairs reached the deck%s", upOk, rides, why.c_str());
-        check(rides == 12 && upOk == rides, "Union Square stairs ride up", b);
+        check(rides == 12 && upOk == 0, "Union Square stairs take an ollie", b);
 
         // ollie onto each ledge while rolling along it
         int ledges = 0, grinds = 0;

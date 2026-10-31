@@ -578,22 +578,22 @@ bool World::overPier(float x, float z) const {
     return false;
 }
 
-float World::ground(float x, float z, float yRef) const {
+float World::ground(float x, float z, float yRef, float stepUp, const Vector2* lipAt) const {
     float h = terrain(x, z);
     int i = (int)floorf((x - PG_X0) / PG_CELL), j = (int)floorf((z - PG_Z0) / PG_CELL);
     if (i < 0 || j < 0 || i >= pgW || j >= pgH) return h;
     for (int idx : pgrid[(size_t)j * pgW + i]) {
         const Platform& p = plats[idx];
         if (!p.contains(x, z)) continue;
-        float t = p.top(x, z);
-        if (t <= yRef + STEP_UP && t > h) h = t;
+        float t = p.top(x, z), lip = lipAt ? p.top(lipAt->x, lipAt->y) : t;
+        if (lip <= yRef + stepUp && t > h) h = t;
     }
     for (auto& pd : ponds)
         if (x > pd.x0 && x < pd.x1 && z > pd.z0 && z < pd.z1) h = std::min(h, terrain(x, z) - 0.6f);
     return h;
 }
 
-bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size) const {
+bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size, float stepUp, const Vector2* lipAt) const {
     bool hit = false;
     if (size) *size = 0;
     for (int iter = 0; iter < 3; iter++) {
@@ -606,8 +606,8 @@ bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm
                     const Platform& pl = plats[idx];
                     if (!pl.contains(p.x, p.z, r)) continue;
                     float cx = clampf(p.x, pl.x0, pl.x1), cz = clampf(p.z, pl.z0, pl.z1);
-                    float t = pl.top(cx, cz);
-                    if (t <= feetY + STEP_UP || pl.base >= feetY + height) continue;
+                    float t = lipAt ? pl.top(lipAt->x, lipAt->y) : pl.top(cx, cz);
+                    if (t <= feetY + stepUp || pl.base >= feetY + height) continue;
                     float dx = p.x - cx, dz = p.z - cz;
                     float d2 = dx * dx + dz * dz;
                     Vector2 n;
@@ -635,7 +635,8 @@ bool World::collide(Vector3& p, float r, float feetY, float height, Vector2* nrm
     return hit;
 }
 
-bool World::collideSwept(Vector3 from, Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size) const {
+bool World::collideSwept(Vector3 from, Vector3& p, float r, float feetY, float height, Vector2* nrm, float* size,
+                         float stepUp, bool lipAtFrom) const {
     // collide() only looks at where the mover ends up: one step longer than the radius can put the centre past the
     // middle of a thin box, and the push-out then goes out the far side. Steps shorter than the radius never get the
     // centre inside a box it wasn't already overlapping, so every hit is caught from the side it was approached from.
@@ -647,12 +648,13 @@ bool World::collideSwept(Vector3 from, Vector3& p, float r, float feetY, float h
     bool hit = false;
     Vector3 q = {from.x, p.y, from.z};
     float sx = dx / steps, sz = dz / steps;
+    Vector2 lip = {from.x, from.z};
     for (int k = 0; k < steps; k++) {
         q.x += sx;
         q.z += sz;
         Vector2 n;
         float s;
-        if (!collide(q, r, feetY, height, &n, &s)) continue;
+        if (!collide(q, r, feetY, height, &n, &s, stepUp, lipAtFrom ? &lip : nullptr)) continue;
         hit = true;
         if (nrm) *nrm = n;
         if (size) *size = std::max(*size, s);

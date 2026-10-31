@@ -796,7 +796,7 @@ void World::buildSkateSpots() {
         };
         ledge(cx - 25, cz - 15, cx - 10, cz - 14.2f, 0.55f);
         ledge(cx + 10, cz + 14.2f, cx + 25, cz + 15, 0.55f);
-        ledge(cx - 15, cz + 20, cx - 14.2f, cz + 34, 0.55f);   // (over STEP_UP, so it takes an ollie to get on)
+        ledge(cx - 15, cz + 20, cx - 14.2f, cz + 34, 0.55f);   // (like every ledge, over ROLL_UP: it takes an ollie to get on)
         // a terrace dug into the hill: level with the ground on its uphill (west) side, with stairs and handrails
         // running down its downhill (east) face to the plaza below. The ground keeps falling under the stairs, so the
         // bottom step is set just above the highest ground under it (its face then stands only ~0.3 m over the plaza

@@ -525,6 +525,43 @@ int main() {
             check(s2.p.pos.x < tgt->x0, "buildings are solid", b);
         }
     }
+    {   // fast riding into thin solids (poles, house side walls) stops on the near side instead of tunnelling through (issue #83)
+        int tried = 0, through = 0;
+        std::string first;
+        for (const Platform& pl : W.plats) {
+            if (pl.kind != PK_POLE && pl.kind != PK_BUILDING) continue;
+            bool alongX = pl.x1 - pl.x0 < 0.5f;   // thin across x: ride along +x into it, else thin across z: ride along +z
+            if (!alongX && pl.z1 - pl.z0 >= 0.5f) continue;
+            float cx = (pl.x0 + pl.x1) / 2, cz = (pl.z0 + pl.z1) / 2;
+            float sx = alongX ? pl.x0 - 1.5f : cx, sz = alongX ? cz : pl.z0 - 1.5f;
+            float ex = alongX ? pl.x1 + 1.5f : cx, ez = alongX ? cz : pl.z1 + 1.5f;
+            float g0 = W.ground(sx, sz, 500), g1 = W.ground(ex, ez, 500);
+            if (fabsf(g1 - g0) > 0.1f || fabsf(W.terrain(sx, sz) - g0) > 0.1f) continue;   // flat street, nothing to ride up or onto
+            float top = pl.top(cx, cz);
+            if (top < g0 + 2.5f || pl.base > g0 + 0.5f) continue;   // a solid the skater can't hop or pass under
+            Vector3 q = {sx, g0, sz};
+            Vector2 n;
+            if (W.collide(q, 0.6f, g0, 1.7f, &n)) continue;   // start spot clear
+            for (float dt : {1.f / 60, 1.f / 30}) {
+                tried++;
+                Player p;
+                p.spawn({sx, g0, sz}, alongX ? 0 : PI / 2);
+                p.speed = 36;
+                Input in; in.tuck = true;
+                for (int f = 0; f < (int)(0.3f / dt) && p.state != Player::BAIL; f++) {
+                    p.update(dt, in, W);
+                    if ((alongX ? p.pos.x > pl.x1 : p.pos.z > pl.z1) && p.pos.y < top) {
+                        through++;
+                        if (first.empty()) { char w[96]; snprintf(w, sizeof w, " (first: %s at %.1f,%.1f, dt 1/%.0f)", pl.kind == PK_POLE ? "pole" : "wall", cx, cz, 1 / dt); first = w; }
+                        break;
+                    }
+                }
+            }
+            if (tried >= 800) break;
+        }
+        snprintf(b, sizeof b, "%d of %d runs at 36 m/s passed through%s", through, tried, first.c_str());
+        check(tried > 100 && through == 0, "fast rides don't tunnel thin walls", b);
+    }
     {   // Oracle Park's grandstand, scoreboard, Coke bottle and glove are solid (issue #67): push across the field into each
         struct Run { const char* name; float x, z, yaw; bool alongX; float wall; int dir; };
         const Run runs[] = {

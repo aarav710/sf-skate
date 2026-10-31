@@ -526,6 +526,30 @@ int main() {
             check(s2.p.pos.x < tgt->x0, "buildings are solid", b);
         }
     }
+    {   // ride at the Salesforce and Transamerica towers from 8 directions: the skater must stop at the drawn glass,
+        // not metres inside it (#65). Salesforce: 16-gon of radius 23 (apothem 22.6); Transamerica: square base +-18
+        // tapering to the apex 170 m up. Measures the closest the skater gets (radius / largest axis offset).
+        struct T { const char* name; float cx, cz, lo, hi; bool square; };
+        const T towers[] = {{"Salesforce walls at the glass", (gx(22) + gx(23)) / 2, (gz(11) + gz(12)) / 2, 21.5f, 24.0f, false},
+                            {"Transamerica walls at the glass", (gx(21) + gx(22)) / 2, (gz(5) + gz(6)) / 2, 17.3f, 18.8f, true}};
+        for (const T& t : towers) {
+            float worstIn = 1e9f, worstOut = 0;
+            for (int k = 0; k < 8; k++) {
+                float a = k * PI / 4, d0 = t.lo + 7;
+                Sim s; s.spawn(t.cx + cosf(a) * d0, t.cz + sinf(a) * d0, a + PI, 4);
+                float closest = 1e9f;
+                s.run(300, Input{}, [&](Player& q) {
+                    float dx = q.pos.x - t.cx, dz = q.pos.z - t.cz;
+                    closest = std::min(closest, t.square ? std::max(fabsf(dx), fabsf(dz)) : sqrtf(dx * dx + dz * dz));
+                    return false;
+                });
+                worstIn = std::min(worstIn, closest);
+                worstOut = std::max(worstOut, closest);
+            }
+            snprintf(b, sizeof b, "closest %.2f..%.2f m from centre (want %.1f..%.1f)", worstIn, worstOut, t.lo, t.hi);
+            check(worstIn >= t.lo && worstOut <= t.hi, t.name, b);
+        }
+    }
     {   // fast riding into thin solids (poles, house side walls) stops on the near side instead of tunnelling through (issue #83)
         int tried = 0, through = 0;
         std::string first;

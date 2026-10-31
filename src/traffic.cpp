@@ -1030,8 +1030,8 @@ void Traffic::interact(Player& pl) {
     }
     for (auto& c : cars) {
         float dx = pl.pos.x - c.pos.x, dz = pl.pos.z - c.pos.z;
-        if (dx * dx + dz * dz > 100) continue;
         const CarModel& m = carModel(c.type);
+        if (dx * dx + dz * dz > sq(m.halfLen + m.halfWid + 1)) continue;   // the whole body, corners too (an LRV is 22 m long)
         float f0 = cosf(c.yaw), f1 = sinf(c.yaw);
         float lx = dx * f0 + dz * f1, lz = -dx * f1 + dz * f0;
         float px = m.halfLen + 0.35f - fabsf(lx), pz = m.halfWid + 0.35f - fabsf(lz);

@@ -27,13 +27,18 @@ static void clearGulls(std::vector<Bird>& birds, const World& w) {
             for (float z = -R; z <= R; z += 8)
                 if (x * x + z * z <= R * R) hill = std::max(hill, w.terrain(b.home.x + x, b.home.z + z));
         b.alt = std::max(b.alt, hill + 6.f);
-        for (bool moved = true; moved;) {   // raising it can bring the next roof into its band
-            moved = false;
+        // Raising it can bring the next roof into its band, so go round again, but only count a roof that actually
+        // lifts it: in float, (top + 5) - 5 can come out a hair under top, so the roof it was just lifted over still
+        // "overlaps" and would set the same altitude forever. Every lift is strictly higher and lands on one of the
+        // roofs' top + 5, so this ends within near[i].size() + 1 passes; the cap is only a backstop.
+        for (size_t pass = 0; pass <= near[i].size(); pass++) {
+            bool moved = false;
             for (int k : near[i]) {
                 const Platform& pl = w.plats[k];
                 float top = std::max(pl.h0, pl.h1);
-                if (pl.base < b.alt + 5.f && top > b.alt - 5.f) { b.alt = top + 5.f; moved = true; }
+                if (pl.base < b.alt + 5.f && top > b.alt - 5.f && top + 5.f > b.alt) { b.alt = top + 5.f; moved = true; }
             }
+            if (!moved) break;
         }
     }
 }

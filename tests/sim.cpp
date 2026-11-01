@@ -9,7 +9,11 @@
 #include "../src/jetski.h"
 #include "../src/gondola.h"
 #include "../src/jetski.h"
+#include "../src/birds.h"
+#include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <future>
 #include <cstring>
 #include <string>
 #include <algorithm>
@@ -2296,6 +2300,38 @@ int main() {
         snprintf(b, sizeof b, "%d piers, %d decks above the water, %d of %d rides from the promenade onto the deck (least x %.1f)", piers, dry,
                  rode, rides, worstX);
         check(piers == 7 && dry == piers && rode == rides, "Embarcadero piers skateable from shore", b);
+    }
+    {   // gulls get lifted clear of the roofs around their circles, and that finishes: a roof whose (top + 5) - 5
+        // rounds a hair under its top (the 31.89 m block by the {1240, 700} flock) once kept Birds::init lifting the
+        // gull to the same altitude forever and hung the game at startup. Run it on a thread so a hang fails, not stalls.
+        static Birds BD;
+        auto done = std::async(std::launch::async, [] { BD.init(W); });
+        if (done.wait_for(std::chrono::seconds(60)) != std::future_status::ready) {
+            check(false, "gull init finishes", "Birds::init still running after 60 s");
+            printf("\nSOME CHECKS FAILED (%d failed)\n", fails);
+            fflush(stdout);
+            std::_Exit(1);
+        }
+        int gulls = 0, hit = 0;
+        char det[160] = "";
+        for (const Bird& g : BD.birds) {
+            if (!g.gull) continue;
+            gulls++;
+            float reach = 25.f * 1.415f + g.radius * 1.25f + 2.f;   // as gullReach in birds.cpp
+            for (const Platform& pl : W.plats) {
+                if (pl.kind != PK_BUILDING && pl.kind != PK_DECK) continue;
+                float top = std::max(pl.h0, pl.h1);
+                if (top < 8.f) continue;
+                float cx = clampf(g.home.x, pl.x0, pl.x1), cz = clampf(g.home.z, pl.z0, pl.z1);
+                if (sq(cx - g.home.x) + sq(cz - g.home.z) >= sq(reach)) continue;
+                if (pl.base < g.alt + 5.f - 1e-3f && top > g.alt - 5.f + 1e-3f) {   // its band cuts the roof
+                    hit++;
+                    snprintf(det, sizeof det, " (gull at %.0f,%.0f alt %.2f vs roof %.2f..%.2f)", g.home.x, g.home.z, g.alt, pl.base, top);
+                }
+            }
+        }
+        snprintf(b, sizeof b, "%d gulls, %d roof clashes%s", gulls, hit, det);
+        check(gulls >= 30 && hit == 0, "gull init finishes clear of roofs", b);
     }
     {   // roads far from the origin are draped whole: strips laid in Menlo Park (El Camino Real), Oakland and out east,
         // straight and diagonal, wide and paint-thin, cover their full area on the ground (float rounding in world

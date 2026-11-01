@@ -41,12 +41,26 @@ enum : signed char { SMOOTH_CRISP = 0, SMOOTH_ORGANIC = 1, NRM_EXPLICIT = 127 };
 // about 840 MB instead of 1.1 GB while it is generated. Lossless: World::upload() expands it to the same bytes.
 struct MeshRun { unsigned char d[4]; uint32_t end; };
 
+// Everything one leafCloud() call needs to make its leaves again, exactly: the arguments and the generator's state
+// on the way in. The leaves of the whole city are kept like this and meshed only near the camera (World::updateFoliage).
+struct LeafSrc {
+    Vector3 c, rad;
+    float len, width, autumn;
+    Color base;
+    uint32_t rng;
+    uint16_t count;
+    bool withCore;
+    size_t verts() const { return (withCore ? 108 : 0) + (size_t)count * 6; }   // vertices leafCloud() emits
+};
+
 struct MeshBuilder {
     BigVec<float> v;                     // xyz per vertex
     BigVec<MeshRun> c, n;                // colors (rgba), normals (xyz + smoothing flag), run-length coded
     signed char smooth = SMOOTH_CRISP;   // smoothing for the vertices that follow
     const Vector3* volN = nullptr;       // leaf(): explicit normal for a leaf in a canopy
-    // leafCloud() puts its leaves in detailB (drawn up close) and a low-poly blob in farB (drawn further out)
+    // leafCloud() puts a low-poly blob in farB (drawn further out) and its leaves, drawn up close, in leafSrc as a
+    // source to mesh them from later (and in detailB too, if set: the headless checks compare the two)
+    std::vector<LeafSrc>* leafSrc = nullptr;
     MeshBuilder* detailB = nullptr;
     MeshBuilder* farB = nullptr;
 
@@ -103,6 +117,9 @@ struct MeshBuilder {
     // A mass of individual leaves scattered through an ellipsoid (radii r), over a dark core so gaps read as depth
     // instead of sky. Leaves are lighter toward the top and sun side, darker inside and underneath, and a few turn.
     void leafCloud(Vector3 c, Vector3 r, int count, float len, float width, Color base, RNG& rng, bool withCore = true, float autumn = 0.f);
+    void leafCloud(const LeafSrc& s) { RNG r(1); r.s = s.rng; leafCloud(s.c, s.rad, s.count, s.len, s.width, s.base, r, s.withCore, s.autumn); }
+    // the generator draws of leafCloud(), without making anything: rng ends up exactly where leafCloud() leaves it
+    static void skipLeafCloud(int count, float autumn, RNG& rng);
     // Tapered trunk or limb between two points (n-sided).
     void limb(Vector3 a, Vector3 b, float r0, float r1, Color k, int n = 6);
     // A palm frond (arched midrib with paired leaflets) rooted at p heading along dir (horizontal unit vector).

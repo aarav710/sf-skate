@@ -64,8 +64,80 @@ static bool rideRoute(Sim& s, const House& hs, bool fromStreet) {
 
 int main() {
     SetTraceLogLevel(LOG_WARNING);
+    W.keepFoliageMesh = true;   // leaves meshed in place too, to check the sources against
     W.generate(progress);
     char b[256];
+
+    {   // tree leaves: kept as sources and meshed near the camera; they must come out exactly as generated in place
+        size_t cells = 0, same = 0, srcs = 0, pieces = 0, badEst = 0, tooBig = 0, rngBad = 0, verts = 0;
+        for (const FoliageCell& c : W.folCells) {
+            cells++;
+            MeshBuilder all;
+            for (int i = c.p0; i < c.p0 + c.np; i++) {
+                const FoliagePiece& p = W.folPieces[i];
+                MeshBuilder m;
+                W.meshFoliage(p, m);
+                pieces++;
+                badEst += m.count() != p.verts;
+                tooBig += p.verts > FOLIAGE_PIECE && p.s1 - p.s0 > 1;
+                for (int k = p.s0; k < p.s1; k++) all.leafCloud(W.leafSrcs[k]);
+            }
+            verts += all.count();
+            const MeshBuilder& ref = W.builders[c.key + LAYER_DETAIL * LAYER_STRIDE];
+            auto eq = [](const auto& x, const auto& y) { return x.size() == y.size() && !memcmp(x.data(), y.data(), x.size() * sizeof(x[0])); };
+            same += eq(all.v, ref.v) && eq(all.c, ref.c) && eq(all.n, ref.n);
+        }
+        size_t detailCells = 0;   // every detail builder belongs to a cell with sources
+        for (auto& kv : W.builders)
+            if (kv.first / LAYER_STRIDE == LAYER_DETAIL && kv.second.count()) detailCells++;
+        for (const LeafSrc& l : W.leafSrcs) {   // skipping a canopy's draws leaves the generator where meshing it does
+            srcs++;
+            RNG a(1), q(1);
+            a.s = q.s = l.rng;
+            MeshBuilder m;
+            m.leafCloud(l.c, l.rad, l.count, l.len, l.width, l.base, a, l.withCore, l.autumn);
+            MeshBuilder::skipLeafCloud(l.count, l.autumn, q);
+            rngBad += a.s != q.s;
+        }
+        snprintf(b, sizeof b, "%zu/%zu cells identical (%zu with leaves), %zu canopies, %zu pieces, %.1fM verts, est %zu off, %zu big, rng %zu off",
+                 same, cells, detailCells, srcs, pieces, verts / 1e6, badEst, tooBig, rngBad);
+        check(cells > 100 && same == cells && detailCells == cells && !badEst && !tooBig && !rngBad, "foliage: sources remake the leaves", b);
+    }
+    {   // which pieces get meshed near a spot, and which go once it is far away
+        std::vector<int> load, drop;
+        Vector3 at = {-300, 20, 170};   // Alamo Square
+        W.foliagePlan(at, at, load, drop);
+        auto cellD = [](const FoliageCell& c, Vector3 p) {
+            float dx = std::max(std::max(c.c0.x - p.x, 0.f), p.x - c.c1.x), dz = std::max(std::max(c.c0.y - p.z, 0.f), p.z - c.c1.y);
+            return sqrtf(dx * dx + dz * dz);
+        };
+        std::vector<char> want(W.folPieces.size(), 0);
+        int far = 0, missing = 0, order = 0;
+        float last = -1;
+        for (int i : load) {
+            want[i] = 1;
+            float d = cellD(W.folCells[W.folPieces[i].cell], at);
+            if (d >= FOLIAGE_LOAD) far++;
+            if (d < last) order++;
+            last = d;
+        }
+        for (size_t i = 0; i < W.folPieces.size(); i++)
+            if (cellD(W.folCells[W.folPieces[i].cell], at) < DETAIL_DIST && !want[i]) missing++;
+        // pretend all of them are on the GPU, then move to Menlo Park: everything around Alamo Square may go
+        for (auto& p : W.folPieces) p.state = 3;
+        Vector3 mp = {2500, 20, 9500};
+        W.foliagePlan(mp, mp, load, drop);
+        int wrongDrop = 0, keptFar = 0;
+        std::vector<char> dropped(W.folPieces.size(), 0);
+        for (int i : drop) { dropped[i] = 1; if (cellD(W.folCells[W.folPieces[i].cell], mp) <= FOLIAGE_DROP) wrongDrop++; }
+        for (size_t i = 0; i < W.folPieces.size(); i++)
+            if (cellD(W.folCells[W.folPieces[i].cell], mp) > FOLIAGE_DROP && !dropped[i]) keptFar++;
+        for (auto& p : W.folPieces) p.state = 0;
+        snprintf(b, sizeof b, "%zu of %zu pieces wanted at Alamo Sq (%d too far, %d missing, %d out of order); %d dropped wrongly, %d kept",
+                 load.size() ? std::count(want.begin(), want.end(), 1) : 0, W.folPieces.size(), far, missing, order, wrongDrop, keptFar);
+        check(std::count(want.begin(), want.end(), 1) > 0 && !far && !missing && !order && !wrongDrop && !keptFar && drop.size() > 0,
+              "foliage: meshed near, freed far", b);
+    }
 
     {   // pushing on a flat street
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2);

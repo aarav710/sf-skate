@@ -1349,5 +1349,6 @@ void World::generate(void (*progress)(const char*, float)) {
     progress("Drawing the map", 0.9f);
     buildMeta();
     buildMap();
+    planFoliage();
     progress("Uploading to the GPU", 0.96f);
 }

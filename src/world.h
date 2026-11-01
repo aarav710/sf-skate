@@ -113,6 +113,10 @@ constexpr float LAGOON_X0 = -800, LAGOON_X1 = -740, LAGOON_Z0 = -1040, LAGOON_Z1
 enum : int { LAYER_MAIN, LAYER_DETAIL, LAYER_FAR, LAYER_INTERIOR };
 constexpr int LAYER_STRIDE = 10000000;
 constexpr float DETAIL_DIST = 650.f, INTERIOR_DIST = 110.f;
+// tree leaves are meshed per piece of a cell once the camera (or the skater) comes within FOLIAGE_LOAD of the cell,
+// and freed past FOLIAGE_DROP; until all of a cell's pieces are in, the cell keeps its low-poly canopies
+constexpr float FOLIAGE_LOAD = 700.f, FOLIAGE_DROP = 800.f;
+constexpr size_t FOLIAGE_PIECE = 65536;   // most vertices in one piece: 16-bit indices, and a millisecond or two to mesh
 // house rooms are meshed one house at a time once the camera comes within INTERIOR_LOAD, and freed past INTERIOR_DROP
 constexpr float INTERIOR_LOAD = 200.f, INTERIOR_DROP = 225.f;
 // count is the index count; packed chunks store 1/1024 m steps from org (w = 1), see the city shader
@@ -125,6 +129,7 @@ struct Chunk {
     Vector3 mn{}, mx{};
     int layer = 0;
     Vector2 c0{}, c1{};
+    int fol = -1;   // LAYER_FAR: the cell's index in World::folCells (its leaves stand in for this up close)
 };
 
 // A house you can walk into: its ground floor is a real room behind an open door.
@@ -142,6 +147,17 @@ struct House {
 
 // What it takes to build a house's room again: the house, its shell heights, the door and its generator then.
 struct InteriorSrc { House h; float base, top, doorU; RNG hr; };
+// The leaves of one 400 m cell, as leafCloud() sources (World::leafSrcs[first, first + n)), meshed in pieces of
+// up to FOLIAGE_PIECE vertices: pieces [p0, p0 + np) of World::folPieces. ready: every piece is on the GPU.
+struct FoliageCell { int key; Vector2 c0, c1; int p0, np, loaded = 0; bool ready() const { return loaded == np; } };
+struct FoliagePiece {
+    int cell, s0, s1;      // its sources
+    Vector3 mn, mx;        // bounds of the leaves (from the sources: a little generous)
+    size_t verts, gpuBytes = 0;
+    int state = 0;         // 0 not meshed, 1 queued, being meshed or waiting for the GPU, 3 on the GPU
+    Chunk ch;
+};
+struct FoliageStats { double ms = 0, worstBake = 0, gpuMB = 0; int uploaded = 0, freed = 0, loaded = 0, wanted = 0, cellsReady = 0, cellsNear = 0; };
 struct InteriorStats { double ms = 0; int built = 0, cached = 0, missingNear = 0; };   // missingNear: within 30 m, not yet built
 
 struct World {
@@ -157,6 +173,13 @@ struct World {
     // build the rooms near the camera (nearest first, for about budget seconds) and free the far ones
     InteriorStats updateInteriors(Vector3 cam, double budget);
     void freeInteriors();
+    // mesh the leaves of the cells near the camera and the skater (on worker threads; up to about budget seconds a
+    // frame handing them to the GPU, more while the camera's own surroundings are still bare) and free the far ones
+    FoliageStats updateFoliage(Vector3 cam, Vector3 player, double budget);
+    void freeFoliage();   // stops the workers too
+    // which pieces should be meshed for these two viewpoints, nearest cell first (load), and which may go (drop)
+    void foliagePlan(Vector3 cam, Vector3 player, std::vector<int>& load, std::vector<int>& drop) const;
+    void meshFoliage(const FoliagePiece& p, MeshBuilder& out) const;   // the piece's leaves, exactly as generated
 
     // ---- queries ----
     float terrain(float x, float z) const;                    // bare ground height, exactly as the ground mesh draws it
@@ -245,10 +268,16 @@ struct World {
     Chunk water{};
     std::vector<InteriorSrc> interiorSrc;
     std::unordered_map<int, Chunk> interiorMesh;   // index into interiorSrc -> its room
+    std::vector<LeafSrc> leafSrcs;      // every canopy's leaves, cell by cell
+    std::vector<FoliageCell> folCells;
+    std::vector<FoliagePiece> folPieces;
+    std::unordered_map<int, int> folCellAt;   // cell key -> index in folCells
 
     // generation scratch
     std::unordered_map<int, MeshBuilder> builders;
     MeshBuilder waterB;
+    std::unordered_map<int, std::vector<LeafSrc>> leafScratch;   // per cell key, as generated
+    bool keepFoliageMesh = false;    // also mesh the leaves into the detail layer while generating (headless checks)
     int layer = LAYER_MAIN;          // which layer mb() builds into
     MeshBuilder& mb(float x, float z);
     MeshBuilder& mbKey(int key) { return builders[key]; }
@@ -279,6 +308,7 @@ private:
     void buildAirport();
     void buildGondolas();
     void buildMeta();
+    void planFoliage();   // leafScratch -> leafSrcs, folCells, folPieces
 
     int addPlat(const Platform& p);
     void addBox(float x0, float z0, float x1, float z1, float base, float top, uint8_t kind,

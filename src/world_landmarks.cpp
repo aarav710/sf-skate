@@ -1344,7 +1344,7 @@ void World::generate(void (*progress)(const char*, float)) {
     buildMenlo();
     buildGondolas();
     // nothing from here on builds south of SFO, so the Peninsula and Menlo Park can bake while the city goes up
-    if (earlyBake) startEarlyBake();
+    if (earlyBake || freezeEarly) startEarlyBake();
     step("Building neighborhoods", 0.66f);
     buildBlocks(sf, false);
     buildBlocks(oak, true);

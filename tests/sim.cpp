@@ -65,8 +65,18 @@ static bool rideRoute(Sim& s, const House& hs, bool fromStreet) {
 int main() {
     SetTraceLogLevel(LOG_WARNING);
     W.keepFoliageMesh = true;   // leaves meshed in place too, to check the sources against
+    W.freezeEarly = true;       // the cells the game bakes during generation: any later write to one stops the run
     W.generate(progress);
     char b[256];
+
+    {   // those cells were frozen at the same point and with the same cutoff as in the game, and nothing wrote to them since
+        int frozen = 0;
+        size_t verts = 0;
+        for (auto& kv : W.builders)
+            if (kv.second.frozen) { frozen++; verts += kv.second.count(); }
+        snprintf(b, sizeof b, "%d cells, %zu vertices, final before the city is built", frozen, verts);
+        check(frozen > 0, "early bake cells are final", b);
+    }
 
     {   // tree leaves: kept as sources and meshed near the camera; they must come out exactly as generated in place
         size_t cells = 0, same = 0, srcs = 0, pieces = 0, badEst = 0, tooBig = 0, rngBad = 0, verts = 0;
@@ -2431,6 +2441,7 @@ int main() {
                                 {{4088.5f, 500}, {4091.1f, 500}, 0.3f}};
         int bad = 0;
         char det[96] = "";
+        for (auto& kv : W.builders) kv.second.frozen = false;   // generation is over (no bake here): these strips may go anywhere
         for (int k = 0; k < (int)(sizeof strips / sizeof strips[0]); k++) {
             const Strip& st = strips[k];
             Color mark = col(1, 2, 3 + k, M_GROUND);   // a color nothing else uses

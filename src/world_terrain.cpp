@@ -1,7 +1,6 @@
 // Terrain shape (coastlines + hills), zones, collision queries, ground mesh and minimap.
 #include "world_internal.h"
 #include <thread>
-#include <atomic>
 #include <mutex>
 #include <condition_variable>
 #include <deque>
@@ -1514,7 +1513,7 @@ struct World::BakeJobs {
         }
         work.notify_all();
         while (th.size() < nt)
-            th.emplace_back([this, &w] {
+            th.emplace_back([this, pw = &w] {
                 for (;;) {
                     Item* it;
                     {
@@ -1524,7 +1523,7 @@ struct World::BakeJobs {
                         it = todo.front();
                         todo.pop_front();
                     }
-                    bakeChunk(w, *it->mb, it->bk);
+                    bakeChunk(*pw, *it->mb, it->bk);
                     std::lock_guard<std::mutex> lk(m);
                     ready.push_back(it);
                     done.notify_one();
@@ -1565,12 +1564,17 @@ void World::startEarlyBake() {
         if (base >= 0 && base < 800000 && WZ0 + (base / 1000) * CHUNK >= EARLY_BAKE_Z && kv.second.count() >= 3)
             list.push_back(&kv.second);
     }
-    bake = std::make_shared<BakeJobs>();
-    bake->add(*this, list, std::max(2u, std::thread::hardware_concurrency()) - 1);   // this thread goes on generating
+    for (MeshBuilder* b : list) b->frozen = true;   // from here on, a write to one stops the program
     TraceLog(LOG_INFO, "SFSKATE: early bake of %zu chunks", list.size());
+    if (!earlyBake) return;   // freezeEarly alone: the headless checks, no GL
+    bake = std::make_unique<BakeJobs>();
+    bake->add(*this, list, std::max(2u, std::thread::hardware_concurrency()) - 1);   // this thread goes on generating
 }
 
 void World::uploadReady() { bake->upload(false); }
+
+World::World() = default;
+World::~World() = default;
 
 void World::upload(const std::function<void()>& meanwhile) {
     // every chunk in map order (the draw order), including the ones baked early (frozen: emptied by their bake)
@@ -1580,9 +1584,9 @@ void World::upload(const std::function<void()>& meanwhile) {
         if (kv.second.frozen || kv.second.count() >= 3) { list.push_back(&kv.second); keys.push_back(kv.first); }
     list.push_back(&waterB);
     keys.push_back(-1);
+    if (!bake) bake = std::make_unique<BakeJobs>();
     for (MeshBuilder* b : list)
-        if (!b->frozen) rest.push_back(b);
-    if (!bake) bake = std::make_shared<BakeJobs>();
+        if (!bake->of.count(b)) rest.push_back(b);
     size_t early = bake->uploaded;
     // normals, ground heights, packing and dedup for every chunk in parallel; this thread hands each one to the GPU
     double bakeT0 = GetTime();

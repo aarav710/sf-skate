@@ -1,4 +1,11 @@
 #include "mesh.h"
+#include <cstdio>
+#include <cstdlib>
+
+void MeshBuilder::frozenWrite() {
+    fprintf(stderr, "SFSKATE: geometry added to a builder after it was handed to the bake (see World::startEarlyBake)\n");
+    abort();
+}
 
 void MeshBuilder::hexa(const Vector3 p[8], Color side, Color top, float ao, bool bottom) {
     Color sb = scaleC(side, ao);

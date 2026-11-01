@@ -1311,7 +1311,9 @@ void World::buildMeta() {
 
 // ---------------------------------------------------------------- generation order
 void World::generate(void (*progress)(const char*, float)) {
-    progress("Shaping the hills of San Francisco", 0.02f);
+    // between steps: hand whatever the early bake has finished to the GPU
+    auto step = [&](const char* msg, float f) { if (bake) uploadReady(); progress(msg, f); };
+    step("Shaping the hills of San Francisco", 0.02f);
     buildHeightfield();
     sf.x0 = -1375; sf.z0 = -1095; sf.sp = 110; sf.ni = 25; sf.nj = 27;
     oak.x0 = 4080; oak.z0 = -1565; oak.sp = 95; oak.ni = 7; oak.nj = 36;
@@ -1319,39 +1321,41 @@ void World::generate(void (*progress)(const char*, float)) {
     buildGrid(oak);
     sf.setEdge(16, 3, 0, false); // Lombard's crooked block replaces the straight street
     sf.setEdge(20, 2, 0, false); // Coit Tower's base (880, -880) stands on this block of the street up Telegraph Hill
-    progress("Laying the ground", 0.25f);
+    step("Laying the ground", 0.25f);
     buildTerrainMesh();
     buildBackdrop();
-    progress("Paving the streets", 0.4f);
+    step("Paving the streets", 0.4f);
     buildRoads(sf, 0);
     buildRoads(oak, 0);
     buildMarket();
     buildLombard();
     buildTramLines();
-    progress("Building the Golden Gate Bridge", 0.5f);
+    step("Building the Golden Gate Bridge", 0.5f);
     buildGoldenGate();
     buildBayBridge();
-    progress("Raising landmarks", 0.58f);
+    step("Raising landmarks", 0.58f);
     buildLandmarks();
     buildWaterfront();
     buildSkateSpots();
     buildAirport();
-    progress("Laying Caltrain down the Peninsula", 0.62f);
+    step("Laying Caltrain down the Peninsula", 0.62f);
     buildCaltrain();
-    progress("Planting the oaks of Menlo Park", 0.64f);
+    step("Planting the oaks of Menlo Park", 0.64f);
     buildMenlo();
     buildGondolas();
-    progress("Building neighborhoods", 0.66f);
+    // nothing from here on builds south of SFO, so the Peninsula and Menlo Park can bake while the city goes up
+    if (earlyBake || freezeEarly) startEarlyBake();
+    step("Building neighborhoods", 0.66f);
     buildBlocks(sf, false);
     buildBlocks(oak, true);
-    progress("Planting trees and parking cars", 0.8f);
+    step("Planting trees and parking cars", 0.8f);
     buildStreetFurniture(sf, false);
     buildIntersections(sf);
     buildStreetFurniture(oak, true);
     buildParks();
-    progress("Drawing the map", 0.9f);
+    step("Drawing the map", 0.9f);
     buildMeta();
     buildMap();
     planFoliage();
-    progress("Uploading to the GPU", 0.96f);
+    step("Uploading to the GPU", 0.96f);
 }

@@ -4,6 +4,7 @@
 #include "mesh.h"
 #include <unordered_map>
 #include <functional>
+#include <memory>
 
 // Terrain extent (includes background hills) and the area the skater can reach.
 constexpr float WX0 = -2900, WX1 = 6500, WZ0 = -3900, WZ1 = 3400;
@@ -161,6 +162,8 @@ struct FoliageStats { double ms = 0, worstBake = 0, gpuMB = 0; int uploaded = 0,
 struct InteriorStats { double ms = 0; int built = 0, cached = 0, missingNear = 0; };   // missingNear: within 30 m, not yet built
 
 struct World {
+    World();    // out of line, with the destructor: BakeJobs is only known in world_terrain.cpp
+    ~World();
     // ---- generation ----
     void generate(void (*progress)(const char*, float));
     void upload(const std::function<void()>& meanwhile = {});   // runs meanwhile() on this thread during the bake
@@ -278,6 +281,10 @@ struct World {
     MeshBuilder waterB;
     std::unordered_map<int, std::vector<LeafSrc>> leafScratch;   // per cell key, as generated
     bool keepFoliageMesh = false;    // also mesh the leaves into the detail layer while generating (headless checks)
+    // bake the far south (the Peninsula and Menlo Park) on worker threads as soon as generation is done with it, and
+    // hand it to the GPU between generation steps: needs a GL context on the thread that calls generate()
+    bool earlyBake = false;
+    bool freezeEarly = false;   // headless checks: mark those cells done at the same point, without baking them
     int layer = LAYER_MAIN;          // which layer mb() builds into
     MeshBuilder& mb(float x, float z);
     MeshBuilder& mbKey(int key) { return builders[key]; }
@@ -333,6 +340,11 @@ private:
     void deckSegments(int axis, float center, float halfW, const std::vector<Vector2>& prof,
                       Color sideCol, Color railCol, const char* railName, int mbKeyBase);
     float deckHeightAt(const std::vector<Vector2>& prof, float s) const;
+
+    struct BakeJobs;
+    void startEarlyBake();   // freeze (and with earlyBake, bake) the cells nothing more will be built in
+    void uploadReady();      // hand what is baked so far to the GPU
+    std::unique_ptr<BakeJobs> bake;   // declared after builders, so its threads are stopped before they go
 };
 
 // Zone flags

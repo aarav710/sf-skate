@@ -1,10 +1,11 @@
 // Terrain shape (coastlines + hills), zones, collision queries, ground mesh and minimap.
 #include "world_internal.h"
 #include <thread>
-#include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <deque>
 #include <functional>
+#include <climits>
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 
@@ -1248,7 +1249,11 @@ static_assert(sizeof(GVert) == 24, "packed vertex");
 static void bakeVerts(const World& w, const MeshBuilder& b, BigVec<GVert>& out) {
     size_t n = b.count() / 3 * 3;
     out.resize(n);
-    size_t smooth = 0;   // vertices whose normal is worked out here
+    // the corners whose normal is worked out here, by position rounded to 2 mm: x and y in k, then z
+    struct Key { uint64_t k; uint32_t i; int z; };
+    BigVec<Key> keys;
+    keys.reserve(n);   // pages are only touched as they fill
+    int lo[3] = {INT_MAX, INT_MAX, INT_MAX}, hi[3] = {INT_MIN, INT_MIN, INT_MIN};
     size_t rc = 0, rn = 0;   // the color and normal runs vertex i falls in
     for (size_t i = 0; i < n; i++) {
         GVert& g = out[i];
@@ -1257,10 +1262,12 @@ static void bakeVerts(const World& w, const MeshBuilder& b, BigVec<GVert>& out) 
         while (b.n[rn].end <= i) rn++;
         memcpy(g.c, b.c[rc].d, 4);
         memcpy(g.n, b.n[rn].d, 4);
-        if (g.n[3] == NRM_EXPLICIT) g.gy = g.y - 100.f;   // terrain, foliage: no contact shadow
-        else smooth++;
+        if (g.n[3] == NRM_EXPLICIT) { g.gy = g.y - 100.f; continue; }   // terrain, foliage: no contact shadow
+        int p[3] = {(int)lroundf(g.x * 500.f), (int)lroundf(g.y * 500.f), (int)lroundf(g.z * 500.f)};
+        for (int a = 0; a < 3; a++) { lo[a] = std::min(lo[a], p[a]); hi[a] = std::max(hi[a], p[a]); }
+        keys.push_back({(uint64_t)(uint32_t)p[0] << 32 | (uint32_t)p[1], (uint32_t)i, p[2]});
     }
-    if (!smooth) return;   // all normals given: nothing more to do
+    if (keys.empty()) return;   // all normals given: nothing more to do
     BigVec<Vector3> fa(n / 3), fu(n / 3);   // area-weighted and unit face normals
     for (size_t t = 0; t < n / 3; t++) {
         if (out[t * 3].n[3] == NRM_EXPLICIT && out[t * 3 + 1].n[3] == NRM_EXPLICIT && out[t * 3 + 2].n[3] == NRM_EXPLICIT) continue;
@@ -1271,24 +1278,40 @@ static void bakeVerts(const World& w, const MeshBuilder& b, BigVec<GVert>& out) 
         fa[t] = Vector3Scale(c, 0.5f);
         fu[t] = l > 1e-9f ? Vector3Scale(c, 1.f / l) : V3(0, 1, 0);
     }
-    struct Key { int x, y, z; uint32_t i; };
-    BigVec<Key> keys;
-    keys.reserve(smooth);
-    for (size_t i = 0; i < n; i++) {
-        const GVert& g = out[i];
-        if (g.n[3] == NRM_EXPLICIT) continue;
-        keys.push_back({(int)lroundf(g.x * 500.f), (int)lroundf(g.y * 500.f), (int)lroundf(g.z * 500.f), (uint32_t)i});
+    // when the chunk's spans fit, k becomes x, y, z from its corner in one number: that orders the corners exactly
+    // as comparing x, y, z in turn does, so the sort (and the order the normals are summed in) comes out the same
+    int bits[3];
+    for (int a = 0; a < 3; a++) {
+        uint64_t span = (uint64_t)((int64_t)hi[a] - lo[a]);
+        bits[a] = 0;
+        while (span >> bits[a]) bits[a]++;
     }
-    std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
-        return a.x != b.x ? a.x < b.x : a.y != b.y ? a.y < b.y : a.z < b.z;
-    });
+    if (bits[0] + bits[1] + bits[2] <= 64) {
+        for (Key& q : keys) {
+            uint64_t x = (uint64_t)((int64_t)(int)(q.k >> 32) - lo[0]), y = (uint64_t)((int64_t)(int)(uint32_t)q.k - lo[1]);
+            uint64_t z = (uint64_t)((int64_t)q.z - lo[2]);
+            q.k = (x << bits[1] << bits[2]) | (y << bits[2]) | z;
+        }
+        std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) { return a.k < b.k; });
+    } else {
+        std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
+            int ax = (int)(a.k >> 32), bx = (int)(b.k >> 32), ay = (int)(uint32_t)a.k, by = (int)(uint32_t)b.k;
+            return ax != bx ? ax < bx : ay != by ? ay < by : a.z < b.z;
+        });
+    }
+    // ground height: one lookup, reused for corners at exactly the same x,z (nearly all of a group, often the next)
+    float gx = out[keys[0].i].x, gz = out[keys[0].i].z, gh = w.terrain(gx, gz);
     for (size_t s0 = 0; s0 < keys.size();) {
         size_t s1 = s0 + 1;
-        while (s1 < keys.size() && keys[s1].x == keys[s0].x && keys[s1].y == keys[s0].y && keys[s1].z == keys[s0].z) s1++;
+        while (s1 < keys.size() && keys[s1].k == keys[s0].k && keys[s1].z == keys[s0].z) s1++;
         bool big = s1 - s0 > 48;   // a fan of dozens of faces: not worth smoothing
-        // ground height under the group: one lookup, reused for corners at exactly the same x,z (nearly all of them)
-        float gx = out[keys[s0].i].x, gz = out[keys[s0].i].z, gh = w.terrain(gx, gz);
         for (size_t a = s0; a < s1; a++) {
+            if (a + 16 < keys.size()) {   // corners come in position order, so all over the arrays: fetch ahead
+                uint32_t pi = keys[a + 16].i;
+                __builtin_prefetch(&out[pi]);
+                __builtin_prefetch(&fu[pi / 3]);
+                __builtin_prefetch(&fa[pi / 3]);
+            }
             GVert& g = out[keys[a].i];
             if (memcmp(&g.x, &gx, 4) || memcmp(&g.z, &gz, 4)) { gx = g.x; gz = g.z; gh = w.terrain(gx, gz); }
             g.gy = gh;
@@ -1351,16 +1374,28 @@ template <class V, class F> static void dedup(size_t n, F get, BigVec<V>& uniq, 
     size_t cap = 64;
     while (cap < n + n / 2) cap <<= 1;
     BigVec<uint32_t> table(cap, UINT32_MAX);
-    uniq.reserve(n / 3 + 16);
+    uniq.reserve(n);   // pages are only touched as they fill
     idx.resize(n);
-    for (size_t i = 0; i < n; i++) {
-        V v;
+    // each vertex is made and hashed AHEAD steps before its lookup, and its slot fetched in the meantime (the
+    // lookups themselves stay in order, so the result is the same)
+    constexpr size_t AHEAD = 16;
+    V ring[AHEAD];
+    size_t slot[AHEAD];
+    auto make = [&](size_t i) {
+        V& v = ring[i % AHEAD];
         get(i, v);
         uint32_t w[sizeof(V) / 4];
         uint64_t h = 0x9E3779B97F4A7C15ull;
         memcpy(w, &v, sizeof(V));
         for (uint32_t x : w) { h = (h ^ x) * 0xff51afd7ed558ccdull; h ^= h >> 31; }
-        size_t s = h & (cap - 1);
+        slot[i % AHEAD] = h & (cap - 1);
+        __builtin_prefetch(&table[slot[i % AHEAD]]);
+    };
+    for (size_t i = 0; i < n && i < AHEAD; i++) make(i);
+    for (size_t i = 0; i < n; i++) {
+        V v = ring[i % AHEAD];
+        size_t s = slot[i % AHEAD];
+        if (i + AHEAD < n) make(i + AHEAD);
         while (table[s] != UINT32_MAX && memcmp(&uniq[table[s]], &v, sizeof(V))) s = (s + 1) & (cap - 1);
         if (table[s] == UINT32_MAX) { table[s] = (uint32_t)uniq.size(); uniq.push_back(v); }
         idx[i] = table[s];
@@ -1464,68 +1499,141 @@ static Chunk uploadBaked(Baked& bk) {
     return ch;
 }
 
-void World::upload(const std::function<void()>& meanwhile) {
-    std::vector<MeshBuilder*> list;
-    std::vector<int> keys;
-    for (auto& kv : builders)
-        if (kv.second.count() >= 3) { list.push_back(&kv.second); keys.push_back(kv.first); }
-    list.push_back(&waterB);
-    keys.push_back(-1);
-    // normals, ground heights, packing and dedup for every chunk in parallel; this thread hands each one to the GPU
-    // as soon as it is ready and frees it, so the baked copy of the whole city is never in memory at once
-    std::vector<Baked> baked(list.size());
-    // biggest chunks first so no thread is left with a big one at the end
-    std::vector<size_t> order(list.size());
-    for (size_t k = 0; k < order.size(); k++) order[k] = k;
-    std::vector<size_t> sizes(list.size());
-    for (size_t k = 0; k < list.size(); k++) sizes[k] = list[k]->count();
-    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return sizes[a] > sizes[b]; });
-    std::atomic<size_t> next{0};
-    std::mutex readyM;
-    std::condition_variable readyCv;
-    std::vector<size_t> ready;   // baked, waiting for upload
-    unsigned nt = std::max(2u, std::thread::hardware_concurrency());
+// The cells south of here are finished before the city itself is built (see World::generate)
+constexpr float EARLY_BAKE_Z = 2900;   // the first row of cells clear of SFO
+
+// Builders bake on worker threads and come back to this (the GL) thread for the GPU, nearly as soon as they are
+// ready, so the baked copy of the whole city is never in memory at once. Work can be added in batches: the cells
+// generation is done with early (startEarlyBake), then everything else (upload).
+struct World::BakeJobs {
+    struct Item { MeshBuilder* mb; Baked bk; Chunk ch; };
+    std::deque<Item> items;                          // this thread only (workers get pointers)
+    std::unordered_map<const MeshBuilder*, Item*> of;
+    std::deque<Item*> todo;                          // waiting for a worker
+    std::vector<Item*> ready;                        // baked, waiting for the GPU
+    bool closed = false;                             // nothing more to come: idle workers leave
+    std::mutex m;
+    std::condition_variable work, done;
     std::vector<std::thread> th;
-    double bakeT0 = GetTime();
-    for (unsigned t = 0; t < nt; t++)
-        th.emplace_back([&] {
-            for (size_t q; (q = next++) < order.size();) {
-                bakeChunk(*this, *list[order[q]], baked[order[q]]);
-                std::lock_guard<std::mutex> lk(readyM);
-                ready.push_back(order[q]);
-                readyCv.notify_one();
-            }
-        });
-    if (meanwhile) meanwhile();   // GL setup on this thread while the workers bake
-    double upT0 = GetTime();
-    size_t verts = 0, uniq = 0, idxN = 0, packedV = 0, gpuBytes = 0;
+    size_t uploaded = 0, verts = 0, uniq = 0, idxN = 0, packedV = 0, gpuBytes = 0;
     int idx32 = 0, floatCh = 0;
-    std::vector<Chunk> done(list.size());   // uploaded, kept in list order
-    for (size_t left = list.size(); left;) {
-        std::vector<size_t> now;
+
+    ~BakeJobs() {
         {
-            std::unique_lock<std::mutex> lk(readyM);
-            readyCv.wait(lk, [&] { return !ready.empty(); });
-            now.swap(ready);
+            std::lock_guard<std::mutex> lk(m);
+            todo.clear();
         }
-        for (size_t k : now) {
-            Baked& bk = baked[k];
-            verts += bk.in;
-            uniq += bk.verts;
-            idxN += bk.ch.count;
-            if (bk.ch.packed) packedV += bk.verts;
-            else floatCh++;
-            idx32 += bk.ch.idx32;
-            gpuBytes += bk.a.size() + bk.b.size() + bk.idx.size();
-            done[k] = uploadBaked(bk);
-            bk = Baked{};
-            left--;
+        close();
+    }
+    void close() {
+        {
+            std::lock_guard<std::mutex> lk(m);
+            closed = true;
+        }
+        work.notify_all();
+        for (auto& t : th) t.join();
+        th.clear();
+    }
+    // queue these (biggest first so no thread is left with a big one at the end) and keep nt workers on the queue
+    void add(const World& w, std::vector<MeshBuilder*> mbs, unsigned nt) {
+        std::stable_sort(mbs.begin(), mbs.end(), [](const MeshBuilder* a, const MeshBuilder* b) { return a->count() > b->count(); });
+        {
+            std::lock_guard<std::mutex> lk(m);
+            for (MeshBuilder* b : mbs) {
+                b->frozen = true;
+                items.push_back({b, {}, {}});
+                of[b] = &items.back();
+                todo.push_back(&items.back());
+            }
+        }
+        work.notify_all();
+        while (th.size() < nt)
+            th.emplace_back([this, pw = &w] {
+                for (;;) {
+                    Item* it;
+                    {
+                        std::unique_lock<std::mutex> lk(m);
+                        work.wait(lk, [&] { return closed || !todo.empty(); });
+                        if (todo.empty()) return;
+                        it = todo.front();
+                        todo.pop_front();
+                    }
+                    bakeChunk(*pw, *it->mb, it->bk);
+                    std::lock_guard<std::mutex> lk(m);
+                    ready.push_back(it);
+                    done.notify_one();
+                }
+            });
+    }
+    // to the GPU: what is baked so far, or (all) everything queued, waiting for it
+    void upload(bool all) {
+        for (;;) {
+            std::vector<Item*> now;
+            {
+                std::unique_lock<std::mutex> lk(m);
+                if (all) done.wait(lk, [&] { return !ready.empty() || uploaded == items.size(); });
+                now.swap(ready);
+            }
+            for (Item* it : now) {
+                Baked& bk = it->bk;
+                verts += bk.in;
+                uniq += bk.verts;
+                idxN += bk.ch.count;
+                if (bk.ch.packed) packedV += bk.verts;
+                else floatCh++;
+                idx32 += bk.ch.idx32;
+                gpuBytes += bk.a.size() + bk.b.size() + bk.idx.size();
+                it->ch = uploadBaked(bk);
+                bk = Baked{};
+                uploaded++;
+            }
+            if (!all || uploaded == items.size()) return;
         }
     }
-    for (auto& t : th) t.join();
-    TraceLog(LOG_INFO, "SFSKATE: bake and upload %.3fs (%.3fs after the renderer setup)", GetTime() - bakeT0, GetTime() - upT0);
+};
+
+void World::startEarlyBake() {
+    std::vector<MeshBuilder*> list;
+    for (auto& kv : builders) {
+        int base = kv.first % LAYER_STRIDE;
+        if (base >= 0 && base < 800000 && WZ0 + (base / 1000) * CHUNK >= EARLY_BAKE_Z && kv.second.count() >= 3)
+            list.push_back(&kv.second);
+    }
+    for (MeshBuilder* b : list) b->frozen = true;   // from here on, a write to one stops the program
+    TraceLog(LOG_INFO, "SFSKATE: early bake of %zu chunks", list.size());
+    if (!earlyBake) return;   // freezeEarly alone: the headless checks, no GL
+    bake = std::make_unique<BakeJobs>();
+    bake->add(*this, list, std::max(2u, std::thread::hardware_concurrency()) - 1);   // this thread goes on generating
+}
+
+void World::uploadReady() { bake->upload(false); }
+
+World::World() = default;
+World::~World() = default;
+
+void World::upload(const std::function<void()>& meanwhile) {
+    // every chunk in map order (the draw order), including the ones baked early (frozen: emptied by their bake)
+    std::vector<MeshBuilder*> list, rest;
+    std::vector<int> keys;
+    for (auto& kv : builders)
+        if (kv.second.frozen || kv.second.count() >= 3) { list.push_back(&kv.second); keys.push_back(kv.first); }
+    list.push_back(&waterB);
+    keys.push_back(-1);
+    if (!bake) bake = std::make_unique<BakeJobs>();
+    for (MeshBuilder* b : list)
+        if (!bake->of.count(b)) rest.push_back(b);
+    size_t early = bake->uploaded;
+    // normals, ground heights, packing and dedup for every chunk in parallel; this thread hands each one to the GPU
+    double bakeT0 = GetTime();
+    bake->add(*this, rest, std::max(2u, std::thread::hardware_concurrency()));
+    if (meanwhile) meanwhile();   // GL setup on this thread while the workers bake
+    double upT0 = GetTime();
+    bake->upload(true);
+    bake->close();
+    TraceLog(LOG_INFO, "SFSKATE: bake and upload %.3fs (%.3fs after the renderer setup), %zu chunks uploaded during generation",
+             GetTime() - bakeT0, GetTime() - upT0, early);
     for (size_t k = 0; k < list.size(); k++) {
-        Chunk ch = done[k];
+        Chunk ch = bake->of[list[k]]->ch;
         if (list[k] == &waterB) { water = ch; continue; }
         // the cell's own square decides when a layer switches, so the detail and far layers trade places exactly
         int base = keys[k] % LAYER_STRIDE;
@@ -1542,9 +1650,11 @@ void World::upload(const std::function<void()>& meanwhile) {
         }
         chunks.push_back(ch);
     }
-    TraceLog(LOG_INFO, "SFSKATE: %zu static vertices in %d chunks", verts, (int)chunks.size());
+    const BakeJobs& b = *bake;
+    TraceLog(LOG_INFO, "SFSKATE: %zu static vertices in %d chunks", b.verts, (int)chunks.size());
     TraceLog(LOG_INFO, "SFSKATE: %zu unique vertices (%zu packed, %zu float in %d chunks), %zu indices (%d chunks 32-bit), %.0f MB on GPU",
-             uniq, packedV, uniq - packedV, floatCh, idxN, idx32, gpuBytes / 1048576.0);
+             b.uniq, b.packedV, b.uniq - b.packedV, b.floatCh, b.idxN, b.idx32, b.gpuBytes / 1048576.0);
+    bake.reset();
     builders.clear();
 }
 

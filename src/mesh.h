@@ -63,6 +63,8 @@ struct MeshBuilder {
     std::vector<LeafSrc>* leafSrc = nullptr;
     MeshBuilder* detailB = nullptr;
     MeshBuilder* farB = nullptr;
+    bool frozen = false;   // handed to the bake (World::upload, or early in World::generate): nothing may add to it
+    [[noreturn]] static void frozenWrite();   // stops the program: geometry would be lost, or race with the bake
 
     size_t count() const { return v.size() / 3; }
     static inline void addRun(BigVec<MeshRun>& r, const void* d) {   // one more vertex with these 4 bytes
@@ -73,12 +75,14 @@ struct MeshBuilder {
         r.push_back(q);
     }
     inline void vert(Vector3 p, Color k) {
+        if (frozen) frozenWrite();
         v.push_back(p.x); v.push_back(p.y); v.push_back(p.z);
         addRun(c, &k);
         signed char nn[4] = {0, 0, 0, smooth};
         addRun(n, nn);
     }
     inline void vertN(Vector3 p, Color k, Vector3 nn) {
+        if (frozen) frozenWrite();
         v.push_back(p.x); v.push_back(p.y); v.push_back(p.z);
         addRun(c, &k);
         float l = sqrtf(nn.x * nn.x + nn.y * nn.y + nn.z * nn.z);

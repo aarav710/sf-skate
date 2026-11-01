@@ -1152,11 +1152,91 @@ MeshBuilder& World::mb(float x, float z) {
     int cx = (int)floorf((x - WX0) / CHUNK), cz = (int)floorf((z - WZ0) / CHUNK);
     int key = cz * 1000 + cx;
     MeshBuilder& b = builders[key + layer * LAYER_STRIDE];
-    // foliage built through this cell goes to its detail layer, with a stand-in for the far layer
-    b.detailB = &builders[key + LAYER_DETAIL * LAYER_STRIDE];
+    // foliage built through this cell keeps its leaves as sources to mesh near the camera (World::updateFoliage),
+    // with a stand-in for the far layer
+    b.leafSrc = &leafScratch[key];
+    b.detailB = keepFoliageMesh ? &builders[key + LAYER_DETAIL * LAYER_STRIDE] : nullptr;
     b.farB = &builders[key + LAYER_FAR * LAYER_STRIDE];
     return b;
 }
+
+void World::planFoliage() {
+    std::vector<int> keys;
+    for (auto& kv : leafScratch)
+        if (!kv.second.empty()) keys.push_back(kv.first);
+    std::sort(keys.begin(), keys.end());
+    leafSrcs.clear(); folCells.clear(); folPieces.clear(); folCellAt.clear();
+    for (int key : keys) {
+        const std::vector<LeafSrc>& src = leafScratch[key];
+        FoliageCell fc;
+        fc.key = key;
+        fc.c0 = {WX0 + (key % 1000) * CHUNK, WZ0 + (key / 1000) * CHUNK};
+        fc.c1 = {fc.c0.x + CHUNK, fc.c0.y + CHUNK};
+        fc.p0 = (int)folPieces.size();
+        int first = (int)leafSrcs.size();
+        leafSrcs.insert(leafSrcs.end(), src.begin(), src.end());
+        // consecutive canopies (one yard, one street) up to FOLIAGE_PIECE vertices a piece
+        for (int s0 = first; s0 < (int)leafSrcs.size();) {
+            FoliagePiece p;
+            p.cell = (int)folCells.size();
+            p.s0 = s0;
+            p.verts = 0;
+            p.mn = {1e9f, 1e9f, 1e9f};
+            p.mx = {-1e9f, -1e9f, -1e9f};
+            int s1 = s0;
+            for (; s1 < (int)leafSrcs.size() && (s1 == s0 || p.verts + leafSrcs[s1].verts() <= FOLIAGE_PIECE); s1++) {
+                const LeafSrc& l = leafSrcs[s1];
+                p.verts += l.verts();
+                float m = l.len * 1.3f;   // a leaf reaches past the cloud's radius by up to its (scaled) length
+                Vector3 e = {l.rad.x + m, l.rad.y + m, l.rad.z + m};
+                p.mn = Vector3Min(p.mn, Vector3Subtract(l.c, e));
+                p.mx = Vector3Max(p.mx, Vector3Add(l.c, e));
+            }
+            p.s1 = s1;
+            folPieces.push_back(p);
+            s0 = s1;
+        }
+        fc.np = (int)folPieces.size() - fc.p0;
+        folCellAt[key] = (int)folCells.size();
+        folCells.push_back(fc);
+    }
+    leafScratch.clear();
+    for (auto& kv : builders) kv.second.leafSrc = nullptr;
+}
+
+void World::meshFoliage(const FoliagePiece& p, MeshBuilder& out) const {
+    out.v.reserve(p.verts * 3);
+    for (int s = p.s0; s < p.s1; s++) out.leafCloud(leafSrcs[s]);
+}
+
+// distance in the ground plane from (x, z) to a box
+static float boxDist2(Vector2 c0, Vector2 c1, float x, float z) {
+    float dx = std::max(std::max(c0.x - x, 0.f), x - c1.x), dz = std::max(std::max(c0.y - z, 0.f), z - c1.y);
+    return sqrtf(dx * dx + dz * dz);
+}
+
+void World::foliagePlan(Vector3 cam, Vector3 player, std::vector<int>& load, std::vector<int>& drop) const {
+    load.clear(); drop.clear();
+    std::vector<std::pair<std::pair<float, float>, int>> want;
+    for (const FoliageCell& c : folCells) {
+        float d = std::min(boxDist2(c.c0, c.c1, cam.x, cam.z), boxDist2(c.c0, c.c1, player.x, player.z));
+        if (d > FOLIAGE_DROP) {
+            for (int i = c.p0; i < c.p0 + c.np; i++)
+                if (folPieces[i].state) drop.push_back(i);
+        } else if (d < FOLIAGE_LOAD) {
+            // a cell shows its leaves only once all of them are in: finish the nearest cell first, nearest piece first
+            for (int i = c.p0; i < c.p0 + c.np; i++) {
+                const FoliagePiece& p = folPieces[i];
+                Vector2 a = {p.mn.x, p.mn.z}, b = {p.mx.x, p.mx.z};
+                float dp = std::min(boxDist2(a, b, cam.x, cam.z), boxDist2(a, b, player.x, player.z));
+                want.push_back({{d, dp}, i});
+            }
+        }
+    }
+    std::sort(want.begin(), want.end());
+    for (auto& w : want) load.push_back(w.second);
+}
+
 
 // GPU vertex: position, normal (xyz + "explicit" flag), color (alpha = material), and the bare ground height
 // under the vertex, which the shader uses for contact shadow where walls, trunks and poles meet the ground.
@@ -1456,6 +1536,10 @@ void World::upload(const std::function<void()>& meanwhile) {
             ch.c0 = {WX0 + (base % 1000) * CHUNK, WZ0 + (base / 1000) * CHUNK};
             ch.c1 = {ch.c0.x + CHUNK, ch.c0.y + CHUNK};
         }
+        if (ch.layer == LAYER_FAR) {
+            auto it = folCellAt.find(base);
+            if (it != folCellAt.end()) ch.fol = it->second;
+        }
         chunks.push_back(ch);
     }
     TraceLog(LOG_INFO, "SFSKATE: %zu static vertices in %d chunks", verts, (int)chunks.size());
@@ -1529,10 +1613,16 @@ void World::drawPass(const Camera3D& cam, float nearD, float farD, const Shader&
             float dz = std::max(std::max(ch.c0.y - cam.position.z, 0.f), cam.position.z - ch.c1.y);
             float dc = sqrtf(dx * dx + dz * dz);
             if (ch.layer == LAYER_DETAIL && dc >= DETAIL_DIST) continue;
-            if (ch.layer == LAYER_FAR && dc < DETAIL_DIST) continue;
+            // up close the cell's leaves take over from its canopy blobs, once they are all in
+            if (ch.layer == LAYER_FAR && dc < DETAIL_DIST && (ch.fol < 0 || folCells[ch.fol].ready())) continue;
             if (ch.layer == LAYER_INTERIOR && nearest > INTERIOR_DIST) continue;
         }
         drawChunk(ch, slim);
+    }
+    for (auto& p : folPieces) {
+        if (p.state != 3 || !folCells[p.cell].ready()) continue;
+        if (boxDist2(p.ch.c0, p.ch.c1, cam.position.x, cam.position.z) >= DETAIL_DIST) continue;
+        if (inView(p.ch) >= 0) drawChunk(p.ch, slim);
     }
     // the rooms near the camera: seen only from inside or through the front door, so not from behind the street wall
     Vector3 e = cam.position;
@@ -1602,11 +1692,140 @@ void World::freeInteriors() {
     interiorMesh.clear();
 }
 
+// Leaves are meshed and baked on worker threads (pure CPU: leafCloud() from the sources, then the same packing and
+// dedup as the startup bake; foliage normals are all given, so the bake never reads the terrain); this thread only
+// hands the finished buffers to GL. The queue is rebuilt every frame in priority order and kept short.
+namespace {
+struct FolDone { int piece; Baked bk; double ms; };
+struct FolWork {
+    std::vector<std::thread> th;
+    std::mutex m;
+    std::condition_variable cv;
+    std::vector<int> queue;
+    size_t head = 0;
+    std::vector<FolDone> done;
+    bool quit = false;
+} fw;
+}
+
+FoliageStats World::updateFoliage(Vector3 cam, Vector3 player, double budget) {
+    FoliageStats st;
+    double t0 = GetTime();
+    if (folPieces.empty()) return st;
+    if (fw.th.empty()) {
+        unsigned hw = std::thread::hardware_concurrency();
+        unsigned nt = hw > 4 ? std::min(3u, hw - 3) : 1;
+        fw.quit = false;
+        for (unsigned t = 0; t < nt; t++)
+            fw.th.emplace_back([this] {
+                for (;;) {
+                    int i;
+                    {
+                        std::unique_lock<std::mutex> lk(fw.m);
+                        fw.cv.wait(lk, [] { return fw.quit || fw.head < fw.queue.size(); });
+                        if (fw.quit) return;
+                        i = fw.queue[fw.head++];
+                    }
+                    double b0 = GetTime();
+                    MeshBuilder mbd;
+                    meshFoliage(folPieces[i], mbd);
+                    FolDone d{i, Baked{}, 0};
+                    bakeChunk(*this, mbd, d.bk);
+                    d.ms = (GetTime() - b0) * 1000.0;
+                    std::lock_guard<std::mutex> lk(fw.m);
+                    fw.done.push_back(std::move(d));
+                }
+            });
+    }
+    static std::vector<int> load, drop;
+    foliagePlan(cam, player, load, drop);
+    std::vector<FolDone> done;
+    {
+        std::lock_guard<std::mutex> lk(fw.m);
+        done.swap(fw.done);
+        for (size_t k = fw.head; k < fw.queue.size(); k++) folPieces[fw.queue[k]].state = 0;   // not started: re-planned below
+        fw.queue.clear();
+        fw.head = 0;
+        for (int i : load) {
+            FoliagePiece& p = folPieces[i];
+            if (p.state == 0 && fw.queue.size() < 48) { p.state = 1; fw.queue.push_back(i); }
+            if (p.state != 3) st.wanted++;
+        }
+    }
+    fw.cv.notify_all();
+    for (int i : drop) {
+        FoliagePiece& p = folPieces[i];
+        if (p.state == 3) { freeChunk(p.ch); folCells[p.cell].loaded--; st.freed++; p.state = 0; }
+        // state 1 (being meshed, or waiting for the GPU) is settled when it arrives
+    }
+    // hand finished pieces to the GPU: the nearest cells first. A bare cell close to the camera (just teleported)
+    // gets more time, so the leaves in front of the skater are back within a frame or two.
+    bool urgent = false;
+    for (int i : load) {
+        const FoliageCell& c = folCells[folPieces[i].cell];
+        if (boxDist2(c.c0, c.c1, cam.x, cam.z) > 150.f) break;   // load is sorted nearest cell first
+        if (!c.ready()) { urgent = true; break; }
+    }
+    double limit = urgent ? std::max(budget, 8e-3) : budget;
+    std::stable_sort(done.begin(), done.end(), [&](const FolDone& a, const FolDone& b) {
+        const FoliageCell &ca = folCells[folPieces[a.piece].cell], &cb = folCells[folPieces[b.piece].cell];
+        return boxDist2(ca.c0, ca.c1, cam.x, cam.z) < boxDist2(cb.c0, cb.c1, cam.x, cam.z);
+    });
+    std::vector<FolDone> keep;
+    for (FolDone& d : done) {
+        FoliagePiece& p = folPieces[d.piece];
+        st.worstBake = std::max(st.worstBake, d.ms);
+        const FoliageCell& c = folCells[p.cell];
+        float dist = std::min(boxDist2(c.c0, c.c1, cam.x, cam.z), boxDist2(c.c0, c.c1, player.x, player.z));
+        if (dist > FOLIAGE_DROP) { p.state = 0; continue; }   // moved away meanwhile
+        if (st.uploaded && GetTime() - t0 >= limit) { keep.push_back(std::move(d)); continue; }   // next frame
+        p.gpuBytes = d.bk.a.size() + d.bk.b.size() + d.bk.idx.size();
+        p.ch = uploadBaked(d.bk);
+        p.ch.layer = LAYER_DETAIL;
+        p.ch.c0 = c.c0;
+        p.ch.c1 = c.c1;
+        p.state = 3;
+        folCells[p.cell].loaded++;
+        st.uploaded++;
+        d.bk = Baked{};
+    }
+    if (!keep.empty()) {
+        std::lock_guard<std::mutex> lk(fw.m);
+        for (auto& d : keep) fw.done.push_back(std::move(d));
+    }
+    for (auto& p : folPieces)
+        if (p.state == 3) { st.loaded++; st.gpuMB += p.gpuBytes / 1048576.0; }
+    for (auto& c : folCells) {
+        if (boxDist2(c.c0, c.c1, cam.x, cam.z) >= DETAIL_DIST) continue;
+        st.cellsNear++;
+        st.cellsReady += c.ready();
+    }
+    st.ms = (GetTime() - t0) * 1000.0;
+    return st;
+}
+
+void World::freeFoliage() {
+    {
+        std::lock_guard<std::mutex> lk(fw.m);
+        fw.quit = true;
+    }
+    fw.cv.notify_all();
+    for (auto& t : fw.th) t.join();
+    fw.th.clear();
+    fw.queue.clear();
+    fw.head = 0;
+    fw.done.clear();
+    for (auto& p : folPieces) {
+        if (p.state == 3) freeChunk(p.ch);
+        p.state = 0;
+    }
+    for (auto& c : folCells) c.loaded = 0;
+}
+
 int World::drawCasters(Matrix lightView, float half, float zFar, const Shader& sh, bool far) {
     beginStatic(sh);
     int n = 0;
-    for (auto& ch : chunks) {
-        if (ch.layer == (far ? LAYER_DETAIL : LAYER_FAR) || ch.layer == LAYER_INTERIOR) continue;
+    auto cast = [&](const Chunk& ch) {
         // the chunk box in light space must overlap the shadow map's square and depth range
         Vector3 lo = {1e9f, 1e9f, 1e9f}, hi = {-1e9f, -1e9f, -1e9f};
         for (int k = 0; k < 8; k++) {
@@ -1614,10 +1833,19 @@ int World::drawCasters(Matrix lightView, float half, float zFar, const Shader& s
             p = Vector3Transform(p, lightView);
             lo = Vector3Min(lo, p); hi = Vector3Max(hi, p);
         }
-        if (hi.x < -half || lo.x > half || hi.y < -half || lo.y > half || hi.z < -zFar || lo.z > 0) continue;
+        if (hi.x < -half || lo.x > half || hi.y < -half || lo.y > half || hi.z < -zFar || lo.z > 0) return;
         drawChunk(ch, true);
         n++;
+    };
+    for (auto& ch : chunks) {
+        if (ch.layer == LAYER_INTERIOR || (far && ch.layer == LAYER_DETAIL)) continue;
+        // near cascades: the leaves, or the canopy blobs where a cell's leaves aren't in yet
+        if (!far && ch.layer == LAYER_FAR && (ch.fol < 0 || folCells[ch.fol].ready())) continue;
+        cast(ch);
     }
+    if (!far)
+        for (auto& p : folPieces)
+            if (p.state == 3 && folCells[p.cell].ready()) cast(p.ch);
     endStatic();
     return n;
 }

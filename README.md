@@ -115,4 +115,4 @@ Land on rails, ledges, ramp coping, or the bridge railings to grind; tap A/D to 
 | `src/audio.cpp` | synthesized sound (no audio files) |
 | `src/main.cpp` | sky, time of day, camera, HUD, ambience mix, game loop |
 
-The whole city is generated in code at startup. It uses no external art or sound assets. Static geometry is split into layers per 400 m cell: house interiors are only drawn near the camera, and beyond about 650 m each tree canopy is swapped for a low-poly blob.
+The whole city is generated in code at startup. It uses no external art or sound assets. Static geometry is split into layers per 400 m cell: house interiors are only drawn near the camera, and beyond about 650 m each tree canopy is swapped for a low-poly blob. The individual leaves are kept as compact sources (one per canopy) and meshed on worker threads only for the cells within about 700 m of the camera, then freed again past 800 m.

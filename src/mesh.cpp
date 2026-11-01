@@ -154,7 +154,7 @@ void MeshBuilder::leaf(Vector3 p, Vector3 n, float len, float width, float roll,
 }
 
 void MeshBuilder::leafCloud(Vector3 c, Vector3 rad, int count, float len, float width, Color base, RNG& rng, bool withCore, float autumn) {
-    if (detailB && detailB != this) {   // leaves go to the detail layer; far away the canopy is a five-sided blob
+    if (leafSrc || (detailB && detailB != this)) {   // leaves go to the detail layer; far away the canopy is a five-sided blob
         if (farB) {
             Color k = scaleC(base, 0.9f);
             for (int j = 0; j < 5; j++) {
@@ -165,6 +165,10 @@ void MeshBuilder::leafCloud(Vector3 c, Vector3 rad, int count, float len, float 
                 farB->vertN(P(up), scaleC(k, 1.1f), up); farB->vertN(P(e0), k, e0); farB->vertN(P(e1), k, e1);
                 farB->vertN(P(dn), scaleC(k, 0.7f), dn); farB->vertN(P(e1), k, e1); farB->vertN(P(e0), k, e0);
             }
+        }
+        if (leafSrc) {
+            leafSrc->push_back({c, rad, len, width, autumn, base, rng.s, (uint16_t)count, withCore});
+            if (!detailB) { skipLeafCloud(count, autumn, rng); return; }
         }
         detailB->leafCloud(c, rad, count, len, width, base, rng, withCore, autumn);
         return;
@@ -206,6 +210,21 @@ void MeshBuilder::leafCloud(Vector3 c, Vector3 rad, int count, float len, float 
         volN = &vn;
         leaf(pos, nrm, len * s, width * s, rng.range(0, TAU_F), k);
         volN = nullptr;
+    }
+}
+
+void MeshBuilder::skipLeafCloud(int count, float autumn, RNG& rng) {
+    // the same draws as the loop in leafCloud(), in the same number (only the rejection test needs their values)
+    for (int i = 0; i < count; i++) {
+        Vector3 d;
+        do d = {rng.range(-1, 1), rng.range(-1, 1), rng.range(-1, 1)}; while (Vector3LengthSqr(d) > 1.f || Vector3LengthSqr(d) < 0.01f);
+        rng.next(); rng.next();          // depth
+        rng.next();                      // shade
+        rng.next();                      // sun-yellowed
+        if (autumn > 0) rng.next();      // autumn
+        rng.next(); rng.next(); rng.next();   // leaf normal
+        rng.next();                      // size
+        rng.next();                      // roll
     }
 }
 

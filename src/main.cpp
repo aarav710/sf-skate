@@ -1100,6 +1100,33 @@ int main() {
             }
         }
 
+        // tree leaves near the camera and the skater: meshed on worker threads, a millisecond or so a frame here
+        {
+            FoliageStats fs = W.updateFoliage(cam.position, P.pos, 1.5e-3);
+            static int sinceTp = -1, frames = 0, uploaded = 0;
+            static double worstMs = 0, worstBake = 0, sumMs = 0;
+            if (fs.uploaded) { frames++; uploaded += fs.uploaded; sumMs += fs.ms; }
+            worstMs = std::max(worstMs, fs.ms);
+            worstBake = std::max(worstBake, fs.worstBake);
+            static int fr = 0, bareFrames = 0;
+            fr++;
+            bareFrames += fs.cellsReady < fs.cellsNear;
+            if (autotest && fr % 600 == 0)
+                TraceLog(LOG_INFO, "SFSKATE: leaves after %d frames: %d pieces (%.0f MB) on the GPU, worst %.2f ms a frame here, worst "
+                         "worker bake %.1f ms, %d frames with a cell within %.0f m still on canopy blobs (%d of %d now)", fr, fs.loaded,
+                         fs.gpuMB, worstMs, worstBake, bareFrames, DETAIL_DIST, fs.cellsNear - fs.cellsReady, fs.cellsNear);
+            if (autotest) {
+                if (atFrame > 61 && (atFrame - 62) % 150 == 0) sinceTp = 0;   // just teleported
+                if (sinceTp >= 0 && fs.cellsReady == fs.cellsNear) {
+                    TraceLog(LOG_INFO, "SFSKATE: leaves within %.0f m all in %d frames after the teleport", DETAIL_DIST, sinceTp);
+                    sinceTp = -1;
+                } else if (sinceTp >= 0) sinceTp++;
+                if (atFrame > 61 && (atFrame - 62) % 150 == 140)
+                    TraceLog(LOG_INFO, "SFSKATE: leaves: %d pieces on the GPU (%.0f MB), %d uploaded in %d frames (%.2f ms a frame on average, "
+                             "%.2f max here), worst worker bake %.1f ms", fs.loaded, fs.gpuMB, uploaded, frames, frames ? sumMs / frames : 0.0, worstMs, worstBake);
+            }
+        }
+
         // ---------------- draw
         BeginDrawing();
         // sun shadows: the city, traffic and people near the camera, into one or two cascades
@@ -1538,6 +1565,7 @@ int main() {
     if (autotest) TraceLog(LOG_INFO, "SFSKATE: average fps %.1f", atFpsN ? atFpsSum / atFpsN : 0.0);
     S.shutdown();
     W.freeInteriors();
+    W.freeFoliage();
     inst::setFrameBatch(nullptr);
     rlSetRenderBatchActive(nullptr);   // back to raylib's own batch, which CloseWindow frees
     rlUnloadRenderBatch(frameBatch);

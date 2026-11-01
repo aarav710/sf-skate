@@ -166,6 +166,47 @@ static void loadingScreen(const char* msg, float frac) {
     EndDrawing();
 }
 
+// test hook (SFSKATE_BAKEHASH=file): a fingerprint of the static world as it is on the GPU, read back chunk by
+// chunk in draw order, plus the leaf sources, so a change to how the world is baked can be checked byte for byte
+static void bakeHash(const char* path) {
+    uint64_t h = 1469598103934665603ull, total = h;
+    auto put = [&](const void* d, size_t n) { for (size_t i = 0; i < n; i++) { h ^= ((const unsigned char*)d)[i]; h *= 1099511628211ull; } };
+    auto buf = [&](unsigned id) {
+        GLint n = 0;
+        glBindBuffer(GL_COPY_READ_BUFFER, id);
+        glGetBufferParameteriv(GL_COPY_READ_BUFFER, GL_BUFFER_SIZE, &n);
+        std::vector<unsigned char> d(n);
+        if (n) glGetBufferSubData(GL_COPY_READ_BUFFER, 0, n, d.data());
+        put(&n, sizeof(n));
+        put(d.data(), d.size());
+    };
+    FILE* f = fopen(path, "w");
+    if (!f) return;
+    for (size_t k = 0; k <= W.chunks.size(); k++) {
+        const Chunk& ch = k < W.chunks.size() ? W.chunks[k] : W.water;
+        h = 1469598103934665603ull;
+        put(&ch.count, sizeof(int)); put(&ch.packed, 1); put(&ch.idx32, 1); put(&ch.org, sizeof(Vector4));
+        put(&ch.mn, sizeof(Vector3)); put(&ch.mx, sizeof(Vector3)); put(&ch.layer, sizeof(int));
+        put(&ch.c0, sizeof(Vector2)); put(&ch.c1, sizeof(Vector2)); put(&ch.fol, sizeof(int));
+        buf(ch.vboA); buf(ch.vboB); buf(ch.ebo);
+        fprintf(f, "%zu %016llx\n", k, (unsigned long long)h);
+        total ^= h; total *= 1099511628211ull;
+    }
+    glBindBuffer(GL_COPY_READ_BUFFER, 0);
+    h = 1469598103934665603ull;
+    for (const LeafSrc& s : W.leafSrcs) {
+        put(&s.c, sizeof(Vector3)); put(&s.rad, sizeof(Vector3)); put(&s.len, 4); put(&s.width, 4); put(&s.autumn, 4);
+        put(&s.base, 4); put(&s.rng, 4); put(&s.count, 2); put(&s.withCore, 1);
+    }
+    for (const FoliagePiece& p : W.folPieces) { put(&p.cell, 4); put(&p.s0, 4); put(&p.s1, 4); put(&p.mn, 12); put(&p.mx, 12); put(&p.verts, 8); }
+    for (const FoliageCell& c : W.folCells) { put(&c.key, 4); put(&c.c0, 8); put(&c.c1, 8); put(&c.p0, 4); put(&c.np, 4); }
+    fprintf(f, "leaves %016llx\n", (unsigned long long)h);
+    total ^= h; total *= 1099511628211ull;
+    fprintf(f, "total %016llx (%zu chunks)\n", (unsigned long long)total, W.chunks.size());
+    fclose(f);
+    TraceLog(LOG_INFO, "SFSKATE: bake fingerprint %016llx (%zu chunks)", (unsigned long long)total, W.chunks.size());
+}
+
 static void textShadow(const char* t, int x, int y, int size, Color c) {
     DrawText(t, x + 2, y + 2, size, {0, 0, 0, (unsigned char)(c.a * 0.6f)});
     DrawText(t, x, y, size, c);
@@ -321,6 +362,7 @@ int main() {
         TraceLog(LOG_INFO, "SFSKATE: renderer init in %.3fs", GetTime() - rT0);
         WX.init();
     });
+    if (getenv("SFSKATE_BAKEHASH")) bakeHash(getenv("SFSKATE_BAKEHASH")); // test hook
     // raylib's default render batch has a single vertex buffer, so the HUD's first draw after the 3D scene waited
     // ~11 ms a frame for the GPU to finish reading it. With 8 buffers in rotation the CPU fills one while the GPU
     // still reads the others. (Made after inst::init, whose mesh capture switches batches; see inst::setFrameBatch.)

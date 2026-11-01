@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <climits>
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
 
@@ -1248,7 +1249,11 @@ static_assert(sizeof(GVert) == 24, "packed vertex");
 static void bakeVerts(const World& w, const MeshBuilder& b, BigVec<GVert>& out) {
     size_t n = b.count() / 3 * 3;
     out.resize(n);
-    size_t smooth = 0;   // vertices whose normal is worked out here
+    // the corners whose normal is worked out here, by position rounded to 2 mm: x and y in k, then z
+    struct Key { uint64_t k; uint32_t i; int z; };
+    BigVec<Key> keys;
+    keys.reserve(n);   // pages are only touched as they fill
+    int lo[3] = {INT_MAX, INT_MAX, INT_MAX}, hi[3] = {INT_MIN, INT_MIN, INT_MIN};
     size_t rc = 0, rn = 0;   // the color and normal runs vertex i falls in
     for (size_t i = 0; i < n; i++) {
         GVert& g = out[i];
@@ -1257,10 +1262,12 @@ static void bakeVerts(const World& w, const MeshBuilder& b, BigVec<GVert>& out) 
         while (b.n[rn].end <= i) rn++;
         memcpy(g.c, b.c[rc].d, 4);
         memcpy(g.n, b.n[rn].d, 4);
-        if (g.n[3] == NRM_EXPLICIT) g.gy = g.y - 100.f;   // terrain, foliage: no contact shadow
-        else smooth++;
+        if (g.n[3] == NRM_EXPLICIT) { g.gy = g.y - 100.f; continue; }   // terrain, foliage: no contact shadow
+        int p[3] = {(int)lroundf(g.x * 500.f), (int)lroundf(g.y * 500.f), (int)lroundf(g.z * 500.f)};
+        for (int a = 0; a < 3; a++) { lo[a] = std::min(lo[a], p[a]); hi[a] = std::max(hi[a], p[a]); }
+        keys.push_back({(uint64_t)(uint32_t)p[0] << 32 | (uint32_t)p[1], (uint32_t)i, p[2]});
     }
-    if (!smooth) return;   // all normals given: nothing more to do
+    if (keys.empty()) return;   // all normals given: nothing more to do
     BigVec<Vector3> fa(n / 3), fu(n / 3);   // area-weighted and unit face normals
     for (size_t t = 0; t < n / 3; t++) {
         if (out[t * 3].n[3] == NRM_EXPLICIT && out[t * 3 + 1].n[3] == NRM_EXPLICIT && out[t * 3 + 2].n[3] == NRM_EXPLICIT) continue;
@@ -1271,24 +1278,40 @@ static void bakeVerts(const World& w, const MeshBuilder& b, BigVec<GVert>& out) 
         fa[t] = Vector3Scale(c, 0.5f);
         fu[t] = l > 1e-9f ? Vector3Scale(c, 1.f / l) : V3(0, 1, 0);
     }
-    struct Key { int x, y, z; uint32_t i; };
-    BigVec<Key> keys;
-    keys.reserve(smooth);
-    for (size_t i = 0; i < n; i++) {
-        const GVert& g = out[i];
-        if (g.n[3] == NRM_EXPLICIT) continue;
-        keys.push_back({(int)lroundf(g.x * 500.f), (int)lroundf(g.y * 500.f), (int)lroundf(g.z * 500.f), (uint32_t)i});
+    // when the chunk's spans fit, k becomes x, y, z from its corner in one number: that orders the corners exactly
+    // as comparing x, y, z in turn does, so the sort (and the order the normals are summed in) comes out the same
+    int bits[3];
+    for (int a = 0; a < 3; a++) {
+        uint64_t span = (uint64_t)((int64_t)hi[a] - lo[a]);
+        bits[a] = 0;
+        while (span >> bits[a]) bits[a]++;
     }
-    std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
-        return a.x != b.x ? a.x < b.x : a.y != b.y ? a.y < b.y : a.z < b.z;
-    });
+    if (bits[0] + bits[1] + bits[2] <= 64) {
+        for (Key& q : keys) {
+            uint64_t x = (uint64_t)((int64_t)(int)(q.k >> 32) - lo[0]), y = (uint64_t)((int64_t)(int)(uint32_t)q.k - lo[1]);
+            uint64_t z = (uint64_t)((int64_t)q.z - lo[2]);
+            q.k = (x << bits[1] << bits[2]) | (y << bits[2]) | z;
+        }
+        std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) { return a.k < b.k; });
+    } else {
+        std::sort(keys.begin(), keys.end(), [](const Key& a, const Key& b) {
+            int ax = (int)(a.k >> 32), bx = (int)(b.k >> 32), ay = (int)(uint32_t)a.k, by = (int)(uint32_t)b.k;
+            return ax != bx ? ax < bx : ay != by ? ay < by : a.z < b.z;
+        });
+    }
+    // ground height: one lookup, reused for corners at exactly the same x,z (nearly all of a group, often the next)
+    float gx = out[keys[0].i].x, gz = out[keys[0].i].z, gh = w.terrain(gx, gz);
     for (size_t s0 = 0; s0 < keys.size();) {
         size_t s1 = s0 + 1;
-        while (s1 < keys.size() && keys[s1].x == keys[s0].x && keys[s1].y == keys[s0].y && keys[s1].z == keys[s0].z) s1++;
+        while (s1 < keys.size() && keys[s1].k == keys[s0].k && keys[s1].z == keys[s0].z) s1++;
         bool big = s1 - s0 > 48;   // a fan of dozens of faces: not worth smoothing
-        // ground height under the group: one lookup, reused for corners at exactly the same x,z (nearly all of them)
-        float gx = out[keys[s0].i].x, gz = out[keys[s0].i].z, gh = w.terrain(gx, gz);
         for (size_t a = s0; a < s1; a++) {
+            if (a + 16 < keys.size()) {   // corners come in position order, so all over the arrays: fetch ahead
+                uint32_t pi = keys[a + 16].i;
+                __builtin_prefetch(&out[pi]);
+                __builtin_prefetch(&fu[pi / 3]);
+                __builtin_prefetch(&fa[pi / 3]);
+            }
             GVert& g = out[keys[a].i];
             if (memcmp(&g.x, &gx, 4) || memcmp(&g.z, &gz, 4)) { gx = g.x; gz = g.z; gh = w.terrain(gx, gz); }
             g.gy = gh;
@@ -1351,16 +1374,28 @@ template <class V, class F> static void dedup(size_t n, F get, BigVec<V>& uniq, 
     size_t cap = 64;
     while (cap < n + n / 2) cap <<= 1;
     BigVec<uint32_t> table(cap, UINT32_MAX);
-    uniq.reserve(n / 3 + 16);
+    uniq.reserve(n);   // pages are only touched as they fill
     idx.resize(n);
-    for (size_t i = 0; i < n; i++) {
-        V v;
+    // each vertex is made and hashed AHEAD steps before its lookup, and its slot fetched in the meantime (the
+    // lookups themselves stay in order, so the result is the same)
+    constexpr size_t AHEAD = 16;
+    V ring[AHEAD];
+    size_t slot[AHEAD];
+    auto make = [&](size_t i) {
+        V& v = ring[i % AHEAD];
         get(i, v);
         uint32_t w[sizeof(V) / 4];
         uint64_t h = 0x9E3779B97F4A7C15ull;
         memcpy(w, &v, sizeof(V));
         for (uint32_t x : w) { h = (h ^ x) * 0xff51afd7ed558ccdull; h ^= h >> 31; }
-        size_t s = h & (cap - 1);
+        slot[i % AHEAD] = h & (cap - 1);
+        __builtin_prefetch(&table[slot[i % AHEAD]]);
+    };
+    for (size_t i = 0; i < n && i < AHEAD; i++) make(i);
+    for (size_t i = 0; i < n; i++) {
+        V v = ring[i % AHEAD];
+        size_t s = slot[i % AHEAD];
+        if (i + AHEAD < n) make(i + AHEAD);
         while (table[s] != UINT32_MAX && memcmp(&uniq[table[s]], &v, sizeof(V))) s = (s + 1) & (cap - 1);
         if (table[s] == UINT32_MAX) { table[s] = (uint32_t)uniq.size(); uniq.push_back(v); }
         idx[i] = table[s];

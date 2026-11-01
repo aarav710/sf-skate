@@ -1093,9 +1093,6 @@ int main() {
         // (Pier 39's was on the 8 m carousel roof, 8.4 m from the deck -- out of the 3 m pickup range) never gets out.
         const float CLIMB = 2.0f, OUT = 30;
         const int N = (int)OUT * 2 + 5, C = N / 2;
-        // Port of Oakland is skipped: its token sits on an unclimbable container stack (2.6 m a layer). That is a
-        // known, separate bug, to be tracked on its own.
-        auto known = [](const char* n) { return strcmp(n, "Port of Oakland") == 0; };
         int bad = 0;
         std::vector<float> h((size_t)N * N);
         std::vector<int> q;
@@ -1119,10 +1116,29 @@ int main() {
                     q.push_back(nj * N + ni);
                 }
             }
-            if (!out && !known(t.name)) { bad++; printf("      token %s unreachable (y %.1f)\n", t.name, t.pos.y); }
+            if (!out) { bad++; printf("      token %s unreachable (y %.1f)\n", t.name, t.pos.y); }
         }
         snprintf(b, sizeof b, "%d bad of %d", bad, (int)W.tokens.size());
         check(bad == 0, "tokens are reachable from the ground", b);
+    }
+    {   // the Port of Oakland token can be skated up to at street level (#127: it sat on a 3-high container stack, out
+        // of reach): push along the quay lane between the cranes' legs and the containers and see it come in range
+        const Token* tk = nullptr;
+        for (auto& t : W.tokens) if (strcmp(t.name, "Port of Oakland") == 0) tk = &t;
+        float best = 1e9f;
+        if (tk) {
+            Sim s;
+            s.spawn(4024, 905, PI / 2);
+            for (int f = 0; f < 60 * 20 && s.p.pos.z < 1005 && s.p.state != Player::BAIL; f++) {
+                Input in;
+                in.steer = clampf(wrapPi(atan2f(1005 - s.p.pos.z, 4024 - s.p.pos.x) - s.p.yaw) * 3.f, -1.f, 1.f);
+                in.push = s.p.speed < 4.0f;
+                s.p.update(1.f / 60, in, W);
+                best = std::min(best, Vector3Distance(tk->pos, {s.p.pos.x, s.p.pos.y + 1.0f, s.p.pos.z}));
+            }
+        }
+        snprintf(b, sizeof b, "closest %.2f m (pickup < 3)", best);
+        check(best < 3.0f, "Port of Oakland token is collected riding the quay", b);
     }
     {   // street lamps, trees and curb clutter are never built inside a building or landmark base (issue #88:
         // Coit Tower's base swallowed the hilltop's lamps and trees, a lamp head poking out of its roof)

@@ -1175,7 +1175,10 @@ void World::buildMeta() {
     tok("Oracle Park", 1235, 690);
     tok("Dolores Park", gx(12) + 55, gz(17) + 30);
     tok("Sutro Tower", -470, 800);
-    tok("Port of Oakland", 4040, 900);
+    // on the open quay between the cranes' landward legs (x <= 4017.7) and the container field (x >= 4030), midway
+    // between the cranes at z 890 and 1020 (legs at z +-9): clear of every leg and every (RNG-stacked) container, so
+    // you roll right up to it (it used to sit on a 3-high container stack, 7.8 m up, which no ollie can reach)
+    tok("Port of Oakland", 4024, 955);
     tok("Pier 39", 1025, -1265);   // on the deck just south of the carousel (+z) (1018..1032, -1292..-1278), not on its 8 m roof
     tok("Salesforce Tower", 1100, 210);
     tok("Embarcadero Plaza", 1230, -256);

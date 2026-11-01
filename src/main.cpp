@@ -352,6 +352,7 @@ int main() {
 
     loadingScreen("Starting up", 0);
     double genT0 = GetTime();
+    W.earlyBake = true;   // bake and upload the Peninsula while the city is generated (the GL context is up)
     W.generate(loadingScreen);
     TraceLog(LOG_INFO, "SFSKATE: generated in %.2fs", GetTime() - genT0);
     W.upload([] {   // shaders and render targets don't need the world: set them up while its meshes bake

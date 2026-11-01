@@ -2,6 +2,7 @@
 #pragma once
 #include "common.h"
 #include <sys/mman.h>
+#include <cassert>
 
 // Allocator for the big generation and bake buffers: anything from 64 KB up comes straight from the OS (mmap) and
 // goes straight back when freed. malloc keeps freed blocks around for reuse, and with a city's worth of growing and
@@ -63,6 +64,7 @@ struct MeshBuilder {
     std::vector<LeafSrc>* leafSrc = nullptr;
     MeshBuilder* detailB = nullptr;
     MeshBuilder* farB = nullptr;
+    bool frozen = false;   // handed to the bake (World::upload, or early in World::generate): nothing may add to it
 
     size_t count() const { return v.size() / 3; }
     static inline void addRun(BigVec<MeshRun>& r, const void* d) {   // one more vertex with these 4 bytes
@@ -73,12 +75,14 @@ struct MeshBuilder {
         r.push_back(q);
     }
     inline void vert(Vector3 p, Color k) {
+        assert(!frozen);
         v.push_back(p.x); v.push_back(p.y); v.push_back(p.z);
         addRun(c, &k);
         signed char nn[4] = {0, 0, 0, smooth};
         addRun(n, nn);
     }
     inline void vertN(Vector3 p, Color k, Vector3 nn) {
+        assert(!frozen);
         v.push_back(p.x); v.push_back(p.y); v.push_back(p.z);
         addRun(c, &k);
         float l = sqrtf(nn.x * nn.x + nn.y * nn.y + nn.z * nn.z);

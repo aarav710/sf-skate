@@ -4,6 +4,7 @@
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #define GL_SILENCE_DEPRECATION
 #include <OpenGL/gl3.h>
@@ -1464,68 +1465,136 @@ static Chunk uploadBaked(Baked& bk) {
     return ch;
 }
 
-void World::upload(const std::function<void()>& meanwhile) {
-    std::vector<MeshBuilder*> list;
-    std::vector<int> keys;
-    for (auto& kv : builders)
-        if (kv.second.count() >= 3) { list.push_back(&kv.second); keys.push_back(kv.first); }
-    list.push_back(&waterB);
-    keys.push_back(-1);
-    // normals, ground heights, packing and dedup for every chunk in parallel; this thread hands each one to the GPU
-    // as soon as it is ready and frees it, so the baked copy of the whole city is never in memory at once
-    std::vector<Baked> baked(list.size());
-    // biggest chunks first so no thread is left with a big one at the end
-    std::vector<size_t> order(list.size());
-    for (size_t k = 0; k < order.size(); k++) order[k] = k;
-    std::vector<size_t> sizes(list.size());
-    for (size_t k = 0; k < list.size(); k++) sizes[k] = list[k]->count();
-    std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return sizes[a] > sizes[b]; });
-    std::atomic<size_t> next{0};
-    std::mutex readyM;
-    std::condition_variable readyCv;
-    std::vector<size_t> ready;   // baked, waiting for upload
-    unsigned nt = std::max(2u, std::thread::hardware_concurrency());
+// The cells south of here are finished before the city itself is built (see World::generate)
+constexpr float EARLY_BAKE_Z = 2900;   // the first row of cells clear of SFO
+
+// Builders bake on worker threads and come back to this (the GL) thread for the GPU, nearly as soon as they are
+// ready, so the baked copy of the whole city is never in memory at once. Work can be added in batches: the cells
+// generation is done with early (startEarlyBake), then everything else (upload).
+struct World::BakeJobs {
+    struct Item { MeshBuilder* mb; Baked bk; Chunk ch; };
+    std::deque<Item> items;                          // this thread only (workers get pointers)
+    std::unordered_map<const MeshBuilder*, Item*> of;
+    std::deque<Item*> todo;                          // waiting for a worker
+    std::vector<Item*> ready;                        // baked, waiting for the GPU
+    bool closed = false;                             // nothing more to come: idle workers leave
+    std::mutex m;
+    std::condition_variable work, done;
     std::vector<std::thread> th;
-    double bakeT0 = GetTime();
-    for (unsigned t = 0; t < nt; t++)
-        th.emplace_back([&] {
-            for (size_t q; (q = next++) < order.size();) {
-                bakeChunk(*this, *list[order[q]], baked[order[q]]);
-                std::lock_guard<std::mutex> lk(readyM);
-                ready.push_back(order[q]);
-                readyCv.notify_one();
-            }
-        });
-    if (meanwhile) meanwhile();   // GL setup on this thread while the workers bake
-    double upT0 = GetTime();
-    size_t verts = 0, uniq = 0, idxN = 0, packedV = 0, gpuBytes = 0;
+    size_t uploaded = 0, verts = 0, uniq = 0, idxN = 0, packedV = 0, gpuBytes = 0;
     int idx32 = 0, floatCh = 0;
-    std::vector<Chunk> done(list.size());   // uploaded, kept in list order
-    for (size_t left = list.size(); left;) {
-        std::vector<size_t> now;
+
+    ~BakeJobs() {
         {
-            std::unique_lock<std::mutex> lk(readyM);
-            readyCv.wait(lk, [&] { return !ready.empty(); });
-            now.swap(ready);
+            std::lock_guard<std::mutex> lk(m);
+            todo.clear();
         }
-        for (size_t k : now) {
-            Baked& bk = baked[k];
-            verts += bk.in;
-            uniq += bk.verts;
-            idxN += bk.ch.count;
-            if (bk.ch.packed) packedV += bk.verts;
-            else floatCh++;
-            idx32 += bk.ch.idx32;
-            gpuBytes += bk.a.size() + bk.b.size() + bk.idx.size();
-            done[k] = uploadBaked(bk);
-            bk = Baked{};
-            left--;
+        close();
+    }
+    void close() {
+        {
+            std::lock_guard<std::mutex> lk(m);
+            closed = true;
+        }
+        work.notify_all();
+        for (auto& t : th) t.join();
+        th.clear();
+    }
+    // queue these (biggest first so no thread is left with a big one at the end) and keep nt workers on the queue
+    void add(const World& w, std::vector<MeshBuilder*> mbs, unsigned nt) {
+        std::stable_sort(mbs.begin(), mbs.end(), [](const MeshBuilder* a, const MeshBuilder* b) { return a->count() > b->count(); });
+        {
+            std::lock_guard<std::mutex> lk(m);
+            for (MeshBuilder* b : mbs) {
+                b->frozen = true;
+                items.push_back({b, {}, {}});
+                of[b] = &items.back();
+                todo.push_back(&items.back());
+            }
+        }
+        work.notify_all();
+        while (th.size() < nt)
+            th.emplace_back([this, &w] {
+                for (;;) {
+                    Item* it;
+                    {
+                        std::unique_lock<std::mutex> lk(m);
+                        work.wait(lk, [&] { return closed || !todo.empty(); });
+                        if (todo.empty()) return;
+                        it = todo.front();
+                        todo.pop_front();
+                    }
+                    bakeChunk(w, *it->mb, it->bk);
+                    std::lock_guard<std::mutex> lk(m);
+                    ready.push_back(it);
+                    done.notify_one();
+                }
+            });
+    }
+    // to the GPU: what is baked so far, or (all) everything queued, waiting for it
+    void upload(bool all) {
+        for (;;) {
+            std::vector<Item*> now;
+            {
+                std::unique_lock<std::mutex> lk(m);
+                if (all) done.wait(lk, [&] { return !ready.empty() || uploaded == items.size(); });
+                now.swap(ready);
+            }
+            for (Item* it : now) {
+                Baked& bk = it->bk;
+                verts += bk.in;
+                uniq += bk.verts;
+                idxN += bk.ch.count;
+                if (bk.ch.packed) packedV += bk.verts;
+                else floatCh++;
+                idx32 += bk.ch.idx32;
+                gpuBytes += bk.a.size() + bk.b.size() + bk.idx.size();
+                it->ch = uploadBaked(bk);
+                bk = Baked{};
+                uploaded++;
+            }
+            if (!all || uploaded == items.size()) return;
         }
     }
-    for (auto& t : th) t.join();
-    TraceLog(LOG_INFO, "SFSKATE: bake and upload %.3fs (%.3fs after the renderer setup)", GetTime() - bakeT0, GetTime() - upT0);
+};
+
+void World::startEarlyBake() {
+    std::vector<MeshBuilder*> list;
+    for (auto& kv : builders) {
+        int base = kv.first % LAYER_STRIDE;
+        if (base >= 0 && base < 800000 && WZ0 + (base / 1000) * CHUNK >= EARLY_BAKE_Z && kv.second.count() >= 3)
+            list.push_back(&kv.second);
+    }
+    bake = std::make_shared<BakeJobs>();
+    bake->add(*this, list, std::max(2u, std::thread::hardware_concurrency()) - 1);   // this thread goes on generating
+    TraceLog(LOG_INFO, "SFSKATE: early bake of %zu chunks", list.size());
+}
+
+void World::uploadReady() { bake->upload(false); }
+
+void World::upload(const std::function<void()>& meanwhile) {
+    // every chunk in map order (the draw order), including the ones baked early (frozen: emptied by their bake)
+    std::vector<MeshBuilder*> list, rest;
+    std::vector<int> keys;
+    for (auto& kv : builders)
+        if (kv.second.frozen || kv.second.count() >= 3) { list.push_back(&kv.second); keys.push_back(kv.first); }
+    list.push_back(&waterB);
+    keys.push_back(-1);
+    for (MeshBuilder* b : list)
+        if (!b->frozen) rest.push_back(b);
+    if (!bake) bake = std::make_shared<BakeJobs>();
+    size_t early = bake->uploaded;
+    // normals, ground heights, packing and dedup for every chunk in parallel; this thread hands each one to the GPU
+    double bakeT0 = GetTime();
+    bake->add(*this, rest, std::max(2u, std::thread::hardware_concurrency()));
+    if (meanwhile) meanwhile();   // GL setup on this thread while the workers bake
+    double upT0 = GetTime();
+    bake->upload(true);
+    bake->close();
+    TraceLog(LOG_INFO, "SFSKATE: bake and upload %.3fs (%.3fs after the renderer setup), %zu chunks uploaded during generation",
+             GetTime() - bakeT0, GetTime() - upT0, early);
     for (size_t k = 0; k < list.size(); k++) {
-        Chunk ch = done[k];
+        Chunk ch = bake->of[list[k]]->ch;
         if (list[k] == &waterB) { water = ch; continue; }
         // the cell's own square decides when a layer switches, so the detail and far layers trade places exactly
         int base = keys[k] % LAYER_STRIDE;
@@ -1542,9 +1611,11 @@ void World::upload(const std::function<void()>& meanwhile) {
         }
         chunks.push_back(ch);
     }
-    TraceLog(LOG_INFO, "SFSKATE: %zu static vertices in %d chunks", verts, (int)chunks.size());
+    const BakeJobs& b = *bake;
+    TraceLog(LOG_INFO, "SFSKATE: %zu static vertices in %d chunks", b.verts, (int)chunks.size());
     TraceLog(LOG_INFO, "SFSKATE: %zu unique vertices (%zu packed, %zu float in %d chunks), %zu indices (%d chunks 32-bit), %.0f MB on GPU",
-             uniq, packedV, uniq - packedV, floatCh, idxN, idx32, gpuBytes / 1048576.0);
+             b.uniq, b.packedV, b.uniq - b.packedV, b.floatCh, b.idxN, b.idx32, b.gpuBytes / 1048576.0);
+    bake.reset();
     builders.clear();
 }
 

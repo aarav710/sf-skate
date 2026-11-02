@@ -312,6 +312,9 @@ struct FrontInfo {
     // a front stair that runs along the facade (houses well above a steep street): ramp and landing rectangles
     bool side = false;
     float uA = 0, uL = 0, yStart = 0, lu0 = 0, lu1 = 0;
+    // the angled bay (a box over its footprint, in facade coordinates): u range, projection, bottom and top
+    bool bay = false;
+    float bayU0 = 0, bayU1 = 0, bayD = 0, bayY0 = 0, bayY1 = 0;
     float doorY = 0;   // floor level at the front door (below the entry floor for a garden-level door)
 };
 
@@ -396,6 +399,10 @@ static void victorianFront(const World& w, MeshBuilder& m, float x0, float z0, f
         cBay = tu;
     } else if (hw > 0.85f && by1 > by0 + 2.f) {
         bayWindow(F, cBay, hw, fhw, D, gLow - 0.4f, by0, by1, side, plinth, accent, roofC, sunset);
+        // collision: the front panel plus most of the cheeks; solid to the ground unless the bay hovers (Sunset)
+        info.bay = true;
+        info.bayU0 = cBay - fhw - 0.3f; info.bayU1 = cBay + fhw + 0.3f; info.bayD = D;
+        info.bayY0 = sunset ? by0 : gLow - 0.4f; info.bayY1 = by1;
     }
 
     // entry: stoop, door, surround
@@ -767,19 +774,19 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
         rowhouseCount++;
         if (canEnter && !fi.enter) houseTooHigh++;
     }
+    // remember each step box, so sidewalk walkers can go round the front of it instead of through it
+    Vector2 toStreet = facing == 0 ? Vector2{0, -1} : facing == 1 ? Vector2{0, 1} : facing == 2 ? Vector2{-1, 0} : Vector2{1, 0};
+    // (in every cell its reach touches, the box grown by STOOP_REACH, so a lookup needs only the walker's cell)
+    auto addStoop = [&](float sx0, float sx1, float sz0, float sz1) {
+        for (int ci = (int)floorf((sx0 - STOOP_REACH) / 16.f); ci <= (int)floorf((sx1 + STOOP_REACH) / 16.f); ci++)
+            for (int cj = (int)floorf((sz0 - STOOP_REACH) / 16.f); cj <= (int)floorf((sz1 + STOOP_REACH) / 16.f); cj++)
+                stoops.emplace(ci * 4096 + cj, Stoop{sx0, sx1, sz0, sz1, toStreet});
+    };
     // collision for the front steps and a clear way to them (no trees, lamps or parked cars in front)
     auto frontStairs = [&]() {
         Facade F{m, x0, z0, x1, z1, facing};
         Vector3 po = F.P(fi.cDoor, 0, fi.side ? 0.8f : fi.ns * fi.tread + 0.7f), pi = F.P(fi.cDoor, 0, -1.6f), pf = F.P(fi.uA, 0, 0.7f);
         Vector2 doorOut = {po.x, po.z}, doorIn = {pi.x, pi.z}, foot = {pf.x, pf.z};
-        // remember each step box, so sidewalk walkers can go round the front of it instead of through it
-        Vector2 toStreet = facing == 0 ? Vector2{0, -1} : facing == 1 ? Vector2{0, 1} : facing == 2 ? Vector2{-1, 0} : Vector2{1, 0};
-        // (in every cell its reach touches, the box grown by STOOP_REACH, so a lookup needs only the walker's cell)
-        auto addStoop = [&](float sx0, float sx1, float sz0, float sz1) {
-            for (int ci = (int)floorf((sx0 - STOOP_REACH) / 16.f); ci <= (int)floorf((sx1 + STOOP_REACH) / 16.f); ci++)
-                for (int cj = (int)floorf((sz0 - STOOP_REACH) / 16.f); cj <= (int)floorf((sz1 + STOOP_REACH) / 16.f); cj++)
-                    stoops.emplace(ci * 4096 + cj, Stoop{sx0, sx1, sz0, sz1, toStreet});
-        };
         if (fi.side) {   // collision for the flight along the front and its landing
             float ulo = std::min(fi.uA, fi.uL), uhi = std::max(fi.uA, fi.uL);
             Vector3 a = F.P(ulo, 0, 0), b = F.P(uhi, 0, 1.4f);
@@ -863,6 +870,22 @@ void World::addBuilding(float x0, float z0, float x1, float z1, float height, Co
         m.box({x0, base, z0}, {x1, top, z1}, side, roof, 0.72f);
         addPlat({x0, x1, z0, z1, top, top, base, 0, PK_BUILDING});
         if (victorian) frontStairs();
+    }
+    if (victorian && fi.bay) {
+        // the bay sticks out of the facade: a thin collision box over its footprint (not over the doorway, steps or
+        // the flight along the front, if one of them is beside it), and sidewalk walkers go round it
+        Facade F{m, x0, z0, x1, z1, facing};
+        auto overlaps = [&](float a0, float a1) { return fi.bayU0 < a1 && fi.bayU1 > a0; };
+        bool clear = !overlaps(fi.cDoor - DOOR_HW - 1.1f, fi.cDoor + DOOR_HW + 1.1f);
+        if (fi.side) clear = clear && !overlaps(std::min(fi.uA, fi.uL) - 0.3f, std::max(fi.uA, fi.uL) + 0.3f) &&
+                             !overlaps(fi.lu0 - 0.3f, fi.lu1 + 0.3f);
+        if (clear) {
+            Vector3 a = F.P(fi.bayU0, 0, 0), b = F.P(fi.bayU1, 0, fi.bayD);
+            float bx0 = std::min(a.x, b.x), bx1 = std::max(a.x, b.x), bz0 = std::min(a.z, b.z), bz1 = std::max(a.z, b.z);
+            addPlat({bx0, bx1, bz0, bz1, fi.bayY1, fi.bayY1, fi.bayY0, 0, PK_BUILDING});
+            if (style != BS_SUNSET) addStoop(bx0, bx1, bz0, bz1);
+            bayBoxes++; bayPlats.push_back({(int)plats.size() - 1, toStreet});
+        }
     }
     if (facing < 0) return;
 

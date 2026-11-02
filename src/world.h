@@ -253,7 +253,8 @@ struct World {
     Vector3 caltrainDropoff(int station, float* yaw) const;        // a clear spot on the platform to step off the train
     Image mapImg2{};                 // Peninsula / Menlo Park map
     std::vector<House> houses;
-    int rowhouseCount = 0, houseTooSteep = 0, houseTooHigh = 0;   // generation stats: street fronts built, and why some stay closed
+    int rowhouseCount = 0, houseTooSteep = 0, houseTooHigh = 0, bayBoxes = 0;   // generation stats: street fronts built, and why some stay closed
+    std::vector<std::pair<int, Vector2>> bayPlats;   // bay-window collision boxes: index into plats, and the way the bay faces (sim checks)
     std::unordered_multimap<int, Vector4> doorWays; // coarse grid of door approach segments (ax, az, bx, bz)
     static constexpr float STOOP_REACH = 3.f;   // how far round a stoop stoopDetour can move a walker (clearance + ease)
     struct Stoop { float x0, x1, z0, z1; Vector2 out; };   // a house's front-step collision box, and the way to the street

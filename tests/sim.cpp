@@ -2738,6 +2738,61 @@ int main() {
         snprintf(b, sizeof b, "%d of %d strips short%s", bad, (int)(sizeof strips / sizeof strips[0]), det);
         check(bad == 0, "far-off roads draped whole", b);
     }
+    {   // #137: Victorian bay windows are solid: a skater rolling into one stops at its face, one riding past is not held
+        int tried = 0, stopped = 0, stoppedOk = 0, passTried = 0, passOk = 0;
+        float worstOff = 0;
+        char det[160] = "";
+        int nb = (int)W.bayPlats.size(), stride = std::max(1, nb / 60);
+        for (int k = 0; k < nb && tried < 60; k += stride) {
+            Platform& pl = W.plats[W.bayPlats[k].first];
+            Vector2 out = W.bayPlats[k].second, tg = {-out.y, out.x};
+            float hd = (out.x != 0 ? pl.x1 - pl.x0 : pl.z1 - pl.z0) / 2;   // half the projection: center to face
+            Vector2 mid = {(pl.x0 + pl.x1) / 2, (pl.z0 + pl.z1) / 2};
+            auto at = [&](float o, float t) { return Vector2{mid.x + out.x * o + tg.x * t, mid.y + out.y * o + tg.y * t}; };
+            // only bays with a clear street in front and along them, judged with the bay itself taken away
+            float savedBase = pl.base;
+            pl.base = 1e9f;
+            auto clearAt = [&](float o, float t) {
+                Vector2 q2 = at(o, t);
+                Vector3 q = {q2.x, W.ground(q2.x, q2.y, 500), q2.y};
+                return !W.collide(q, 0.45f, q.y, 1.7f, nullptr) && W.houseAt(q.x, q.z, q.y) < 0;
+            };
+            bool clrIn = true, clrAlong = true;
+            for (float o = hd; o <= 9.f + hd && clrIn; o += 0.5f) clrIn = clearAt(o, 0);
+            for (float t = -6.f; t <= 6.f && clrAlong; t += 0.5f) clrAlong = clearAt(hd + 0.9f, t);
+            pl.base = savedBase;
+            tried++;
+            bool hover = pl.base > W.terrain(mid.x, mid.y) + 1.5f;   // a Sunset bay on its brackets: you pass under it
+            if (clrIn && !hover) {   // ride at the bay from the street
+                Vector2 s0 = at(hd + 9.f, 0);
+                Sim s;
+                s.spawn(s0.x, s0.y, atan2f(-out.y, -out.x), 5.f);
+                Input in; in.push = true;
+                s.run(60 * 6, in);
+                float dist = (s.p.pos.x - mid.x) * out.x + (s.p.pos.z - mid.y) * out.y - hd;   // rider's distance from the face
+                stopped++;
+                worstOff = std::max(worstOff, fabsf(dist - 0.4f));
+                if (dist > 0.1f && dist < 0.7f) stoppedOk++;
+            }
+            if (clrAlong) {   // ride along the sidewalk past the bay (where the same ride without the bay gets through)
+                Vector2 s0 = at(hd + 0.9f, -6.f);
+                auto ride = [&]() {
+                    Sim s;
+                    s.spawn(s0.x, s0.y, atan2f(tg.y, tg.x), 4.f);
+                    Input in; in.push = true;
+                    s.run(60 * 2, in);
+                    return (s.p.pos.x - s0.x) * tg.x + (s.p.pos.z - s0.y) * tg.y > 6.f;
+                };
+                pl.base = 1e9f;
+                bool openRide = ride();
+                pl.base = savedBase;
+                if (openRide) { passTried++; if (ride()) passOk++; }
+            }
+        }
+        snprintf(det, sizeof det, "%d bay boxes; %d/%d rides stop at the face (worst %.2f m off), %d/%d rides along pass", nb, stoppedOk, stopped, worstOff, passOk, passTried);
+        check(nb > 100 && stopped >= 5 && stoppedOk == stopped, "bay windows stop a skater", det);
+        check(passTried >= 5 && passOk == passTried, "ride past bay windows not blocked", det);
+    }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;
 }

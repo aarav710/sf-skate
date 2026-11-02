@@ -180,8 +180,11 @@ float fogAmount(float dist) {
 }
 vec3 fogColor(vec3 V) {
     float golden = (1.0 - smoothstep(0.2, 0.5, sunDir.y)) * (1.0 - smoothstep(0.6, 0.9, night));
-    float sunAmt = pow(max(dot(-V, sunDir), 0.0), 6.0);
-    vec3 fc = mix(fogCol, sunCol * 1.05, sunAmt * (0.25 + 0.4 * golden) * (1.0 - night * 0.8));
+    float sd = dot(-V, sunDir);
+    float sunAmt = pow(max(sd, 0.0), 6.0);
+    // a low sun only warms its own side of the sky: away from it the haze cools to a dusty mauve (as in the sky)
+    vec3 fc = fogCol * mix(vec3(1.0), vec3(0.86, 0.92, 1.1), golden * (1.0 - smoothstep(-0.3, 0.8, sd)));
+    fc = mix(fc, sunCol * 1.05, sunAmt * (0.25 + 0.4 * golden) * (1.0 - night * 0.8));
     fc += vec3(0.07, 0.045, 0.02) * night * exp(-max(wPos.y, 0.0) / 120.0) * (1.0 - wet * 0.3);
     return fc;
 }
@@ -537,10 +540,12 @@ void main() {
     float golden = (1.0 - smoothstep(0.2, 0.5, sunDir.y)) * (1.0 - smoothstep(0.6, 0.9, night));
     float sd = dot(dir, sunDir);
 
-    // gradient, then haze at the horizon tinted toward the sun like the city's fog, a faint city glow at night
-    vec3 col = mix(horizon, top, pow(clamp(e / 0.38, 0.0, 1.0), 0.75));
+    // gradient, then haze at the horizon tinted toward the sun like the city's fog, a faint city glow at night. A low
+    // sun only warms its own side: away from it the horizon and the haze turn a dusty mauve.
+    float away = golden * (1.0 - smoothstep(-0.3, 0.8, sd));
+    vec3 col = mix(mix(horizon, vec3(0.75, 0.6, 0.7), away * (1.0 - fogK) * (1.0 - rain)), top, pow(clamp(e / 0.38, 0.0, 1.0), 0.75));
     float sunAmt = pow(max(sd, 0.0), 6.0);
-    vec3 haze = mix(fogCol, sunCol * 1.05, sunAmt * (0.25 + 0.4 * golden) * (1.0 - night * 0.8));
+    vec3 haze = mix(fogCol * mix(vec3(1.0), vec3(0.86, 0.92, 1.1), away), sunCol * 1.05, sunAmt * (0.25 + 0.4 * golden) * (1.0 - night * 0.8));
     haze += vec3(0.07, 0.045, 0.02) * night;
     col = mix(col, haze, exp(-max(e, 0.0) * 22.0) * 0.4);
     col = mix(col, haze, smoothstep(0.0, -0.04, e));

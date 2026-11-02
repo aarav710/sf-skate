@@ -1205,7 +1205,7 @@ int main() {
                 EndShaderMode();
                 R.endCascade();
             }
-            // the wide far cascade (High): only the static city, so only when it has moved
+            // the wide far cascade: only the static city, so only when it has moved
             if (R.farCasc && R.farDirty) {
                 R.beginCascade(2);
                 W.drawCasters(R.lightView[2], R.half[2], 6000.f, R.depth, true);

@@ -30,13 +30,13 @@ struct Grade {
 
 struct Renderer {
     Shader city{}, cityFar{}, depth{}, post{}, blur{}, extract{}, sky{}, ssao{}, aoBlur{};
-    // 2 high (two shadow cascades + a wide far one, ambient occlusion, HDR), 1 medium (one cascade), 0 low (no shadows
-    // or bloom). 4x MSAA and bloom on all but low.
+    // 2 high (two shadow cascades + a wide far one, ambient occlusion, HDR), 1 medium (one cascade + the far one), 0 low
+    // (no shadows or bloom). 4x MSAA and bloom on all but low.
     int quality = 2;
     static const char* QUALITY_NAMES[3];
 
     // sun shadows
-    static constexpr int MAXC = 3;   // 0, 1 near the camera; 2 the wide far one (High), redrawn only when it moves
+    static constexpr int MAXC = 3;   // 0, 1 near the camera; 2 the wide far one, redrawn only when it moves
     unsigned shFbo[MAXC]{}, shTex[MAXC]{};
     int shSize = 2048;
     int nCasc = 0;             // cascades rendered this frame

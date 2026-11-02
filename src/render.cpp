@@ -98,8 +98,8 @@ float vnoise(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-// ---- the far cascade (High): 2.9 km wide, one hardware-filtered tap. The far pass has only face normals from
-// derivatives, so it leans on a big normal offset rather than a depth bias.
+// ---- the far cascade (Medium and High): 2.9 km wide, one hardware-filtered tap. The far pass has only face normals
+// from derivatives, so it leans on a big normal offset rather than a depth bias.
 float farShadow(vec3 p, vec3 Ng) {
     if (farInfo.x < 0.5) return 1.0;
     float t = farInfo.y;
@@ -956,9 +956,10 @@ int Renderer::planShadows(Vector3 camPos, Vector3 camFwd, Vector3 sunDir, float 
         shProj[k] = MatrixOrtho(-hf, hf, -hf, hf, 1.0, 2 * DIST);
         lightVP[k] = MatrixMultiply(lightView[k], shProj[k]);
     }
-    // the far cascade (High): a 2.9 km square around the camera with only the static city in it, so it is drawn
-    // again only once the camera has gone 300 m from where it was centred, or the sun has moved
-    farCasc = quality == 2 && nCasc > 0;
+    // the far cascade (Medium and High): a 2.9 km square around the camera with only the static city in it, so it is
+    // drawn again only once the camera has gone 300 m from where it was centred, or the sun has moved. Without it,
+    // whatever lies past the near cascade would turn sunlit.
+    farCasc = nCasc > 0;
     if (farCasc) {
         const float FH = 1450.f, FD = 3000.f;
         float tex = 2 * FH / shSize;

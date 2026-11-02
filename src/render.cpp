@@ -429,6 +429,12 @@ void main() {
     else if (lampN > 0 && m != 4) light += lampLight(wPos, N) * (0.6 + 0.4 * ao);
 #endif
     vec3 col = base * light;
+    if (m == 5 && lowSun > 0.0) {
+        // a low sun glazes the road and the paving ahead with a faint, broad sheen (not the grass)
+        float gs = max(vCol.r, max(vCol.g, vCol.b)) - min(vCol.r, min(vCol.g, vCol.b));
+        float fr = pow(1.0 - max(dot(N, V), 0.0), 4.0);
+        col += sunCol * (0.18 * pow(max(dot(N, normalize(sunDir + V)), 0.0), 20.0) * fr * sh * lowSun * (1.0 - smoothstep(0.06, 0.12, gs)));
+    }
     if (specK > 0.0) {
         vec3 H = normalize(sunDir + V);
         vec3 sp = sunCol * specK * pow(max(dot(N, H), 0.0), specP) * sh;

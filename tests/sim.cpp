@@ -2167,9 +2167,19 @@ int main() {
         Vector2 firstLane{};
         for (const Platform* pl : trunks) {
             float cx = (pl->x0 + pl->x1) / 2, cz = (pl->z0 + pl->z1) / 2;
-            // the lanes: within roadHalf of a drivable street (roadHalf = walkOff - 2 on every grid), except the
-            // Embarcadero's palm-lined median (grid column 24), which is meant to stand in the road
-            if (fabsf(cx - W.sf.node(24, 0).x) > 3.f && W.nearGridStreet(cx, cz, -2.f)) {
+            // the lanes: within roadHalf of any drivable edge, measured straight against the edges (not via
+            // nearGridStreet), except the Embarcadero's and El Camino Real's palm medians, which stand in the road on purpose
+            if (fabsf(cx - W.sf.node(24, 0).x) < 3.f || fabsf(cx - W.mp.node(6, 0).x) < 3.f) continue;
+            bool lane = false;
+            for (const Grid* g : {&W.sf, &W.oak, &W.mp})
+                for (int j = 0; j < g->nj && !lane; j++)
+                    for (int i = 0; i < g->ni && !lane; i++)
+                        for (int d : {0, 2}) {
+                            if (!g->edge(i, j, d)) continue;
+                            Vector2 m = g->node(i, j), e = g->node(i + DI[d], j + DJ[d]);
+                            if (distToSeg2D(cx, cz, m.x, m.y, e.x, e.y) < g->roadHalf) { lane = true; break; }
+                        }
+            if (lane) {
                 if (!inLane) firstLane = {cx, cz};
                 inLane++;
             }

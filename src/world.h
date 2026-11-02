@@ -325,6 +325,7 @@ private:
     void buildSkateSpots();
     void buildMap();
     void buildMapImage(Image& img, float X0, float Z0, float X1, float Z1, float RES);
+    void layMenloGrid();   // the town's street grid, laid before Caltrain so its platforms can stop short of the streets
     void buildCaltrain();
     void buildMenlo();
     void addEstate(float x0, float z0, float x1, float z1, int facing, RNG& r);

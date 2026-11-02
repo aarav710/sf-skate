@@ -25,6 +25,7 @@ struct SkyLook {
 struct Grade {
     Vector3 gain{1, 1, 1}, lift{0, 0, 0};
     float sat = 1, contrast = 1, bloom = 0.5f, vignette = 0.25f, blur = 0;
+    float roll = 0;           // 0 .. 1: bright colors start burning toward white earlier (golden hour)
 };
 
 struct Renderer {

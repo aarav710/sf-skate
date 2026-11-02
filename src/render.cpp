@@ -403,6 +403,8 @@ void main() {
     sh = mix(1.0, sh, (1.0 - 0.7 * smoothstep(120.0, 2200.0, dist)) * (1.0 - 0.3 * lowSun * smoothstep(100.0, 1400.0, dist)));
     vec3 fill = vec3(0.72, 0.88, 1.2) * dot(ambCol, vec3(0.333)) * (0.15 + 0.45 * lowSun);
     vec3 light = ambCol * hemi * ao * 1.06 + (sunCol * sh + fill * (1.0 - sh)) * diff * (0.6 + 0.4 * ao);
+    // with a low sun, most of that sky light reaches the ground whichever way it faces, so the streets stay readable
+    light += fill * (0.15 * lowSun) * (0.6 + 0.4 * N.y) * ao;
     if (m == 10) {                       // rooms: warm lamp light and soft window light, warmer still at night
         vec3 day = (ambCol * 1.2 + sunCol * 0.2 + vec3(0.28, 0.22, 0.12)) * (0.88 + 0.12 * hemi);
         light = mix(day, vec3(1.0, 0.88, 0.7) * (0.9 + 0.1 * hemi), lightsOn());
@@ -687,6 +689,7 @@ uniform sampler2D depthTex;   // full size depth of the near pass
 uniform vec4 aoInfo;          // on, near, far, -
 uniform vec2 aoTexel;
 uniform float hdrOn;
+uniform float roll;   // golden hour: bright colors start burning toward white sooner, so sunlit pastels stay apart
 out vec4 finalColor;
 float linz(float d) { float z = d * 2.0 - 1.0; return 2.0 * aoInfo.y * aoInfo.z / (aoInfo.z + aoInfo.y - z * (aoInfo.z - aoInfo.y)); }
 // AO up to full size: the four nearest half-size values, weighted toward those at this pixel's depth
@@ -712,7 +715,7 @@ vec3 shoulder(vec3 c) {
     float m = max(c.r, max(c.g, c.b));
     if (m <= 0.8) return c;
     float t = 0.8 + (m - 0.8) / (1.0 + (m - 0.8) / 0.3);
-    return mix(c * (t / m), vec3(t), smoothstep(1.5, 6.0, m) * 0.7);
+    return mix(c * (t / m), vec3(t), max(smoothstep(1.5, 6.0, m) * 0.7, smoothstep(1.0, 2.5, m) * 0.5 * roll));
 }
 void main() {
     vec2 uv = fragTexCoord;
@@ -733,6 +736,7 @@ void main() {
     vec2 v = uv - 0.5;
     c *= 1.0 - params.w * dot(v, v) * 1.6;
     if (hdrOn > 0.5) c = shoulder(max(c, vec3(0.0)));
+    else if (roll > 0.0) c = mix(c, shoulder(max(c, vec3(0.0))), roll);   // Medium, Low: the same roll-off below white
     // a touch of dither so the sky gradient doesn't band
     c += (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;
     finalColor = vec4(clamp(c, 0.0, 1.0), 1.0);
@@ -1150,6 +1154,7 @@ void Renderer::present(const Grade& g) {
     SetShaderValue(post, GetShaderLocation(post, "aoInfo"), aoInfo, SHADER_UNIFORM_VEC4);
     SetShaderValue(post, GetShaderLocation(post, "aoTexel"), aoTx, SHADER_UNIFORM_VEC2);
     SetShaderValue(post, GetShaderLocation(post, "hdrOn"), &hdrOn, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(post, GetShaderLocation(post, "roll"), &g.roll, SHADER_UNIFORM_FLOAT);
     SetShaderValueTexture(post, GetShaderLocation(post, "aoTex"), aoA.texture);
     SetShaderValueTexture(post, GetShaderLocation(post, "depthTex"), Texture2D{dsTex, w, h, 1, PIXELFORMAT_UNCOMPRESSED_R32});
     DrawTexturePro(scene.texture, {0, 0, (float)w, -(float)h}, {0, 0, (float)GetScreenWidth(), (float)GetScreenHeight()}, {0, 0}, 0, WHITE);

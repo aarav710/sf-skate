@@ -123,6 +123,10 @@ float taps(sampler2DShadow sm, vec3 c) {
     return 0.25 * (texture(sm, c + vec3(-t, -t, 0.0)) + texture(sm, c + vec3(t, -t, 0.0)) +
                    texture(sm, c + vec3(-t, t, 0.0)) + texture(sm, c + vec3(t, t, 0.0)));
 }
+// where to look a point up in a cascade with texels t metres wide: off the surface along its normal (slope-scaled,
+// but no more than 0.2 m unless the cascade's own texels need more, or low casters lose their shadows) and toward
+// the sun (slope-scaled)
+vec3 shadowOffset(vec3 Ng, float k, float t) { return Ng * (min(2.2 * k, max(2.2, 0.2 / t)) * t) + sunDir * (0.8 * k * t); }
 float sunShadow(vec3 p, vec3 Ng, float dist) {
     if (shadowInfo.x < 0.5) return 1.0;
     if (dist > 270.0) return mix(1.0, farShadow(p, Ng), shadowInfo.w);
@@ -130,19 +134,17 @@ float sunShadow(vec3 p, vec3 Ng, float dist) {
     // the ground, so the long shadows of a low sun stay attached to their casters
     float nl = clamp(dot(Ng, sunDir), 0.0, 1.0);
     float k = 1.0 + 3.0 * sqrt(1.0 - nl * nl) * (1.0 - 0.6 * Ng.y * Ng.y);
-    vec3 off = (Ng * 2.2 + sunDir * 0.8) * k;
-    vec3 off0 = off * shadowInfo.y;
-    vec4 l0 = lightVP0 * vec4(p + off0, 1.0);
+    vec4 l0 = lightVP0 * vec4(p + shadowOffset(Ng, k, shadowInfo.y), 1.0);
     float e0 = max(abs(l0.x), abs(l0.y));
     float s = 1.0, fade = smoothstep(220.0, 265.0, dist);
     if (e0 < 0.97) {
         s = taps(shadowMap0, l0.xyz * 0.5 + 0.5 - vec3(0.0, 0.0, 0.00002));
         if (e0 > 0.85 && shadowInfo.x > 1.5) {   // blend into the wide cascade near the edge of the sharp one
-            vec4 l1 = lightVP1 * vec4(p + off * shadowInfo.z, 1.0);
+            vec4 l1 = lightVP1 * vec4(p + shadowOffset(Ng, k, shadowInfo.z), 1.0);
             s = mix(s, taps(shadowMap1, l1.xyz * 0.5 + 0.5 - vec3(0.0, 0.0, 0.00004)), smoothstep(0.85, 0.97, e0));
         }
     } else if (shadowInfo.x > 1.5) {
-        vec4 l1 = lightVP1 * vec4(p + off * shadowInfo.z, 1.0);
+        vec4 l1 = lightVP1 * vec4(p + shadowOffset(Ng, k, shadowInfo.z), 1.0);
         float e1 = max(abs(l1.x), abs(l1.y));
         if (e1 >= 0.98) return 1.0;
         s = taps(shadowMap1, l1.xyz * 0.5 + 0.5 - vec3(0.0, 0.0, 0.00004));

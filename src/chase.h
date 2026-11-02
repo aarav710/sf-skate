@@ -55,6 +55,6 @@ private:
     void spawnCop(const Player& p, const World& w, float minD, float maxD, bool ahead);
     void moveCar(Cop& c, float dt, const Player& p, const World& w);
     void moveFoot(Cop& c, float dt, const Player& p, const World& w);
-    void arrest(Player& p);
+    void arrest(Player& p, World& w);
     void breakFree(Player& p);
 };

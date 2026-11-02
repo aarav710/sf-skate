@@ -74,7 +74,7 @@ bool JetSkis::dismount(Player& p, World& w) {
     if (bd > 1e8f) return false;
     skis[cur] = {{p.pos.x, 0, p.pos.z}, yaw, skis[cur].color};
     riding = false; cur = -1; speed = 0;
-    p.spawn({best.x, w.ground(best.x, best.z, best.y + 2), best.z}, atan2f(best.z - p.pos.z, best.x - p.pos.x));
+    p.spawnAshore(w, {best.x, w.ground(best.x, best.z, best.y + 2), best.z},atan2f(best.z - p.pos.z, best.x - p.pos.x));
     return true;
 }
 

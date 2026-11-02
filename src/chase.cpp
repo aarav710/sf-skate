@@ -106,12 +106,12 @@ void Chase::moveFoot(Cop& c, float dt, const Player& p, const World& w) {
     c.phase += dt * c.speed * 1.3f;
 }
 
-void Chase::arrest(Player& p) {
+void Chase::arrest(Player& p, World& w) {
     long long fine = std::min(p.score, (long long)(400 * stars));
     p.score -= fine;
     busts++;
     evBusted = true;
-    p.spawn(p.safePos, p.safeYaw);
+    p.respawnSafe(w);
     lastPos = p.pos;
     p.say("BUSTED!", {255, 70, 60, 255}, TextFormat("Fined %lld", fine));
     reset(9);
@@ -270,7 +270,7 @@ void Chase::update(float dt, Player& p, World& w) {
             strike = 0;
             meter = std::min(meter, 1.f);
             if (meter >= 1.f) breakFree(p);
-            else if (meter <= 0.f) { arrest(p); return; }
+            else if (meter <= 0.f) { arrest(p, w); return; }
         }
     }
 
@@ -279,7 +279,7 @@ void Chase::update(float dt, Player& p, World& w) {
     bool pinned = p.state == Player::BAIL && !scuffle && nearest < 3.5f;
     if (pinned) bustT += dt;
     else bustT = std::max(0.f, bustT - dt);
-    if (bustT > BUST_TIME) { arrest(p); return; }
+    if (bustT > BUST_TIME) { arrest(p, w); return; }
 
     // ---- losing them: get well clear and stay there
     if (nearest > ESCAPE_DIST) hideT += dt;

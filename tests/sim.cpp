@@ -865,6 +865,48 @@ int main() {
         snprintf(b, sizeof b, "ski=%d onWater=%d reset to %.0f,%.1f,%.0f terrain=%.1f splash=%d", ski, onWater, r.x, r.y, r.z, h, splash);
         check(ski >= 0 && onWater && h > 0.5f && !W.isWater(r.x, r.z, r.y) && !splash && s.p.state == Player::RIDE, "R on a jet ski resets to land", b);
     }
+    {   // stepping off a jet ski onto a sloping shore (Crissy Field, the Marina, Aquatic Park) leaves you a few metres
+        // inland with the board at rest: pushing and turning for a few seconds doesn't roll you back into the water (#129)
+        struct { float x, z; } probes[] = {{-1000, -1060}, {-700, -1060}, {-600, -1060}, {-400, -1060},
+                                           {600, -1120}, {640, -1100}, {680, -1100}, {720, -1100}};
+        int tried = 0, bad = 0;
+        std::string worst;
+        for (auto& pr : probes) {
+            // from the dry spot, head for the nearest water: that's where the ski floats
+            float best = 1e9f, dir = 0;
+            for (int k = 0; k < 64; k++) {
+                float a = k * (2 * PI / 64);
+                for (float r = 6; r < 120 && r < best; r += 2)
+                    if (W.isWater(pr.x + cosf(a) * r, pr.z + sinf(a) * r, 0)) { best = r; dir = a; }
+            }
+            if (best > 119 || W.isWater(pr.x, pr.z, 0)) continue;
+            float wx = pr.x + cosf(dir) * (best + 4), wz = pr.z + sinf(dir) * (best + 4);   // a little off the shore
+            for (int mode = 0; mode < 3; mode++) {
+                JetSkis js;
+                js.skis.push_back({{wx, 0, wz}, dir, 0});
+                Sim s; s.spawn(wx, wz, dir);
+                js.mount(0, s.p);
+                if (!js.dismount(s.p, W)) continue;
+                tried++;
+                bool splash = false;
+                for (int f = 0; f < 60 * 6 && !splash; f++) {
+                    Input in;
+                    in.push = mode == 0 || f < 10;   // 0: ride off inland; 1, 2: a tap on the push, then coast (2: and a turn)
+                    in.steer = mode == 0 ? clampf(wrapPi(dir + PI - s.p.yaw) * 3.f, -1.f, 1.f) : mode == 2 && f >= 20 && f < 40 ? 0.5f : 0.f;
+                    s.p.update(1.f / 60, in, W);
+                    splash = s.p.splashed;
+                }
+                if (splash) {
+                    bad++;
+                    char t[48];
+                    snprintf(t, sizeof t, " (%.0f,%.0f) mode %d", pr.x, pr.z, mode);
+                    if (worst.size() < 120) worst += t;
+                }
+            }
+        }
+        snprintf(b, sizeof b, "%d/%d dismounts splashed%s", bad, tried, worst.c_str());
+        check(tried >= 20 && bad == 0, "jet ski dismount doesn't roll back into the water", b);
+    }
     {   // the splash message names the water: ocean, bay, fountain, lake, lagoon, pool, salt pond (rolling in and dropping in)
         float sea = -1440;   // the Pacific, west of the city
         while (!W.isWater(sea, 0, 0) && sea > -3000) sea -= 5;

@@ -4,6 +4,7 @@
 
 // ---------------------------------------------------------------- Caltrain
 void World::buildCaltrain() {
+    layMenloGrid();
     const float L = railLen();
     Color ballast = col(120, 112, 102, M_GROUND), steel = col(150, 150, 156), tie = col(96, 84, 72);
     Color pole = col(160, 162, 166), wire = col(40, 40, 44);
@@ -53,6 +54,35 @@ void World::buildCaltrain() {
                  {"San Mateo", {1900, 5000}, col(226, 206, 160)},  {"Redwood City", {2330, 7470}, col(205, 192, 176)},
                  {"Menlo Park", {2428, 9400}, col(238, 204, 92)}};
     Color plat = col(176, 174, 168, M_GROUND), edge = col(236, 200, 50, M_GROUND), canopy = col(200, 202, 206);
+    // Is (x, z) on a street of the grids that meet the line (plus a margin)? The platforms stop at the streets, as the
+    // track itself crosses them at grade, so cars and skaters on the street never run into a platform.
+    auto onStreet = [&](float x, float z) {
+        for (const Grid* g : {&sf, &mp}) {
+            float half = g->roadHalf + 1.5f;
+            int i = (int)floorf((x - g->x0) / g->sp), j = (int)floorf((z - g->z0) / g->sp);
+            int jr = (int)roundf((z - g->z0) / g->sp), ic = (int)roundf((x - g->x0) / g->sp);
+            if (g->in(i, jr) && g->edge(i, jr, 0) && fabsf(z - (g->z0 + jr * g->sp)) < half) return true;   // east-west street
+            if (g->in(ic, j) && g->edge(ic, j, 2) && fabsf(x - (g->x0 + ic * g->sp)) < half) return true;   // north-south street
+        }
+        return false;
+    };
+    // the stretches of [s0, s1] along the track where the strip at `lat` (+/- w) is clear of streets
+    auto clearRuns = [&](float s0, float s1, float lat, float w) {
+        std::vector<std::pair<float, float>> runs;
+        float from = s0;
+        bool open = false;
+        for (float s = s0; s <= s1 + 0.01f; s += 1) {
+            bool blocked = false;
+            for (float l : {lat - w, lat, lat + w}) {
+                Vector3 q = trackPoint(s, l, nullptr);
+                blocked |= onStreet(q.x, q.z);
+            }
+            if (!blocked && !open) { open = true; from = s; }
+            if (blocked && open) { open = false; if (s - 1 - from >= 3) runs.push_back({from, s - 1}); }
+        }
+        if (open && s1 - from >= 3) runs.push_back({from, s1});
+        return runs;
+    };
     for (auto& st : list) {
         float s;
         railDistance(st.at.x, st.at.y, &s);
@@ -62,33 +92,45 @@ void World::buildCaltrain() {
         float yaw = atan2f(d.y, d.x);
         bool playable = inPlay(c.x, c.z);
         for (int side = -1; side <= 1; side += 2) {
-            Vector3 a = trackPoint(s - 70, side * 6.2f, nullptr), b = trackPoint(s + 70, side * 6.2f, nullptr);
             float top = c.y + 0.47f;
             MeshBuilder& m = mb(c.x, c.z);
-            m.beam({a.x, top - 0.6f, a.z}, {b.x, top - 0.6f, b.z}, 4.0f, 1.2f, plat);
-            Vector3 ea = trackPoint(s - 70, side * 4.4f, nullptr), eb = trackPoint(s + 70, side * 4.4f, nullptr);
-            m.beam({ea.x, top + 0.01f, ea.z}, {eb.x, top + 0.01f, eb.z}, 0.5f, 0.02f, edge);
-            if (playable)
-                addPlat({std::min(a.x, b.x) - 2, std::max(a.x, b.x) + 2, std::min(a.z, b.z) - 2, std::max(a.z, b.z) + 2, top, top, c.y - 1, 0, PK_PROP});
+            for (auto& run : clearRuns(s - 70, s + 70, side * 6.2f, 2.0f)) {
+                Vector3 a = trackPoint(run.first, side * 6.2f, nullptr), b = trackPoint(run.second, side * 6.2f, nullptr);
+                m.beam({a.x, top - 0.6f, a.z}, {b.x, top - 0.6f, b.z}, 4.0f, 1.2f, plat);
+                Vector3 ea = trackPoint(run.first, side * 4.4f, nullptr), eb = trackPoint(run.second, side * 4.4f, nullptr);
+                m.beam({ea.x, top + 0.01f, ea.z}, {eb.x, top + 0.01f, eb.z}, 0.5f, 0.02f, edge);
+                {   // the beam's footprint: its ends are the platform's ends (at a street too), 2 m either side
+                    float ax = fabsf(b.x - a.x), az = fabsf(b.z - a.z), n = std::max(sqrtf(ax * ax + az * az), 0.01f);
+                    float ex = 2 * az / n, ez = 2 * ax / n;
+                    if (playable)
+                        addPlat({std::min(a.x, b.x) - ex, std::max(a.x, b.x) + ex, std::min(a.z, b.z) - ez, std::max(a.z, b.z) + ez, top, top, c.y - 1, 0, PK_PROP});
+                }
+            }
             // canopy over the middle of each platform
             for (float k = -40; k <= 40; k += 20) {
                 Vector3 p = trackPoint(s + k, side * 6.8f, nullptr);
+                if (onStreet(p.x, p.z)) continue;
                 m.beam({p.x, top, p.z}, {p.x, top + 4.2f, p.z}, 0.25f, 0.25f, canopy);
             }
-            Vector3 ca = trackPoint(s - 45, side * 6.4f, nullptr), cb = trackPoint(s + 45, side * 6.4f, nullptr);
-            m.beam({ca.x, top + 4.3f, ca.z}, {cb.x, top + 4.3f, cb.z}, 3.6f, 0.25f, canopy);
+            for (auto& run : clearRuns(s - 45, s + 45, side * 6.4f, 1.8f)) {
+                Vector3 ca = trackPoint(run.first, side * 6.4f, nullptr), cb = trackPoint(run.second, side * 6.4f, nullptr);
+                m.beam({ca.x, top + 4.3f, ca.z}, {cb.x, top + 4.3f, cb.z}, 3.6f, 0.25f, canopy);
+            }
         }
         if (strcmp(st.name, "Menlo Park") == 0) continue; // its historic depot is built with the town
         Vector3 bp = trackPoint(s, 16, nullptr);
         mb(bp.x, bp.z).obox({bp.x, c.y + 3, bp.z}, {14, 3.6f, 4.5f}, yaw, 0, withMat(st.bldg, M_HOUSE));
-        if (playable) addPlat({bp.x - 14, bp.x + 14, bp.z - 14, bp.z + 14, c.y + 6.6f, c.y + 6.6f, c.y - 1, 0, PK_BUILDING});
+        if (playable) {   // the box that holds the drawn building: its 28 x 9 m footprint, turned to the track
+            float hx = 14 * fabsf(cosf(yaw)) + 4.5f * fabsf(sinf(yaw)), hz = 14 * fabsf(sinf(yaw)) + 4.5f * fabsf(cosf(yaw));
+            addPlat({bp.x - hx, bp.x + hx, bp.z - hz, bp.z + hz, c.y + 6.6f, c.y + 6.6f, c.y - 1, 0, PK_BUILDING});
+        }
     }
 }
 
 // Where you step off at a station: on the platform (west side first), inside the line of overhead-wire poles
 // (lateral 6.4), clear of the station building, with an open run of 50 m along the platform ahead. You face
-// along the platform toward whichever end the spot is nearer (south when it's in the middle). At 4th & King
-// the depot's collision box reaches over the middle of the west platform, so you land 20 m down it instead.
+// along the platform toward whichever end the spot is nearer (south when it's in the middle). The platforms
+// stop short of the streets that cross the line, so a spot is only taken where the deck runs unbroken ahead.
 Vector3 World::caltrainDropoff(int station, float* yaw) const {
     float s0 = stations[station].s;
     auto deck = [&](float s, float lat, Vector3* at) {   // the platform surface there, if there is one
@@ -107,7 +149,11 @@ Vector3 World::caltrainDropoff(int station, float* yaw) const {
             bool clear = true;
             for (float t = 0; t <= 50 && clear; t += 1) {   // the spot itself, then the way ahead
                 Vector3 q;
-                if (!deck(s0 + k + dir * t, lat, &q)) { q = trackPoint(s0 + k + dir * t, lat, nullptr); q.y += 0.47f; } // past the platform end
+                if (!deck(s0 + k + dir * t, lat, &q)) {   // past the platform end (but not a gap at a street)
+                    if (fabsf(k + dir * t) < 68) { clear = false; break; }
+                    q = trackPoint(s0 + k + dir * t, lat, nullptr);
+                    q.y += 0.47f;
+                }
                 Vector3 r = q;
                 if (collide(r, t == 0 ? 1.0f : 0.6f, q.y, 1.8f, &n)) clear = false;
             }
@@ -208,13 +254,16 @@ void World::addEstate(float x0, float z0, float x1, float z1, int facing, RNG& r
 }
 
 // ---------------------------------------------------------------- Menlo Park
-void World::buildMenlo() {
-    RNG r(650);
+void World::layMenloGrid() {
     mp.x0 = 1380; mp.z0 = 8850; mp.sp = 140; mp.ni = 14; mp.nj = 11;
     mp.roadHalf = 5.0f; mp.walkOff = 6.8f;
     buildGrid(mp);
     for (int j = 0; j < mp.nj; j++)
         if (j != 1 && j != 4 && j != 8) mp.setEdge(7, j, 0, false); // only a few grade crossings over the tracks
+}
+
+void World::buildMenlo() {
+    RNG r(650);
     buildRoads(mp, 1);
     const float ECR = mp.node(6, 0).x, SCA = mp.node(0, 4).y; // El Camino Real, Santa Cruz Avenue
     Color sidewalk = C_SIDEWALK, white = col(232, 232, 226, M_GROUND);
@@ -324,22 +373,29 @@ void World::buildMenlo() {
                     }
             }
 
-    // the historic Menlo Park depot (yellow Victorian, 1867) and its plaza
+    // the historic Menlo Park depot (yellow Victorian, 1867) and its plaza. Santa Cruz Avenue crosses the line beside
+    // it, so the depot stands north of the street, off its road strip (and the plaza's trees and benches stay off it)
     {
         float s = stations.back().s;
         Vector3 c = trackPoint(s, 0, nullptr);
         float y = c.y;
         float x0 = c.x - 25, x1 = c.x - 14;
-        groundPad(*this, mp.node(7, 0).x + 5, c.z - 45, c.x - 8.5f, c.z + 45, 0.12f, C_PLAZA);
+        float dz1 = SCA - mp.roadHalf - 5, dz0 = dz1 - 32;   // the depot's 32 m, clear of the street and its sidewalk
+        auto onSCA = [&](float z0, float z1) { return z1 > SCA - mp.roadHalf - 4 && z0 < SCA + mp.roadHalf + 4; };
+        float px1 = c.x - 8.5f, px0 = mp.node(7, 0).x + 5;
+        groundPad(*this, px0, c.z - 45, px1, SCA - mp.roadHalf - 2, 0.12f, C_PLAZA);
+        groundPad(*this, px0, SCA + mp.roadHalf + 2, px1, c.z + 45, 0.12f, C_PLAZA);
         Color yel = col(238, 204, 92, M_HOUSE), trim = col(250, 248, 240), brown = col(120, 72, 52);
-        addBox(x0, c.z - 16, x1, c.z + 16, y - 1, y + 5.2f, PK_BUILDING, yel, yel);
+        addBox(x0, dz0, x1, dz1, y - 1, y + 5.2f, PK_BUILDING, yel, yel);
         MeshBuilder& m = mb(c.x, c.z);
-        m.gable(x0 - 0.8f, x1 + 0.8f, c.z - 17, c.z + 17, y + 5.2f, 3.4f, 1, brown, yel);
-        m.box({x0 - 0.2f, y + 4.9f, c.z - 16.2f}, {x1 + 0.2f, y + 5.25f, c.z + 16.2f}, trim);
-        m.box({x1, y + 3.1f, c.z - 16}, {x1 + 2.6f, y + 3.3f, c.z + 16}, brown); // trackside awning
-        for (float z = c.z - 15; z <= c.z + 15; z += 5) m.box({x1 + 2.3f, y, z - 0.12f}, {x1 + 2.5f, y + 3.1f, z + 0.12f}, trim);
-        for (int k = 0; k < 4; k++) addTree(c.x - 34, c.z - 36 + k * 24, 4, 1.15f, r, true);
+        m.gable(x0 - 0.8f, x1 + 0.8f, dz0 - 1, dz1 + 1, y + 5.2f, 3.4f, 1, brown, yel);
+        m.box({x0 - 0.2f, y + 4.9f, dz0 - 0.2f}, {x1 + 0.2f, y + 5.25f, dz1 + 0.2f}, trim);
+        m.box({x1, y + 3.1f, dz0}, {x1 + 2.6f, y + 3.3f, dz1}, brown); // trackside awning
+        for (float z = dz0 + 1; z <= dz1 - 1; z += 5) m.box({x1 + 2.3f, y, z - 0.12f}, {x1 + 2.5f, y + 3.1f, z + 0.12f}, trim);
+        for (int k = 0; k < 4; k++)
+            if (!onSCA(c.z - 36 + k * 24, c.z - 36 + k * 24)) addTree(c.x - 34, c.z - 36 + k * 24, 4, 1.15f, r, true);
         for (float z = c.z - 30; z < c.z + 30; z += 12) {   // benches
+            if (onSCA(z, z + 5)) continue;
             addLedge(c.x - 31, z, c.x - 29.5f, z + 5, 0.48f, col(140, 110, 80));
             float y = terrain(c.x - 30.25f, z + 2.5f) + 0.48f;
             for (float u : {1.2f, 3.7f}) seats.push_back({{c.x - 30.45f, y, z + u}, 0.f, false});

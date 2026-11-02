@@ -1490,6 +1490,62 @@ int main() {
         snprintf(b, sizeof b, "%d bad of 2", bad);
         check(bad == 0, "Caltrain arrival spots are clear", b);
     }
+    {   // the stations don't block the streets (#139, #141, #142): no traffic lane of the street grids runs through a
+        // station building, platform or depot, the 4th & King spawn rides down the platform, and so does the Menlo Park
+        // street (z = 9412) beside the depot
+        std::vector<const Platform*> near;
+        for (auto& pl : W.plats) {
+            if (pl.kind != PK_BUILDING && pl.kind != PK_PROP) continue;
+            float cx = (pl.x0 + pl.x1) / 2, cz = (pl.z0 + pl.z1) / 2, s;
+            if (cz > 800 && pl.h1 > W.terrain(cx, cz) + 0.2f && W.railDistance(cx, cz, &s) < 40) near.push_back(&pl);
+        }
+        int blocked = 0;
+        std::string det;
+        const Grid* grids[2] = {&W.sf, &W.mp};
+        for (const Grid* g : grids)
+            for (int j = 0; j < g->nj; j++)
+                for (int i = 0; i < g->ni; i++)
+                    for (int d = 0; d < 4; d += 2) {
+                        if (!g->edge(i, j, d)) continue;
+                        Vector2 a = g->node(i, j), dir = {(float)DI[d], (float)DJ[d]}, right = {-dir.y, dir.x};
+                        for (float lat : {-2.4f, 2.4f})   // the two lanes of the street, as the cars drive them
+                            for (float u = 0; u <= g->sp; u += 0.5f) {
+                                float x = a.x + dir.x * u + right.x * lat, z = a.y + dir.y * u + right.y * lat;
+                                bool hit = false;
+                                for (auto* pl : near) hit |= x > pl->x0 - 1 && x < pl->x1 + 1 && z > pl->z0 - 1 && z < pl->z1 + 1;
+                                if (!hit) continue;
+                                if (blocked++ < 3) { char t[80]; snprintf(t, sizeof t, " (%.0f, %.0f)", x, z); det += t; }
+                                u = g->sp;   // one hit per lane is enough
+                            }
+                    }
+        // the spawn at 4th & King, facing along the platform
+        const Spot* sp = nullptr;
+        for (auto& s : W.spots) if (strcmp(s.name, "Caltrain 4th & King") == 0) sp = &s;
+        float movedKing = 0; bool bailKing = true;
+        if (sp) {
+            Sim s; s.spawn(sp->pos.x, sp->pos.z, sp->yaw);
+            Input in; in.push = true;
+            // (the platform ends at the street ahead, 65 m on: ride half of that)
+            s.run(60 * 6, in, [&](Player& p) { return p.state == Player::BAIL || Vector2Distance({p.pos.x, p.pos.z}, {sp->pos.x, sp->pos.z}) > 40; });
+            bailKing = s.p.state == Player::BAIL;
+            movedKing = Vector2Distance({s.p.pos.x, s.p.pos.z}, {sp->pos.x, sp->pos.z});
+        }
+        // east along Menlo Park's Santa Cruz Avenue, past the depot and across the tracks
+        float zS = W.mp.node(0, 4).y + 2.4f, xEnd = 0; bool bailMenlo = true;
+        {
+            Sim s; s.spawn(W.mp.node(6, 4).x + 20, zS, 0);
+            bailMenlo = false;
+            for (int f = 0; f < 60 * 40 && !bailMenlo && s.p.pos.x < W.mp.node(8, 4).x - 20; f++) {
+                Input in; in.push = s.p.speed < 8;
+                s.run(1, in);
+                bailMenlo = s.p.state == Player::BAIL;
+            }
+            xEnd = s.p.pos.x;
+        }
+        snprintf(b, sizeof b, "%d street lanes through station boxes%s; 4th & King spawn rides %.0f m (bail %d); Menlo street bail %d at x=%.1f",
+                 blocked, det.c_str(), movedKing, bailKing, bailMenlo, xEnd);
+        check(blocked == 0 && sp && !bailKing && movedKing > 39 && !bailMenlo && xEnd > W.mp.node(8, 4).x - 25, "Stations stay off the streets", b);
+    }
     {   // Menlo Park: big homes, oak-lined streets you can skate down
         int homes = 0;
         for (auto& pl : W.plats)

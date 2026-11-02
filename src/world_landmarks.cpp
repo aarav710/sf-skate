@@ -1189,7 +1189,8 @@ void World::buildMeta() {
     spot("Vista Point (Marin)", -1095, -2400, PI / 2);
     spot("SFO Airport", 2010, 2095, PI);
     {
-        Vector3 p = trackPoint(stations[0].s - 30, 6.2f, nullptr);
+        // on the platform, inside the line of wire poles (lateral 6.4) so the ride down it is clear
+        Vector3 p = trackPoint(stations[0].s - 30, 5.2f, nullptr);
         spots.push_back({"Caltrain 4th & King", {p.x, ground(p.x, p.z, 200), p.z}, PI / 2});
     }
     spot("Menlo Park", mp.node(5, 0).x - 20, mp.node(0, 4).y + 2.4f, PI);

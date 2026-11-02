@@ -1254,18 +1254,6 @@ void World::buildMeta() {
     cablePath({gx(19), gz(8)}, {gx(19), gz(1)});
     cablePath({gx(23), gz(6)}, {gx(14), gz(6)});
 
-    auto pedPath = [&](std::vector<Vector2> pts) {
-        Path P;
-        P.p = pts;
-        P.finish();
-        pedPaths.push_back(P);
-    };
-    pedPath({{1296, -950}, {1296, -300}});
-    pedPath({{1278, -100}, {1278, 600}});
-    pedPath({{-1435, -420}, {-1435, 1700}});
-    pedPath({{-900, -1075}, {-200, -1080}});
-    pedPath({{1278, -1000}, {1100, -1090}, {700, -1120}});
-
     RNG r(606);
     struct TS { float x, z, rad; int n; };
     TS ts[] = {{-1150, -2415, 22, 14}, {-285, 885, 20, 12}, {-330, 175, 30, 14}, {1250, -224, 6, 8},
@@ -1344,6 +1332,22 @@ void World::buildMeta() {
 }
 
 // ---------------------------------------------------------------- generation order
+// The promenades the walkers follow (waterfront, the Great Highway, the Marina Green). Laid out before the parks, so
+// no solid tree is planted on them (walkers don't dodge trunks).
+void World::buildPedPaths() {
+    auto pedPath = [&](std::vector<Vector2> pts) {
+        Path P;
+        P.p = pts;
+        P.finish();
+        pedPaths.push_back(P);
+    };
+    pedPath({{1296, -950}, {1296, -300}});
+    pedPath({{1278, -100}, {1278, 600}});
+    pedPath({{-1435, -420}, {-1435, 1700}});
+    pedPath({{-900, -1075}, {-200, -1080}});
+    pedPath({{1278, -1000}, {1100, -1090}, {700, -1120}});
+}
+
 void World::generate(void (*progress)(const char*, float)) {
     // between steps: hand whatever the early bake has finished to the GPU
     auto step = [&](const char* msg, float f) { if (bake) uploadReady(); progress(msg, f); };
@@ -1386,6 +1390,7 @@ void World::generate(void (*progress)(const char*, float)) {
     buildStreetFurniture(sf, false);
     buildIntersections(sf);
     buildStreetFurniture(oak, true);
+    buildPedPaths();
     buildParks();
     step("Drawing the map", 0.9f);
     buildMeta();

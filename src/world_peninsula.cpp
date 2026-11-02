@@ -226,7 +226,7 @@ void World::buildMenlo() {
         for (float lx : {-5.5f, 5.5f}) groundPad(*this, ECR + lx - 0.08f, z, ECR + lx + 0.08f, z + 5, 0.11f, white);
     for (float z = MZ0 + 25; z < MZ1 - 20; z += 28) {
         if (fabsf(z - SCA) < 15) continue;
-        addTree(ECR, z, 0, 1.25f, r, true);
+        addTree(ECR, z, 0, 1.25f, r, true, true);   // (the median: on the road on purpose)
     }
     for (float z = MZ0 + 30; z < MZ1 - 20; z += 45)
         for (int side = -1; side <= 1; side += 2) addLamp(ECR + side * 12.2f, z, side > 0 ? PI : 0);
@@ -317,7 +317,7 @@ void World::buildMenlo() {
                 for (float s = 14; s < mp.sp - 12; s += 20)
                     for (int side = -1; side <= 1; side += 2) {
                         if (!r.chance(0.55f)) continue;
-                        Vector2 p = Vector2Add(Vector2Add(a, Vector2Scale(dir, s + r.range(-3, 3))), Vector2Scale(rr, side * 7.0f));
+                        Vector2 p = Vector2Add(Vector2Add(a, Vector2Scale(dir, s + r.range(-3, 3))), Vector2Scale(rr, side * (mp.walkOff + 1.1f)));   // just outside the walking line
                         float ss;
                         if (railDistance(p.x, p.y, &ss) < 14) continue;
                         addTree(p.x, p.y, r.chance(0.7f) ? 4 : (r.chance(0.5f) ? 0 : 5), r.range(0.8f, 1.15f), r, true);

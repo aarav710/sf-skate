@@ -17,6 +17,7 @@
 #include <cstring>
 #include <string>
 #include <algorithm>
+#include <unordered_set>
 
 static World W;
 static int fails = 0;
@@ -2148,6 +2149,70 @@ int main() {
         snprintf(b, sizeof b, "%d of %d walker samples (%d walkers) sunk into front steps; deepest %.2f m at (%.1f, %.1f)",
                  sunk, samples, walkers, worst, at.x, at.z);
         check(W.stoops.size() > 100 && sunk == 0, "Walkers go round front steps", b);
+    }
+    {   // solid tree trunks stand clear of the streets (#138, #143): none in a traffic lane (a few dozen sat in Haight-
+        // Ashbury and Telegraph Hill lanes, bailing the skater and letting cars through), and no sidewalk or path
+        // walker is ever inside one (1,101 trunks had somebody in them during a 150 s run, from t=0 in the Presidio,
+        // since walkers only go round stoops). Trunk = a PK_POLE column 0.5-1.6 m across, as the trees' collision is.
+        std::vector<const Platform*> trunks;
+        std::unordered_multimap<int, const Platform*> tcell;
+        auto key = [](float x, float z) { return (int)floorf(x / 8.f) * 8192 + (int)floorf(z / 8.f); };
+        for (const Platform& pl : W.plats) {
+            float wx = pl.x1 - pl.x0, wz = pl.z1 - pl.z0;
+            if (pl.kind != PK_POLE || wx < 0.5f || wx > 1.6f || wz < 0.5f || wz > 1.6f) continue;
+            trunks.push_back(&pl);
+            tcell.insert({key((pl.x0 + pl.x1) / 2, (pl.z0 + pl.z1) / 2), &pl});
+        }
+        int inLane = 0;
+        Vector2 firstLane{};
+        for (const Platform* pl : trunks) {
+            float cx = (pl->x0 + pl->x1) / 2, cz = (pl->z0 + pl->z1) / 2;
+            // the lanes: within roadHalf of any drivable edge, measured straight against the edges (not via
+            // nearGridStreet), except the Embarcadero's and El Camino Real's palm medians, which stand in the road on purpose
+            if (fabsf(cx - W.sf.node(24, 0).x) < 3.f || fabsf(cx - W.mp.node(6, 0).x) < 3.f) continue;
+            bool lane = false;
+            for (const Grid* g : {&W.sf, &W.oak, &W.mp})
+                for (int j = 0; j < g->nj && !lane; j++)
+                    for (int i = 0; i < g->ni && !lane; i++)
+                        for (int d : {0, 2}) {
+                            if (!g->edge(i, j, d)) continue;
+                            Vector2 m = g->node(i, j), e = g->node(i + DI[d], j + DJ[d]);
+                            if (distToSeg2D(cx, cz, m.x, m.y, e.x, e.y) < g->roadHalf) { lane = true; break; }
+                        }
+            if (lane) {
+                if (!inLane) firstLane = {cx, cz};
+                inLane++;
+            }
+        }
+        Traffic T; T.init(W);
+        Player pl; pl.spawn({0, W.ground(0, 0, 1000) + 200, 0}, 0);   // the skater out of everyone's way
+        int samples = 0, inside = 0;
+        std::unordered_set<const Platform*> hit;
+        Vector3 at{};
+        for (int f = 1; f <= 60 * 40; f++) {
+            T.update(1.f / 60, W, pl);
+            if (f % 30) continue;   // twice a second, so every walker is checked wherever the run takes it
+            for (const Ped& p : T.peds) {
+                if (p.mode > 1 || p.knock > 0) continue;
+                samples++;
+                for (int dx = -1; dx <= 1; dx++)
+                    for (int dz = -1; dz <= 1; dz++) {
+                        auto r = tcell.equal_range(key(p.pos.x + dx * 8.f, p.pos.z + dz * 8.f));
+                        for (auto it = r.first; it != r.second; ++it) {
+                            const Platform* t = it->second;
+                            if (p.pos.x > t->x0 && p.pos.x < t->x1 && p.pos.z > t->z0 && p.pos.z < t->z1 && fabsf(p.pos.y - t->h0) < 8.f) {
+                                if (hit.insert(t).second) at = p.pos;
+                                inside++;
+                            }
+                        }
+                    }
+            }
+        }
+        snprintf(b, sizeof b, "%d of %d trunks in a traffic lane (first at %.1f, %.1f); %d of %d walker samples inside one of %d trunks (%d different; first at %.1f, %.1f)",
+                 inLane, (int)trunks.size(), firstLane.x, firstLane.y, inside, samples, (int)trunks.size(), (int)hit.size(), at.x, at.z);
+        // (the bar is zero, not a few: trunks are kept off the walking lines outright, so no walker's route runs through
+        // one. Forty seconds, ~430,000 samples; before, 829 of them in 494 trunks, and 165 trunks in lanes.)
+        check(!trunks.empty() && inLane == 0 && inside == 0, "Solid trunks clear of streets and walkers", b);
     }
     {   // the Golden Gate walkways have people on them, on the deck: not on the seabed 45 m below or walking inside
         // the approach deck (#87). Skater standing mid-span, 30 s, every walker on a deck path checked twice a second,

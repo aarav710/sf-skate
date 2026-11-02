@@ -774,6 +774,28 @@ bool World::doorBlocked(float x, float z, float pad) const {
     return false;
 }
 
+bool World::nearGridStreet(float x, float z, float pad) const {
+    for (const Grid* g : {&sf, &oak, &mp}) {
+        float r = std::min(g->walkOff + pad, g->sp * 0.5f - 1.f);
+        float ui = (x - g->x0) / g->sp, uj = (z - g->z0) / g->sp;
+        int ri = (int)lroundf(ui), rj = (int)lroundf(uj);
+        if (fabsf(ui - ri) * g->sp < r)   // beside a street running along z: its segments around z
+            for (int j = (int)floorf(uj) - 1; j <= (int)floorf(uj) + 1; j++)
+                if (g->in(ri, j) && g->edge(ri, j, 2) && distToSeg2D(x, z, g->node(ri, j).x, g->node(ri, j).y, g->node(ri, j + 1).x, g->node(ri, j + 1).y) < r) return true;
+        if (fabsf(uj - rj) * g->sp < r)   // ...or along x
+            for (int i = (int)floorf(ui) - 1; i <= (int)floorf(ui) + 1; i++)
+                if (g->in(i, rj) && g->edge(i, rj, 0) && distToSeg2D(x, z, g->node(i, rj).x, g->node(i, rj).y, g->node(i + 1, rj).x, g->node(i + 1, rj).y) < r) return true;
+    }
+    return false;
+}
+
+bool World::nearPedPath(float x, float z, float reach) const {
+    for (const Path& P : pedPaths)
+        for (size_t k = 0; k + 1 < P.p.size(); k++)
+            if (distToSeg2D(x, z, P.p[k].x, P.p[k].y, P.p[k + 1].x, P.p[k + 1].y) < reach) return true;
+    return false;
+}
+
 Vector2 World::stoopDetour(float x, float z, Vector2 routeDir) const {
     // The walking line runs ~2 m out from the house fronts, and a tall stoop reaches up to 3 m out: a walker
     // following it would go straight through the steps (too tall to step onto from the side, and far from the

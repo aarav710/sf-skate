@@ -11,6 +11,7 @@ struct Look {
     float wet = 0;            // 0 dry .. 1 soaked streets (rain)
     float fogH = 300;         // haze scale height: low for Karl the Fog, which pools in the valleys
     float clear = 1;          // 1 clear .. 0 in Karl the Fog or rain: turns the golden-hour haze tint off
+    float roll = 0;           // the grade's roll (see Grade): buys an 8-bit scene headroom above white
 };
 
 // The sky behind everything: gradient, haze at the horizon, sun or moon, and a drifting cloud layer.
@@ -59,6 +60,7 @@ struct Renderer {
     unsigned dsFbo = 0, dsTex = 0;
     RenderTexture2D aoA{}, aoB{};
     float viewFovy = 60, viewNear = 0.15f, viewFar = 270;
+    float outScale = 1;        // the scene is drawn at this and scaled back in post (headroom in 8 bits, see setLook)
 
     void init();
     void setQuality(int q);

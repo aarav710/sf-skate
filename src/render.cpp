@@ -77,6 +77,7 @@ uniform float night;
 uniform float time;
 uniform float wet;
 uniform float clearK;      // 1 in clear weather, 0 in Karl the Fog or rain
+uniform float outScale;    // < 1: headroom above white in an 8-bit scene (see Renderer::setLook)
 uniform int useVN;
 uniform sampler2DShadow shadowMap0;
 uniform sampler2DShadow shadowMap1;
@@ -402,7 +403,7 @@ void main() {
         // how much you see through: most looking straight down in the shallows, a mirror at a low angle, opaque far off
         float a = mix(0.42 + 0.58 * fres, 1.0, smoothstep(220.0, 650.0, dist));
         a = max(a, cap * 0.9);
-        finalColor = vec4(mix(col, fogColor(V), f), a);
+        finalColor = vec4(mix(col, fogColor(V), f) * outScale, a);
         return;
     } else if (m == 4) {                 // lights
         emis = base * lightsOn() * 1.3;
@@ -497,7 +498,7 @@ void main() {
     float f = fogAmount(dist);
     if (length(emis) > 0.05) f *= 0.75;   // lights shine through the fog a bit
     col = mix(col, fogColor(V), f);
-    finalColor = vec4(col, 1.0 - clamp(bloom * (1.0 - f * 0.8), 0.0, 1.0));
+    finalColor = vec4(col * outScale, 1.0 - clamp(bloom * (1.0 - f * 0.8), 0.0, 1.0));
 })";
 
 // shadow casters only need depth
@@ -553,6 +554,7 @@ uniform vec2 lens;         // tan(fovy / 2) * aspect, tan(fovy / 2)
 uniform vec3 sunDir, sunCol, top, horizon, fogCol;
 uniform vec4 misc;         // night, time, rain, fog
 uniform vec3 cloudK;       // coverage threshold, opacity, drift time
+uniform float outScale;    // as in the city shader
 out vec4 finalColor;
 void main() {
     vec2 ndc = gl_FragCoord.xy / res * 2.0 - 1.0;
@@ -623,7 +625,7 @@ void main() {
     col = mix(col, cloudCol, cloud) + halo;
     col = mix(col, discCol, disc);
     float bloom = disc * mix(0.8, 0.45, moonK) * (1.0 - fogK);
-    finalColor = vec4(col, 1.0 - bloom);
+    finalColor = vec4(col * outScale, 1.0 - bloom);
 })";
 
 // ---------------------------------------------------------------- ambient occlusion (High)
@@ -730,6 +732,7 @@ uniform vec4 aoInfo;          // on, near, far, -
 uniform vec2 aoTexel;
 uniform float hdrOn;
 uniform float roll;   // golden hour: bright colors start burning toward white sooner, so sunlit pastels stay apart
+uniform float inScale;   // undoes the scene's outScale
 out vec4 finalColor;
 float linz(float d) { float z = d * 2.0 - 1.0; return 2.0 * aoInfo.y * aoInfo.z / (aoInfo.z + aoInfo.y - z * (aoInfo.z - aoInfo.y)); }
 // AO up to full size: the four nearest half-size values, weighted toward those at this pixel's depth
@@ -769,6 +772,7 @@ void main() {
     }
     if (aoInfo.x > 0.5) c *= mix(1.0, aoAt(uv), c0.a);   // lit surfaces only, not lamps and windows
     c += (texture(bloomTex, uv).rgb * 0.6 + texture(bloomTex2, uv).rgb * 0.8) * params.z;
+    c *= inScale;
     c = c * gain + lift * (1.0 - c);
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
     c = mix(vec3(l), c, params.x);
@@ -776,7 +780,7 @@ void main() {
     vec2 v = uv - 0.5;
     c *= 1.0 - params.w * dot(v, v) * 1.6;
     if (hdrOn > 0.5) c = shoulder(max(c, vec3(0.0)));
-    else if (roll > 0.0) c = mix(c, shoulder(max(c, vec3(0.0))), roll);   // Medium, Low: the same roll-off below white
+    else if (roll > 0.0) c = mix(c, shoulder(max(c, vec3(0.0))), roll);   // Medium, Low: the same roll-off, in the headroom
     // a touch of dither so the sky gradient doesn't band
     c += (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;
     finalColor = vec4(clamp(c, 0.0, 1.0), 1.0);
@@ -929,6 +933,10 @@ void Renderer::ensureTargets() {
 
 void Renderer::setLook(const Look& L) {
     float misc[3] = {1.f / shSize, L.fogH, 0};
+    // Medium and Low draw into an 8-bit scene, which clips at white. When the grade rolls bright colors off (golden
+    // hour), the scene is drawn at 1/1.5 and the post pass scales it back up, so sunlit walls and the sun have room
+    // above white to roll off into instead of clipping flat.
+    outScale = (!hdr && L.roll > 0.f) ? 1.f / (1.f + 0.5f * L.roll) : 1.f;
     for (Shader* s : {&city, &cityFar}) {
         auto set = [&](const char* n, const void* v, int t) { SetShaderValue(*s, GetShaderLocation(*s, n), v, t); };
         set("camPos", &L.camPos, SHADER_UNIFORM_VEC3);
@@ -942,6 +950,7 @@ void Renderer::setLook(const Look& L) {
         set("time", &L.time, SHADER_UNIFORM_FLOAT);
         set("wet", &L.wet, SHADER_UNIFORM_FLOAT);
         set("clearK", &L.clear, SHADER_UNIFORM_FLOAT);
+        set("outScale", &outScale, SHADER_UNIFORM_FLOAT);
         set("shadowMisc", misc, SHADER_UNIFORM_VEC3);
     }
 }
@@ -1077,6 +1086,7 @@ void Renderer::drawSky(const SkyLook& k) {
     set("fogCol", &k.fog, SHADER_UNIFORM_VEC3);
     set("misc", misc, SHADER_UNIFORM_VEC4);
     set("cloudK", ck, SHADER_UNIFORM_VEC3);
+    set("outScale", &outScale, SHADER_UNIFORM_FLOAT);
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), WHITE);
     EndShaderMode();
     glEnable(GL_BLEND);
@@ -1197,6 +1207,8 @@ void Renderer::present(const Grade& g) {
     SetShaderValue(post, GetShaderLocation(post, "aoTexel"), aoTx, SHADER_UNIFORM_VEC2);
     SetShaderValue(post, GetShaderLocation(post, "hdrOn"), &hdrOn, SHADER_UNIFORM_FLOAT);
     SetShaderValue(post, GetShaderLocation(post, "roll"), &g.roll, SHADER_UNIFORM_FLOAT);
+    float inScale = 1.f / outScale;
+    SetShaderValue(post, GetShaderLocation(post, "inScale"), &inScale, SHADER_UNIFORM_FLOAT);
     SetShaderValueTexture(post, GetShaderLocation(post, "aoTex"), aoA.texture);
     SetShaderValueTexture(post, GetShaderLocation(post, "depthTex"), Texture2D{dsTex, w, h, 1, PIXELFORMAT_UNCOMPRESSED_R32});
     DrawTexturePro(scene.texture, {0, 0, (float)w, -(float)h}, {0, 0, (float)GetScreenWidth(), (float)GetScreenHeight()}, {0, 0}, 0, WHITE);

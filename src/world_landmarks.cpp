@@ -756,9 +756,17 @@ void World::buildSkateSpots() {
         addRamp(1240, -244, 1243, -238, 0.9f, 0, true);     // kicker
         addRamp(1222, -300, 1225, -294, 0.9f, 0, true);     // kicker
         // Vaillancourt Fountain
+        // a raised basin: a stone rim around the splash rectangle with the water drawn above the plaza, so the
+        // visible pool is exactly where the game counts water (you splash only after clearing the rim)
         ponds.push_back({1236, -312, 1253, -296, "fountain"});
+        float fy = terrain(1244.5f, -304), wy = fy + 0.4f;
+        Color rim = col(150, 146, 142);
+        addLedge(1235, -313, 1254, -312, 0.7f, rim);   // north and south sides, then west and east
+        addLedge(1235, -296, 1254, -295, 0.7f, rim);
+        addLedge(1235, -312, 1236, -296, 0.7f, rim);
+        addLedge(1253, -312, 1254, -296, 0.7f, rim);
         MeshBuilder& m = mb(1245, -304);
-        m.quad({1236, y - 0.25f, -312}, {1253, y - 0.25f, -312}, {1253, y - 0.25f, -296}, {1236, y - 0.25f, -296}, col(60, 110, 120, M_WATER));
+        m.quad({1236, wy, -312}, {1253, wy, -312}, {1253, wy, -296}, {1236, wy, -296}, col(60, 110, 120, M_WATER));
         RNG r(12);
         for (int k = 0; k < 14; k++) {
             Vector3 a = {r.range(1238, 1251), y - 0.5f, r.range(-310, -298)};
@@ -889,9 +897,10 @@ void World::buildSkateSpots() {
     for (float z = -900; z < 600; z += 45) {
         if (z > -300 && z < -100) continue;
         if (z > 300 && z < 370) continue;
-        addLedge(1281, z, 1284.5f, z + 0.8f, 0.5f, col(120, 90, 60));
         float y = terrain(1282.75f, z + 0.4f) + 0.5f;
-        if (y < 1.3f) continue;   // the north end of the row runs out past the seawall, under the bay
+        // the north end of the row runs out past the seawall, under the bay, or onto a pier deck: no bench there
+        if (y < 1.3f || overPier(1282.75f, z + 0.4f)) continue;
+        addLedge(1281, z, 1284.5f, z + 0.8f, 0.5f, col(120, 90, 60));
         bool north = ((int)(z / 45.f)) & 1;   // alternate benches face up and down the promenade
         for (float x : {1282.f, 1283.6f}) seats.push_back({{x, y, north ? z + 0.32f : z + 0.48f}, north ? -PI / 2 : PI / 2, false});
     }

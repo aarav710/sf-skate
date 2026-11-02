@@ -641,7 +641,9 @@ void Traffic::update(float dt, World& w, Player& pl) {
             float rx = pp.x - c.pos.x, rz = pp.z - c.pos.z;
             float along = rx * f.x + rz * f.y, lat = fabsf(-rx * f.y + rz * f.x);
             float look = 6 + c.speed * 0.9f + carModel(c.type).halfLen;
-            if (along > 0 && along < look && lat < 2.3f && fabsf(pp.y - c.pos.y) < 3) {
+            const CarModel& cm = carModel(c.type);
+            bool onRoof = fabsf(along) <= cm.halfLen && lat <= cm.halfWid && pp.y > c.pos.y + cm.height - 0.6f;   // its own rider
+            if (along > 0 && along < look && lat < 2.3f && fabsf(pp.y - c.pos.y) < 3 && !onRoof) {
                 target = 0;
                 if (c.honkCD <= 0 && c.speed > 3 && along < 14) { evHonk = true; c.honkCD = 4; }
             }
@@ -1232,11 +1234,13 @@ void Traffic::update(float dt, World& w, Player& pl) {
 
 // The roof of a vehicle as the skater lands on it: the whole footprint, 0.1 m below the top of the model (as the
 // PK_CAR platforms of parked cars), tilted with the body as it's drawn (yaw, then pitch about its center).
-static VehicleTop roofOf(const Car& c) {
-    const CarModel& m = carModel(c.type);
-    float cp = cosf(c.pitch);
-    return {c.pos.x, c.pos.z, cosf(c.yaw), sinf(c.yaw), m.halfLen * cp, m.halfWid, c.pos.y + (m.height - 0.1f) * cp, tanf(c.pitch)};
+static VehicleTop roofAt(int type, Vector3 pos, float yaw, float pitch) {
+    const CarModel& m = carModel(type);
+    float cp = cosf(pitch);
+    return {pos.x, pos.z, cosf(yaw), sinf(yaw), m.halfLen * cp, m.halfWid, pos.y + (m.height - 0.1f) * cp, tanf(pitch)};
 }
+static VehicleTop roofOf(const Car& c) { return roofAt(c.type, c.pos, c.yaw, c.pitch); }
+static VehicleTop roofBefore(const Car& c) { return roofAt(c.type, c.lastPos, c.lastYaw, c.lastPitch); }   // (at the start of this update)
 
 void Traffic::publishRoofs(World& w, Vector3 at) const {
     w.vehicleTops.clear();
@@ -1258,16 +1262,20 @@ void Traffic::carryRider(Player& pl, float dt) {
     int was = rideCar;
     rideCar = -1;
     if (pl.state != Player::RIDE) return;
-    auto before = [](const Car& c) { Car o = c; o.pos = c.lastPos; o.yaw = c.lastYaw; o.pitch = c.lastPitch; return roofOf(o); };
+    // the car whose old roof is under the skater's feet: the one they were on if it still is, else the highest (as
+    // skaterGround has them standing), not just the first in the list that overlaps there
     int on = -1;
-    for (int k = 0; k < (int)cars.size() && on < 0; k++) {
+    float best = -1e9f;
+    for (int k = 0; k < (int)cars.size(); k++) {
         const Car& c = cars[k];
         if (!c.lastPlaced) continue;
-        VehicleTop r = before(c);
-        float dx = pl.pos.x - r.x, dz = pl.pos.z - r.z;
-        if (dx * dx + dz * dz > sq(r.halfLen + r.halfWid + 1)) continue;
-        float h = r.at(pl.pos.x, pl.pos.z);
-        if (h > -1e8f && fabsf(pl.pos.y - h) < 0.15f) on = k;
+        const CarModel& m = carModel(c.type);
+        float dx = pl.pos.x - c.lastPos.x, dz = pl.pos.z - c.lastPos.z;
+        if (dx * dx + dz * dz > sq(m.halfLen + m.halfWid + 1)) continue;   // (cheap cull, before building the roof)
+        float h = roofBefore(c).at(pl.pos.x, pl.pos.z);
+        if (h < -1e8f || fabsf(pl.pos.y - h) >= 0.15f) continue;
+        if (k == was) h += 1e3f;
+        if (h > best) { best = h; on = k; }
     }
     rideCar = on;
     if (on < 0) return;
@@ -1275,7 +1283,7 @@ void Traffic::carryRider(Player& pl, float dt) {
     float dyaw = wrapPi(c.yaw - c.lastYaw);
     Vector3 d = Vector3Subtract(c.pos, c.lastPos);
     if (!c.placed || fabsf(dyaw) > 0.5f || d.x * d.x + d.z * d.z > 6 * 6) return;   // (jumped, not driven)
-    VehicleTop r0 = before(c), r1 = roofOf(c);
+    VehicleTop r0 = roofBefore(c), r1 = roofOf(c);
     float dx = pl.pos.x - r0.x, dz = pl.pos.z - r0.z;
     float lx = dx * r0.fx + dz * r0.fz, lz = -dx * r0.fz + dz * r0.fx;
     if (was != on) pl.speed -= (d.x * cosf(pl.yaw) + d.z * sinf(pl.yaw)) / std::max(dt, 1e-4f);   // just landed

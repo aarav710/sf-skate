@@ -207,8 +207,15 @@ void World::buildGoldenGate() {
     // anchorages
     for (float az : {-1045.f, -2330.f}) {
         float y = ggDeck(az);
-        m.box({X - 22, terrain(X, az) - 5, az - 12}, {X - 14.5f, y + 4, az + 12}, conc, conc, 0.8f);
-        m.box({X + 14.5f, terrain(X, az) - 5, az - 12}, {X + 22, y + 4, az + 12}, conc, conc, 0.8f);
+        // both blocks are solid (#136); they start 0.5 m clear of the deck's side (X +- 14, railing and sidewalk). Each
+        // goes 5 m below the lowest ground under it, so it doesn't hang over the hill's drop, and a board can't ride beneath
+        for (int sd = -1; sd <= 1; sd += 2) {
+            float x0 = sd < 0 ? X - 22 : X + 14.5f, x1 = sd < 0 ? X - 14.5f : X + 22, lo = 1e9f;
+            for (float tx : {x0, x1})
+                for (float tz : {az - 12, az, az + 12}) lo = std::min(lo, terrain(tx, tz) - 5);
+            m.box({x0, lo, az - 12}, {x1, y + 4, az + 12}, conc, conc, 0.8f);
+            addPlat({x0, x1, az - 12, az + 12, y + 4, y + 4, lo, 0, PK_BUILDING});
+        }
     }
     // piers under the approach spans
     for (float z = -1060; z > -1240; z -= 45) {

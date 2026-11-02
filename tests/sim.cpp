@@ -1199,6 +1199,26 @@ int main() {
         snprintf(b, sizeof b, "biggest step at an end %.2f m; ground highest %.2f m from the deck top at (%.1f, %.1f)", worstStep, worstUp, ux, uz);
         check(worstStep < 0.06f && worstUp < -0.02f, "Golden Gate deck over the ground", b);
     }
+    {   // the Golden Gate's four concrete anchorage blocks are solid, and a ride west at one stops at its east face, not at
+        // the deck's side wall beyond it (#136)
+        int solid = 0;
+        for (float az : {-1045.f, -2330.f})
+            for (float cx : {-1118.f, -1082.f}) {
+                float gy = W.terrain(cx, az);
+                Vector3 pt = {cx, gy + 1, az};
+                Vector2 n;
+                if (W.collide(pt, 0.3f, gy, 1.7f, &n)) solid++;
+            }
+        float stopX = 1e9f;
+        for (float az : {-2330.f, -1045.f}) {
+            Sim s; s.spawn(-1060, az, PI, 8);
+            Input in; in.push = true;
+            s.run(300, in);
+            if (az == -2330.f) stopX = s.p.pos.x;
+        }
+        snprintf(b, sizeof b, "%d/4 blocks solid; the ride west along z=-2330 stopped at x=%.2f (block east face -1078, deck wall -1086)", solid, stopX);
+        check(solid == 4 && stopX > -1080 && stopX < -1070, "Golden Gate anchorages are solid", b);
+    }
     {   // a jet ski at full throttle stops at piers, bridge bases and the Balclutha instead of driving through (#63)
         struct { const char* name; float x0, z0, x1, z1, sx, sz, yaw; } hits[] = {
             {"Pier 39", 990, -1300, 1060, -1105, 930, -1200, 0},

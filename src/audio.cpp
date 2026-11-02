@@ -311,12 +311,6 @@ void Sfx::init() {
         float f = t < 0.12f ? 988 : 1319;
         return sinf(2 * PI * f * t) * 0.5f * expf(-t * 5) + sinf(2 * PI * f * 2 * t) * 0.15f * expf(-t * 8);
     });
-    siren = makeSound(1.4f, [](float t, float& ph, uint32_t&) {
-        float f = 780 + 260 * sinf(TAU_F * t / 0.7f);
-        ph += TAU_F * f / SR;
-        float env = std::min(1.f, t * 20) * std::min(1.f, (1.4f - t) * 20);
-        return (sinf(ph) * 0.4f + sinf(ph * 2) * 0.12f) * env;
-    });
     gull = makeSound(0.9f, [](float t, float& ph, uint32_t& s) {   // "kee-ow, kyow": a falling cry, twice
         float syl = t < 0.42f ? t : t - 0.45f;
         if (syl < 0) return 0.f;
@@ -382,6 +376,6 @@ void Sfx::play(Sound& s, float vol, float pitch) {
 void Sfx::shutdown() {
     if (!ok) return;
     UnloadAudioStream(loop);
-    for (Sound* s : {&pop, &land, &bail, &splash, &honk, &token, &clack, &siren, &gull, &flutter, &bell, &coo}) UnloadSound(*s);
+    for (Sound* s : {&pop, &land, &bail, &splash, &honk, &token, &clack, &gull, &flutter, &bell, &coo}) UnloadSound(*s);
     CloseAudioDevice();
 }

@@ -5,7 +5,6 @@
 #include "traffic.h"
 #include "audio.h"
 #include "models.h"
-#include "chase.h"
 #include "jetski.h"
 #include "gondola.h"
 #include "seaplane.h"
@@ -86,7 +85,6 @@ static World W;
 static Player P;
 static Traffic T;
 static Sfx S;
-static Chase CH;
 static JetSkis JS;
 static Seaplanes SP;
 static Gondolas GO;
@@ -94,65 +92,6 @@ static Renderer R;
 static Weather WX;
 static Birds BI;
 
-static const Color C_COP = {255, 70, 60, 255};
-
-// An officer on foot: running, arms out to grab, or flat on the ground after being knocked down.
-static void drawCop(const Cop& c, float now, bool grabbing) {
-    inst::push();
-    inst::translate(c.pos.x, c.pos.y, c.pos.z);
-    inst::rotate(-c.yaw * RAD2DEG, 0, 1, 0);
-    bool down = c.stun > 0;
-    if (down) {
-        inst::translate(0, 0.15f, 0);
-        inst::rotate(-85.f * clampf((3.2f - (c.stun > 3.2f ? 3.2f : c.stun)) / 3.2f * 6.f + 0.f, 0.f, 1.f), 0, 0, 1);
-    }
-    if (grabbing) inst::translate(0, 0, sinf(now * 40.f) * 0.03f);
-    Color shirt = {28, 44, 96, M_PLAIN}, pants = {22, 26, 44, M_PLAIN}, skin = {224, 180, 142, M_PLAIN};
-    float sw = (down || grabbing) ? 0.f : sinf(c.phase) * 0.7f;
-    for (int side = -1; side <= 1; side += 2) {
-        inst::push();
-        inst::translate(0, 0.9f, side * 0.11f);
-        inst::rotate(sw * side * RAD2DEG, 0, 0, 1);
-        inst::cube({0, -0.44f, 0}, 0.16f, 0.88f, 0.16f, pants);
-        inst::cube({0.05f, -0.86f, 0}, 0.26f, 0.08f, 0.14f, {20, 20, 20, M_PLAIN});
-        inst::pop();
-        inst::push();
-        inst::translate(0, 1.43f, side * 0.27f);
-        inst::rotate((grabbing ? -75.f : -sw * side * 0.9f * RAD2DEG), 0, 0, 1);
-        inst::cube({0, -0.28f, 0}, 0.12f, 0.58f, 0.12f, shirt);
-        inst::cube({0, -0.6f, 0}, 0.11f, 0.11f, 0.11f, skin);
-        inst::pop();
-    }
-    inst::cube({0, 1.18f, 0}, 0.26f, 0.6f, 0.42f, shirt);
-    inst::cube({0, 0.92f, 0}, 0.28f, 0.08f, 0.44f, {30, 30, 34, M_PLAIN});        // belt
-    inst::cube({0.14f, 1.35f, -0.12f}, 0.04f, 0.12f, 0.1f, {240, 200, 60, M_PLAIN}); // badge
-    inst::cube({0, 1.6f, 0}, 0.21f, 0.25f, 0.21f, skin);
-    inst::cube({0, 1.76f, 0}, 0.25f, 0.1f, 0.25f, {20, 28, 60, M_PLAIN});          // cap
-    inst::cube({0.14f, 1.71f, 0}, 0.1f, 0.03f, 0.24f, {16, 20, 40, M_PLAIN});     // brim
-    inst::pop();
-}
-
-static void drawCruiser(Vector3 pos, float yaw, float now) {
-    bool flip = (int)(now * 8) % 2;
-    drawCarModel(CT_SEDAN, {235, 235, 240, 255}, pos, yaw, 0, false);
-    inst::cube(Vector3Add(pos, rotY({-0.1f, 1.62f, 0}, yaw)), 0.35f, 0.18f, 1.2f, {25, 25, 30, M_PLAIN});
-    Color red = flip ? Color{255, 40, 40, M_EMISSIVE} : Color{110, 10, 10, M_EMISSIVE};
-    Color blue = flip ? Color{20, 40, 120, M_EMISSIVE} : Color{60, 110, 255, M_EMISSIVE};
-    inst::cube(Vector3Add(pos, rotY({-0.1f, 1.78f, -0.38f}, yaw)), 0.3f, 0.16f, 0.42f, red);
-    inst::cube(Vector3Add(pos, rotY({-0.1f, 1.78f, 0.38f}, yaw)), 0.3f, 0.16f, 0.42f, blue);
-}
-
-static void drawStar(float cx, float cy, float r, Color c) {
-    Vector2 v[10];
-    for (int i = 0; i < 10; i++) {
-        float a = -PI / 2 + i * PI / 5, rr = i % 2 ? r * 0.42f : r;
-        v[i] = {cx + cosf(a) * rr, cy + sinf(a) * rr};
-    }
-    for (int i = 0; i < 10; i++) {
-        DrawTriangle({cx, cy}, v[i], v[(i + 1) % 10], c);
-        DrawTriangle({cx, cy}, v[(i + 1) % 10], v[i], c);
-    }
-}
 // two maps: the Bay Area around San Francisco, and the Peninsula around Menlo Park
 struct MapView { Texture2D tex; float x0, z0, res; };
 static MapView gMaps[2];
@@ -256,14 +195,6 @@ static void drawMinimap(int x, int y, int size) {
         float sx = x + size / 2 + (car.pos.x - c.x) * k, sy = y + size / 2 + (car.pos.z - c.z) * k;
         if (sx > x && sx < x + size && sy > y && sy < y + size) DrawRectangle((int)sx - 1, (int)sy - 1, 3, 3, {60, 60, 70, 255});
     }
-    if (CH.on)
-        for (auto& cp : CH.cops) {
-            float sx = x + size / 2 + (cp.pos.x - c.x) * k, sy = y + size / 2 + (cp.pos.z - c.z) * k;
-            sx = clampf(sx, x + 6, x + size - 6);
-            sy = clampf(sy, y + 6, y + size - 6);
-            DrawCircle((int)sx, (int)sy, 6, ((int)(GetTime() * 6) % 2) ? C_COP : Color{70, 110, 255, 255});
-            DrawCircleLines((int)sx, (int)sy, 6, WHITE);
-        }
     EndScissorMode();
     // tokens outside the view: arrows on the border
     drawPlayerArrow({(float)x + size / 2, (float)y + size / 2}, P.state == Player::AIR ? atan2f(P.vel.z, P.vel.x) : P.yaw, 9, {230, 40, 40, 255});
@@ -300,8 +231,6 @@ static void drawBigMap() {
     }
     for (auto& t : W.tokens)
         if (!t.got) DrawCircleV(S2(t.pos.x, t.pos.z), 5, {255, 200, 40, 255});
-    if (CH.on)
-        for (auto& cp : CH.cops) DrawCircleV(S2(cp.pos.x, cp.pos.z), 8, C_COP);
     drawPlayerArrow(S2(P.pos.x, P.pos.z), P.yaw, 11, {230, 40, 40, 255});
     EndScissorMode();
     textCenter("MAP  -  press a number key to travel there,  M to close", sw / 2, 20, 22, WHITE);
@@ -427,11 +356,10 @@ int main() {
             stars.push_back({cosf(a) * cosf(e), sinf(e), sinf(a) * cosf(e)});
         }
     }
-    float titleT = 0, sirenT = 0, landKick = 0, swingT = 0, squeezeYaw = 0;
+    float titleT = 0, landKick = 0, squeezeYaw = 0;
     float airT = 0;   // clock for the SFO jets and the AirTrain: stands still while paused, on the map or in the picker
     if (getenv("SFSKATE_NIGHT")) preset = 2; // test hook: start at night
     if (getenv("SFSKATE_TOD")) preset = atoi(getenv("SFSKATE_TOD")) % 3; // test hook: 0 day, 1 golden hour, 2 night
-    if (getenv("SFSKATE_COPS")) CH.calmT = 0.5f; // test hook: cops show up right away
     if (getenv("SFSKATE_FOG")) heavyFog = true, fogDen = 0.0022f; // test hook: start in Karl the Fog
     if (getenv("SFSKATE_NOHELP")) showHelp = false; // test hook: no controls panel in the screenshots
     const int atMaxSpots = getenv("SFSKATE_SHOTS") ? atoi(getenv("SFSKATE_SHOTS")) : 1000; // test hook: stop after this many spots
@@ -467,17 +395,6 @@ int main() {
             atFrame++;
             if (atFrame == 60) TakeScreenshot("shot_title.png");
             if (atFrame == 61) { title = false; picker = false; }
-            if (atFrame == 75 && getenv("SFSKATE_SCUFFLE")) { // test hook: an officer grabs the skater (plus a cruiser and a second officer)
-                CH.reset(0);
-                CH.active = true; CH.stars = 2;
-                Cop k; k.onFoot = true; k.pos = {P.pos.x + cosf(P.yaw) * 1.4f, P.pos.y, P.pos.z + sinf(P.yaw) * 1.4f}; k.yaw = P.yaw + PI;
-                CH.cops.push_back(k);
-                Cop k2; k2.onFoot = true; k2.pos = {P.pos.x + cosf(P.yaw) * 5.f + 2.f, P.pos.y, P.pos.z + sinf(P.yaw) * 5.f}; k2.yaw = P.yaw + PI; k2.phase = 1.2f; k2.speed = 8;
-                CH.cops.push_back(k2);
-                Cop k3; k3.pos = {P.pos.x + cosf(P.yaw) * 14.f - 3.f, P.pos.y, P.pos.z + sinf(P.yaw) * 14.f}; k3.yaw = P.yaw + PI;
-                CH.cops.push_back(k3);
-                CH.parked.push_back({{P.pos.x + cosf(P.yaw) * 9.f - 4.f, P.pos.y, P.pos.z + sinf(P.yaw) * 9.f - 4.f}, P.yaw + 0.5f});
-            }
             if (getenv("SFSKATE_FLY") && atFrame > 61) { // test hook: board seaplane 0, take off and climb, with shots along the way
                 int fr = atFrame - 62;
                 if (fr == 0) { P.spawn(SP.moored[0].pos, 0); SP.mount(0, P); SP.yaw -= PI / 2; camYaw = SP.yaw; }
@@ -512,11 +429,6 @@ int main() {
         }
         // ---------------- input
         bool justStarted = false;
-        auto setCops = [&](bool on) { // game mode: free roam (no police) or cop chase
-            if (CH.on == on) return;
-            CH.on = on;
-            CH.reset(8);
-        };
         // get off whatever is being ridden before a teleport: the train ride ends, the jet ski stays moored
         // where it was (it follows the rider while ridden) and the seaplane is back at its mooring
         auto leaveVehicles = [&]() {
@@ -543,7 +455,6 @@ int main() {
             if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) preset = (preset + 2) % 3;
             for (int k = 0; k < 10 && k < n; k++)
                 if (IsKeyPressed(k == 9 ? KEY_ZERO : KEY_ONE + k)) pickIdx = k;
-            if (IsKeyPressed(KEY_B)) setCops(!CH.on);
             // mouse: click a landmark row, or a time-of-day button
             Vector2 m = GetMousePosition();
             int px = sw / 2 - 330, py = sh2 / 2 - 230;
@@ -558,20 +469,11 @@ int main() {
                 Rectangle r = {(float)px + 430, (float)py + 120 + t * 50, 210, 40};
                 if (CheckCollisionPointRec(m, r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) preset = t;
             }
-            for (int md = 0; md < 2; md++) { // game mode: 0 free roam, 1 cop chase
-                Rectangle r = {(float)px + 430, (float)py + 316 + md * 44, 210, 40};
-                if (CheckCollisionPointRec(m, r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) setCops(md == 1);
-            }
             if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) { title = false; picker = false; startAt(pickIdx); }
             else if (!title && IsKeyPressed(KEY_TAB)) picker = false;
         } else if (!title) {
             if (IsKeyPressed(KEY_TAB)) { picker = true; showMap = false; }
             if (IsKeyPressed(KEY_H)) showHelp = !showHelp;
-            if (IsKeyPressed(KEY_N)) {
-                CH.difficulty = (CH.difficulty + 1) % 3;
-                P.say(TextFormat("Police: %s", Chase::DIFF_NAMES[CH.difficulty]), C_COP, CH.difficulty == 0 ? "Slower cops, a weaker grip" : CH.difficulty == 2 ? "Faster cops, heat builds quickly" : "The default chase");
-            }
-            if (IsKeyPressed(KEY_B)) { setCops(!CH.on); P.say(CH.on ? "COP CHASE MODE" : "FREE ROAM MODE", CH.on ? C_COP : WHITE, CH.on ? "Police on patrol" : "No police, just skate"); }
             if (IsKeyPressed(KEY_M)) showMap = !showMap;
             if (IsKeyPressed(KEY_P)) paused = !paused;
         }
@@ -629,15 +531,6 @@ int main() {
         in.heelflip = IsKeyPressed(KEY_K);
         in.shove = IsKeyPressed(KEY_L);
         in.grab = IsKeyDown(KEY_I);
-        if (CH.scuffle && !title && !paused) {
-            // caught: no riding, just struggling. Mash for strength, or swing the board for a big shove.
-            float s = 0;
-            if (IsKeyPressed(KEY_SPACE)) s += 0.10f;
-            if (IsKeyPressed(KEY_A) || IsKeyPressed(KEY_D) || IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT)) s += 0.07f;
-            if ((IsKeyPressed(KEY_J) || IsKeyPressed(KEY_K) || IsKeyPressed(KEY_L)) && CH.hitCD <= 0) { s += 0.17f; CH.hitCD = 0.22f; swingT = 0.22f; S.play(S.pop, 0.9f, 0.7f); }
-            CH.strike += s;
-            in = Input{};
-        }
         if (autotest && getenv("SFSKATE_LAND")) { // test hook: roll, ollie, land, with screenshots on the way down
             if (atFrame == 66) P.speed = 8.f;
             if (atFrame == 80) in.ollie = true;
@@ -646,9 +539,7 @@ int main() {
             for (int k = 0; k < 4; k++) if (atFrame == shots[k]) TakeScreenshot(TextFormat("land_%d.png", k));
             if (atFrame >= 80 && atFrame <= 160 && atFrame % 4 == 0) TraceLog(LOG_INFO, "LAND f=%d state=%d y=%.2f vy=%.2f", atFrame, (int)P.state, P.pos.y, P.vy);
         }
-        if (autotest && CH.scuffle && getenv("SFSKATE_SCUFFLE")) CH.strike += 0.0075f; // test hook: hold the fight steady for the screenshot
-        if (swingT > 0) { swingT -= dt; P.flipAngle = 360.f * clampf(1.f - swingT / 0.22f, 0.f, 1.f); }
-        else if (P.state == Player::RIDE && P.flipT < 0) P.flipAngle = 0;
+        if (P.state == Player::RIDE && P.flipT < 0) P.flipAngle = 0;
 
         // ---------------- update
         // wrapped at 75 * 76 s, a whole number of jet (75 s) and AirTrain (76 s) loops, so nothing jumps at the wrap
@@ -679,7 +570,6 @@ int main() {
         if (nearSki >= 0 && IsKeyPressed(KEY_E)) {
             justMounted = true; // the same E press must not also hop straight back off
             JS.mount(nearSki, P);
-            CH.reset(8);
             P.evPop = P.evLand = P.evBail = P.evSplash = P.evGrindStart = false;
             camYaw = P.yaw;
             running = false;
@@ -700,7 +590,6 @@ int main() {
         if (nearPlane >= 0 && IsKeyPressed(KEY_E) && !justMounted) {
             justMounted = true;
             SP.mount(nearPlane, P);
-            CH.reset(8);
             P.evPop = P.evLand = P.evBail = P.evSplash = P.evGrindStart = false;
             camYaw = P.yaw;
             running = false;
@@ -759,18 +648,6 @@ int main() {
                         S.play(S.bail);
                     }
                 }
-            }
-            CH.update(dt, P, W);
-            if (CH.evStart) { S.play(S.siren, 0.8f); sirenT = 0; }
-            if (CH.evEscape) S.play(S.token, 1.0f, 1.25f);
-            if (CH.evBusted) S.play(S.bail, 0.8f, 0.8f);
-            if (CH.evGrab) S.play(S.bail, 0.6f, 1.3f);
-            if (CH.evShove) S.play(S.land, 1.0f, 1.2f);
-            if (CH.evBowled) S.play(S.land, 1.0f, 0.7f);
-            CH.evStart = CH.evEscape = CH.evBusted = CH.evGrab = CH.evShove = CH.evBowled = false;
-            if (CH.active) {
-                sirenT -= dt;
-                if (sirenT <= 0) { S.play(S.siren, clampf(1.1f - CH.nearest / 250.f, 0.12f, 0.8f)); sirenT = 1.4f; }
             }
             for (auto& t : W.tokens) {
                 if (t.got) continue;
@@ -1215,18 +1092,8 @@ int main() {
                 if (k == 0) {
                     if (!ride.on && !JS.riding && !SP.riding) P.draw();
                     JS.draw(now, cam.position);
-                    if (CH.on && !ride.on)
-                        for (size_t i = 0; i < CH.cops.size(); i++) {
-                            const Cop& cp = CH.cops[i];
-                            if (Vector3Distance(cp.pos, cam.position) > 120) continue;
-                            if (cp.onFoot) drawCop(cp, now, CH.scuffle && (int)i == CH.scCop);
-                            else drawCruiser(cp.pos, cp.yaw, now);
-                        }
                 }
-                if (CH.on && !ride.on)
-                    for (auto& pc : CH.parked)
-                        if (Vector3Distance(pc.pos, cam.position) < 230) drawCruiser(pc.pos, pc.yaw, now);
-                inst::flush(R.depth);   // people, cars and cops are queued as instances: draw them now
+                inst::flush(R.depth);   // people and cars are queued as instances: draw them now
                 EndShaderMode();
                 R.endCascade();
             }
@@ -1333,16 +1200,6 @@ int main() {
             rlPopMatrix();
             DrawCube({t.pos.x, t.pos.y - 1.5f + 30, t.pos.z}, 0.15f, 60, 0.15f, {255, 220, 80, M_EMISSIVE}); // beacon
         }
-        if (CH.on && !title && !ride.on) { // cruisers with flashing light bars, and the officers on foot
-            for (auto& pc : CH.parked)
-                if (Vector3Distance(pc.pos, cam.position) < 700) drawCruiser(pc.pos, pc.yaw, now);
-            for (size_t i = 0; i < CH.cops.size(); i++) {
-                const Cop& cp = CH.cops[i];
-                if (Vector3Distance(cp.pos, cam.position) > 700) continue;
-                if (cp.onFoot) drawCop(cp, now, CH.scuffle && (int)i == CH.scCop);
-                else drawCruiser(cp.pos, cp.yaw, now);
-            }
-        }
         inst::flush(sh);
         EndShaderMode();
         // translucent bits, drawn with the default shader so they blend (and leave the bloom mask alone)
@@ -1361,10 +1218,6 @@ int main() {
             if (hgt < 12) DrawCylinder({sp.x, gy + 0.12f, sp.z}, 0.6f, 0.6f, 0.01f, 14, {0, 0, 0, (unsigned char)(55 * k * clampf(1 - hgt / 8, 0.25f, 1))});
         }
         if (R.nCasc == 0) {   // without sun shadows, blobs keep everything grounded
-            if (CH.on) {
-                for (auto& cp : CH.cops) DrawCylinder({cp.pos.x, cp.pos.y + 0.12f, cp.pos.z}, cp.onFoot ? 0.5f : 2.0f, cp.onFoot ? 0.5f : 2.0f, 0.01f, 14, {0, 0, 0, 70});
-                for (auto& pc : CH.parked) DrawCylinder({pc.pos.x, pc.pos.y + 0.12f, pc.pos.z}, 2.0f, 2.0f, 0.01f, 14, {0, 0, 0, 70});
-            }
             T.drawShadows(cam.position);
         }
         rlDrawRenderBatchActive();
@@ -1417,19 +1270,9 @@ int main() {
                 if (sel) DrawRectangleLines(px + 430, y, 210, 40, WHITE);
                 DrawText(PRESET_NAMES[t], px + 445, y + 10, 22, WHITE);
             }
-            textShadow("GAME MODE  (B)", px + 430, py + 290, 18, {255, 210, 60, 255});
-            const char* MODES[2] = {"Free roam", "Cop chase"};
-            const Color MODE_C[2] = {{70, 170, 110, 255}, C_COP};
-            for (int md = 0; md < 2; md++) {
-                int y = py + 316 + md * 44;
-                bool sel = (md == 1) == CH.on;
-                DrawRectangle(px + 430, y, 210, 40, sel ? MODE_C[md] : Color{40, 45, 60, 255});
-                if (sel) DrawRectangleLines(px + 430, y, 210, 40, WHITE);
-                DrawText(MODES[md], px + 445, y + 10, 22, WHITE);
-            }
             const char* hints[] = {"Up / Down   pick a landmark", "Left / Right  time of day", "1-0   jump to a landmark",
                                    "Click twice or ENTER  to go", title ? "Esc  quit" : "Tab  back to skating"};
-            for (int k = 0; k < 5; k++) DrawText(hints[k], px + 430, py + 416 + k * 24, 17, {200, 205, 215, 255});
+            for (int k = 0; k < 5; k++) DrawText(hints[k], px + 430, py + 290 + k * 24, 17, {200, 205, 215, 255});
             float a = 0.6f + 0.4f * sinf((float)GetTime() * 4);
             textCenter(title ? "Press ENTER to drop in" : "Press ENTER to go there", sw / 2, py + 130 + n * 34, 28,
                        {255, 230, 120, (unsigned char)(255 * a)});
@@ -1476,62 +1319,14 @@ int main() {
                 textCenter(P.popup.c_str(), sw / 2, sh2 / 2 - 140, 48, c);
                 if (!P.subPopup.empty()) textCenter(P.subPopup.c_str(), sw / 2, sh2 / 2 - 86, 22, {255, 255, 255, c.a});
             }
-            if (CH.active) {
-                bool flip = (int)(now * 4) % 2;
-                float k = 0.55f + 0.45f * sinf(now * 8);
-                DrawRectangleGradientH(0, 0, 90, sh2, flip ? Color{255, 40, 40, (unsigned char)(90 * k)} : Color{40, 80, 255, (unsigned char)(90 * k)}, {0, 0, 0, 0});
-                DrawRectangleGradientH(sw - 90, 0, 90, sh2, {0, 0, 0, 0}, flip ? Color{40, 80, 255, (unsigned char)(90 * k)} : Color{255, 40, 40, (unsigned char)(90 * k)});
-            }
             drawMinimap(sw - 250, 20, 230);
-            if (CH.scuffle) {
-                int bw = 380, bx = sw / 2 - bw / 2, by = sh2 - 124;
-                const char* hint = "Mash SPACE and A / D   -   swing the board with J K L";
-                int pw = std::max(bw, MeasureText(hint, 20)) + 24;   // backdrop wide enough for the hint line
-                DrawRectangle(sw / 2 - pw / 2, by - 56, pw, 130, {0, 0, 0, 170});
-                float jit = sinf(now * 45.f) * 2.f;
-                textCenter("STRUGGLE!", sw / 2 + (int)jit, by - 48, 40, {255, 140, 70, 255});
-                DrawRectangle(bx, by, bw, 24, {170, 40, 40, 255});
-                DrawRectangle(bx, by, (int)(bw * clampf(CH.meter, 0, 1)), 24, {110, 230, 120, 255});
-                DrawRectangleLines(bx, by, bw, 24, WHITE);
-                textCenter(hint, sw / 2, by + 36, 20, WHITE);
-            }
-            if (CH.on) {
-                int bw = 440, bx = sw / 2 - bw / 2, by = 92;
-                DrawRectangle(bx, by, bw, 78, {0, 0, 0, 140});
-                DrawRectangle(bx, by, 6, 78, CH.active ? C_COP : Color{110, 230, 120, 255});
-                if (CH.active) {
-                    for (int i = 0; i < 5; i++) drawStar(bx + 30 + i * 28, by + 24, 12, i < CH.stars ? Color{255, 210, 60, 255} : Color{255, 255, 255, 60});
-                    textShadow(TextFormat("Nearest cop  %d m", (int)std::min(CH.nearest, 9999.f)), bx + 20, by + 48, 20, WHITE);
-                    if (CH.bustT > 0) {
-                        DrawRectangle(bx + 250, by + 14, 170, 12, {0, 0, 0, 150});
-                        DrawRectangle(bx + 250, by + 14, (int)(170 * clampf(CH.bustT / Chase::BUST_TIME, 0, 1)), 12, C_COP);
-                        textShadow("BUSTED", bx + 250, by + 30, 16, {255, 150, 140, 255});
-                    } else if (CH.hideT > 0) {
-                        DrawRectangle(bx + 250, by + 14, 170, 12, {0, 0, 0, 150});
-                        DrawRectangle(bx + 250, by + 14, (int)(170 * clampf(CH.hideT / Chase::ESCAPE_TIME, 0, 1)), 12, {110, 230, 120, 255});
-                        textShadow("LOSING THEM", bx + 250, by + 30, 16, {170, 240, 170, 255});
-                    } else {
-                        textShadow(TextFormat("Get %d m away", (int)Chase::ESCAPE_DIST), bx + 250, by + 14, 18, {200, 210, 230, 255});
-                    }
-                    // arrow toward the closest cop, relative to the camera
-                    const Cop* nc = &CH.cops[0];
-                    for (auto& cp : CH.cops) if (Vector3Distance(cp.pos, P.pos) < Vector3Distance(nc->pos, P.pos)) nc = &cp;
-                    Vector2 f = Vector2Normalize({cam.target.x - cam.position.x, cam.target.z - cam.position.z});
-                    Vector2 d = Vector2Normalize({nc->pos.x - P.pos.x, nc->pos.z - P.pos.z});
-                    float ang = atan2f(-(d.x * f.x + d.y * f.y), d.x * -f.y + d.y * f.x); // screen direction: right, up = ahead
-                    drawPlayerArrow({(float)bx + bw - 22, (float)by + 56}, ang, 14, C_COP);
-                } else {
-                    textShadow("LAYING LOW", bx + 20, by + 8, 24, {170, 240, 170, 255});
-                    textShadow(TextFormat("Patrol in %d s    escapes %d    (%s, N)", std::max(0, (int)ceilf(CH.calmT)), CH.escapes, Chase::DIFF_NAMES[CH.difficulty]), bx + 20, by + 44, 20, {200, 210, 230, 255});
-                }
-            }
             if (showHelp) {
                 const char* skateLines[] = {"CONTROLS", "W / Up      push", "S / Down    brake", "A D         steer / spin in air",
                                        "Shift       tuck (go faster)", "Space       ollie / jump off rail", "J  K  L     kickflip, heelflip, shove-it",
-                                       "I (hold)    grab", "Land on rails & ledges to grind", "B  free roam / cop chase   N  difficulty", "Right mouse  look around", "Wheel       zoom    C  camera",
+                                       "I (hold)    grab", "Land on rails & ledges to grind", "Right mouse  look around", "Wheel       zoom    C  camera",
                                        "Tab  choose landmark / time", "M  map  1-0  teleport  E  train/jetski", "T or F1-F3  time of day",
                                        "F fog  G rain  R reset  P pause", TextFormat("V  graphics: %s", Renderer::QUALITY_NAMES[R.quality]),
-                                       TextFormat("Y  frame rate: %s", gCap60 ? "60" : "Max"), "Caught: mash SPACE A D / J K L", "H  hide this help"};
+                                       TextFormat("Y  frame rate: %s", gCap60 ? "60" : "Max"), "H  hide this help"};
                 // on a jet ski or seaplane the panel shows its controls instead, with its name as a small title
                 // ("key|action": drawn as two aligned columns)
                 const char* skiLines[] = {"JET SKI", "W|go", "S|brake", "A D|steer", "Shift|boost", "E|hop off at the shore",

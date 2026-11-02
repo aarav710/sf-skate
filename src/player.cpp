@@ -255,7 +255,7 @@ void Player::ride(float dt, const Input& in, World& w) {
     pushAmt = lerpf(pushAmt, pushing ? 1.f : 0.f, 1 - expf(-dt * 6));
     if (pushAmt > 0.05f) pushPhase += dt * 5.5f;
     // a fresh spawn stays put until the rider asks to go (steering only aims the board); anything that has
-    // already given the board speed (a cop breaking free, a scripted run) lets go too
+    // already given the board speed (a scripted run) lets go too
     if (parked && (in.push || in.tuck || in.ollie || in.ollieHeld || in.kickflip || in.heelflip || in.shove || in.grab || speed != 0))
         parked = false;
     if (parked) speed = acc = 0;

@@ -424,11 +424,11 @@ int main() {
         snprintf(b, sizeof b, "grind=%d bailed=%d board vel %.1f,%.1f, rider moved %.2f m in x", grind, bailed, bv.x, bv.z, s.p.pos.x - x0);
         check(grind && bailed && bv.x > 1.f && s.p.pos.x - x0 > 0.2f, "fakie grind bail goes along travel", b);
     }
-    {   // ...but flying into a building wall at a steep angle is still a crash
+    {   // ...but flying into a building wall at a steep angle is still a crash   (z picked clear of the street trees at this wall)
         int bailed = 0, tot = 0;
         for (float sp : {8.f, 10.f})
             for (float off : {15.f, 30.f, 45.f}) {
-                float yaw = off * DEG2RAD, x = 396 - cosf(yaw) * 2.35f, z = -572 - sinf(yaw) * 2;
+                float yaw = off * DEG2RAD, x = 396 - cosf(yaw) * 2.35f, z = -578 - sinf(yaw) * 2;
                 Sim s; s.spawn(x, z, yaw, sp);
                 Input in; in.ollie = true; s.run(1, in);
                 s.run(120, Input{}, [](Player& p) { return p.state != Player::AIR; });

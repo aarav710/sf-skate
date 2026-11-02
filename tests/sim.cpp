@@ -929,6 +929,40 @@ int main() {
         snprintf(b, sizeof b, "%d/4 rides splashed, %d of them on drawn lawn", wet, early);
         check(wet == 4 && early == 0, "lagoon splash only in drawn water", b);
     }
+    {   // Embarcadero promenade benches: none on the seabed or inside a pier deck, and no grind rails from them either
+        int bad = 0, n = 0;
+        for (auto& r : W.rails) {
+            if (std::string(r.name) != "Ledge" || r.a.x < 1280.f || r.a.x > 1285.f || r.b.x > 1285.f || r.a.z < -910.f || r.a.z > 610.f) continue;
+            n++;
+            float mz = (r.a.z + r.b.z) / 2;
+            if (W.terrain(r.a.x, mz) + 0.4f < 1.3f || W.overPier(r.a.x, mz)) bad++;
+        }
+        snprintf(b, sizeof b, "%d promenade bench rails, %d under water or in a pier", n, bad);
+        check(n > 0 && bad == 0, "promenade benches stay off the seabed and piers", b);
+    }
+    {   // Vaillancourt Fountain: the basin is drawn (rim + water above the plaza) where the game counts water
+        const Pond* fo = nullptr;
+        for (auto& pd : W.ponds) if (std::string(pd.kind) == "fountain") { fo = &pd; break; }
+        float wy = fo ? W.terrain((fo->x0 + fo->x1) / 2, (fo->z0 + fo->z1) / 2) + 0.4f : 0.f;
+        int hidden = 0, rimLow = 0;
+        if (fo) {
+            for (float x = fo->x0 + 0.1f; x < fo->x1; x += 0.5f)
+                for (float z = fo->z0 + 0.1f; z < fo->z1; z += 0.5f) if (W.terrain(x, z) > wy - 0.1f) hidden++;
+            for (float t = 0; t <= 1.001f; t += 0.05f) {   // the rim stands above the water all the way round
+                float xs = lerpf(fo->x0, fo->x1, t), zs = lerpf(fo->z0, fo->z1, t);
+                float pts[4][2] = {{xs, fo->z0 - 0.5f}, {xs, fo->z1 + 0.5f}, {fo->x0 - 0.5f, zs}, {fo->x1 + 0.5f, zs}};
+                for (auto& q : pts) if (W.ground(q[0], q[1], 500) < wy + 0.1f) rimLow++;
+            }
+        }
+        snprintf(b, sizeof b, "pond found=%d, %d samples with the water hidden under ground, %d rim samples below the water", fo != nullptr, hidden, rimLow);
+        check(fo && hidden == 0 && rimLow == 0, "fountain drawn as a visible basin", b);
+        Sim s; s.spawn(1230, -304, 0, 5);   // pushing east from the plaza: must not splash before the rim
+        Input in; in.push = true;
+        bool splash = s.run(300, in, [](Player& p) { return p.splashed; });
+        bool early = splash && s.p.pos.x < (fo ? fo->x0 : 0.f) - 0.5f;
+        snprintf(b, sizeof b, "splash=%d at x=%.1f (basin starts %.0f)", splash, s.p.pos.x, fo ? fo->x0 : 0.f);
+        check(!early, "no fountain splash short of the basin", b);
+    }
     {   // the Golden Gate railing keeps you on the deck
         Sim s; s.spawn(-1100, -1500, 0, 8); // heading east toward the railing
         Input in; in.push = true;

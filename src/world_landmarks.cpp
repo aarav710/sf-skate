@@ -454,7 +454,7 @@ void World::buildLandmarks() {
         }
         // the lagoon sits in a basin dug into the terrain (rawHeight). The sheet reaches one ground cell past the
         // splash rectangle, over the bank, so the shoreline is drawn where the bank rises out of the water
-        ponds.push_back({LAGOON_X0, LAGOON_Z0, LAGOON_X1, LAGOON_Z1, "lagoon"});
+        ponds.push_back({LAGOON_X0, LAGOON_Z0, LAGOON_X1, LAGOON_Z1, "lagoon", LAGOON_Y});
         float wx0 = LAGOON_X0 - 10, wx1 = LAGOON_X1 + 10, wz0 = LAGOON_Z0 - 10, wz1 = LAGOON_Z1 + 10, py = LAGOON_Y;
         m.quad({wx0, py, wz0}, {wx1, py, wz0}, {wx1, py, wz1}, {wx0, py, wz1}, col(50, 100, 110, M_WATER));
     }

@@ -963,6 +963,59 @@ int main() {
         snprintf(b, sizeof b, "splash=%d at x=%.1f (basin starts %.0f)", splash, s.p.pos.x, fo ? fo->x0 : 0.f);
         check(!early, "no fountain splash short of the basin", b);
     }
+    {   // every pond with a recorded water height sits in a basin: no ground inside its rectangle is drawn above the surface
+        // (it would look dry but splash)
+        int ponds = 0, bad = 0; char worst[160] = "";
+        float worstOver = 0;
+        for (auto& pd : W.ponds) {
+            if (std::isnan(pd.y)) continue;
+            ponds++;
+            int n = 0, over = 0; float top = -1e9f, low = 1e9f;
+            for (float z = pd.z0 + 0.25f; z < pd.z1; z += 0.5f)
+                for (float x = pd.x0 + 0.25f; x < pd.x1; x += 0.5f) {
+                    float t = W.terrain(x, z);
+                    low = std::min(low, t);
+                    if (t < -1.f) continue;   // open bay inside the rectangle: ground drawn well under the surface
+                    n++;
+                    if (t > pd.y + 0.05f) over++;
+                    top = std::max(top, t);
+                }
+            // an all-land pond's water sheet reaches past the rectangle (the lagoon's 10 m, the others POND_SHEET): its edge
+            // must be hidden under the bank
+            float e = std::string(pd.kind) == "lagoon" ? 10.f : POND_SHEET;
+            int edge = 0;
+            if (low > 0.5f)
+                for (float s = 0; s <= 1.0001f; s += 0.01f) {
+                    float xs[] = {lerpf(pd.x0 - e, pd.x1 + e, s), pd.x1 + e, lerpf(pd.x0 - e, pd.x1 + e, s), pd.x0 - e};
+                    float zs[] = {pd.z0 - e, lerpf(pd.z0 - e, pd.z1 + e, s), pd.z1 + e, lerpf(pd.z0 - e, pd.z1 + e, s)};
+                    for (int k = 0; k < 4; k++) if (W.terrain(xs[k], zs[k]) < pd.y + 0.05f) edge++;
+                }
+            bool wrong = edge > 0;
+            if (edge) { snprintf(worst, sizeof worst, "%s at (%.0f, %.0f): %d sheet-edge samples not under the bank", pd.kind, pd.x0, pd.z0, edge); }
+            if (over > n / 200) {   // under 0.5% of the area (rounding at the rim)
+                wrong = true;
+                if (top - pd.y > worstOver) { worstOver = top - pd.y; snprintf(worst, sizeof worst, "%s at (%.0f, %.0f): %d/%d samples above %.2f, up to %.2f", pd.kind, pd.x0, pd.z0, over, n, pd.y, top); }
+            }
+            bad += wrong;
+        }
+        snprintf(b, sizeof b, "%d ponds checked, %d with ground above the water or a bare sheet edge%s%s", ponds, bad, bad ? ": " : "", worst);
+        check(ponds >= 10 && bad == 0, "ponds are dug below their water", b);
+    }
+    {   // Stow Lake: riding in from the east bank you splash only over drawn water
+        const Pond* lake = nullptr;
+        for (auto& pd : W.ponds) if (std::string(pd.kind) == "lake") { lake = &pd; break; }
+        int wet = 0, n = 0, dryBank = 0;
+        if (lake)
+            for (float z : {380.f, 390.f, 400.f}) {
+                Sim s; s.spawn(-745, z, PI, 3);
+                Input in; in.push = true;
+                bool splash = s.run(600, in, [](Player& p) { return p.splashed; });
+                n++;
+                if (splash) { wet++; if (s.p.pos.x > lake->x1 || W.terrain(s.p.pos.x, s.p.pos.z) > lake->y + 0.05f) dryBank++; }
+            }
+        snprintf(b, sizeof b, "lake found=%d, %d/%d rides splashed, %d of them over ground above the water", lake != nullptr, wet, n, dryBank);
+        check(lake && wet == n && dryBank == 0, "Stow Lake splash only in drawn water", b);
+    }
     {   // the Golden Gate railing keeps you on the deck
         Sim s; s.spawn(-1100, -1500, 0, 8); // heading east toward the railing
         Input in; in.push = true;

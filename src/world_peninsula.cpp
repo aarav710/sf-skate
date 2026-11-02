@@ -361,14 +361,14 @@ void World::buildMenlo() {
         }
         for (float x = 3320; x < 3580; x += 10) m.box({x, y + 13, 9278}, {x + 0.2f, y + 14.2f, 9502}, col(200, 200, 200)); // roof railings
         static const Color POND[] = {col(170, 96, 84, M_WATER), col(118, 140, 96, M_WATER), col(196, 160, 120, M_WATER), col(92, 132, 150, M_WATER)};
+        // each pond sits in a basin dug into the marsh (rawHeight), so the whole rectangle is below its water surface;
+        // the sheet reaches over the bank, where its edge is hidden
         int k = 0;
-        for (float z = 8780; z < 10400; z += 260)
-            for (float x = 3630; x < 3900; x += 140, k++) {
-                float h = terrain(x + 60, z + 120);
-                if (h < 0.4f) continue;
-                mb(x, z).quad({x, h + 0.15f, z}, {x + 130, h + 0.15f, z}, {x + 130, h + 0.15f, z + 250}, {x, h + 0.15f, z + 250}, POND[k % 4]);
-                ponds.push_back({x, z, x + 130, z + 250, "salt pond"});
-            }
+        for (const Basin& B : SALT_PONDS) {
+            float e = POND_SHEET, py = B.y;
+            mb(B.x0, B.z0).quad({B.x0 - e, py, B.z0 - e}, {B.x1 + e, py, B.z0 - e}, {B.x1 + e, py, B.z1 + e}, {B.x0 - e, py, B.z1 + e}, POND[k++ % 4]);
+            ponds.push_back({B.x0, B.z0, B.x1, B.z1, "salt pond", B.y});
+        }
     }
 
     // Stanford: Hoover Tower and the red-roofed Main Quad, south of town (scenery)

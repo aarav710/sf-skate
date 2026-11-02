@@ -507,7 +507,8 @@ void World::buildLandmarks() {
         m.quad({1175, y + 0.05f, 700}, {1300, y + 0.05f, 700}, {1300, y + 0.05f, 852}, {1175, y + 0.05f, 852}, green);
         Vector3 hp = {1190, y + 0.08f, 838};
         m.quad(hp, {hp.x + 19, hp.y, hp.z - 6}, {hp.x + 25, hp.y, hp.z - 25}, {hp.x + 6, hp.y, hp.z - 19}, dirt);
-        addBox(1158, 684, 1175, 868, y - 1, y + 22, PK_BUILDING, brick, col(60, 90, 70));
+        // the west wall stands east of the x 1155 street's sidewalk (road edge 1162, sidewalk to ~1166), not on it
+        addBox(1167, 684, 1175, 868, y - 1, y + 22, PK_BUILDING, brick, col(60, 90, 70));
         addBox(1175, 852, 1300, 868, y - 1, y + 22, PK_BUILDING, brick, col(60, 90, 70));
         addBox(1175, 684, 1225, 698, y - 1, y + 18, PK_BUILDING, brick, col(60, 90, 70));
         addBox(1245, 684, 1300, 698, y - 1, y + 18, PK_BUILDING, brick, col(60, 90, 70));
@@ -530,7 +531,7 @@ void World::buildLandmarks() {
         m.sphere({1290, y + 12, 735}, 6, 8, 10, leather);
         addPlat({1287.5f, 1292.5f, 732.5f, 737.5f, y + 7, y + 7, y - 1, 0, PK_PROP});      // pedestal
         addPlat({1285.8f, 1294.2f, 730.8f, 739.2f, y + 16, y + 16, y + 8, 0, PK_PROP});    // glove
-        for (Vector2 t : {Vector2{1165, 690}, Vector2{1165, 862}, Vector2{1295, 860}}) {     // light towers
+        for (Vector2 t : {Vector2{1171, 690}, Vector2{1171, 862}, Vector2{1295, 860}}) {     // light towers
             m.box({t.x - 0.7f, y, t.y - 0.7f}, {t.x + 0.7f, y + 40, t.y + 0.7f}, col(80, 80, 85));
             m.box({t.x - 3, y + 38, t.y - 3}, {t.x + 3, y + 42, t.y + 3}, col(255, 250, 220, M_EMISSIVE));
             addPlat({t.x - 0.7f, t.x + 0.7f, t.y - 0.7f, t.y + 0.7f, y + 40, y + 40, y - 1, 0, PK_POLE});
@@ -540,11 +541,11 @@ void World::buildLandmarks() {
     // --- Treasure Island hangars
     for (int k = 0; k < 3; k++) {
         float cx = 2550 + k * 100, cz = -480, y = terrain(cx, cz);
-        mb(cx, cz).box({cx - 40, y - 1, cz - 30}, {cx + 40, y + 24, cz + 30}, col(170, 172, 168), col(140, 140, 138), 0.8f);
+        addBox(cx - 40, cz - 30, cx + 40, cz + 30, y - 1, y + 24, PK_BUILDING, col(170, 172, 168), col(140, 140, 138));
     }
     {
         float cx = 2620, cz = -40, y = terrain(cx, cz);
-        mb(cx, cz).box({cx - 50, y - 1, cz - 12}, {cx + 50, y + 14, cz + 12}, col(232, 222, 196, M_HOUSE), col(150, 140, 120), 0.8f);
+        addBox(cx - 50, cz - 12, cx + 50, cz + 12, y - 1, y + 14, PK_BUILDING, col(232, 222, 196, M_HOUSE), col(150, 140, 120));
     }
     // --- Port of Oakland cranes and containers
     {

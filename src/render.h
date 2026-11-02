@@ -10,6 +10,8 @@ struct Look {
     float fogDen, night, time;
     float wet = 0;            // 0 dry .. 1 soaked streets (rain)
     float fogH = 300;         // haze scale height: low for Karl the Fog, which pools in the valleys
+    float clear = 1;          // 1 clear .. 0 in Karl the Fog or rain: turns the golden-hour haze tint off
+    float roll = 0;           // the grade's roll (see Grade): buys an 8-bit scene headroom above white
 };
 
 // The sky behind everything: gradient, haze at the horizon, sun or moon, and a drifting cloud layer.
@@ -25,17 +27,18 @@ struct SkyLook {
 struct Grade {
     Vector3 gain{1, 1, 1}, lift{0, 0, 0};
     float sat = 1, contrast = 1, bloom = 0.5f, vignette = 0.25f, blur = 0;
+    float roll = 0;           // 0 .. 1: bright colors start burning toward white earlier (golden hour)
 };
 
 struct Renderer {
     Shader city{}, cityFar{}, depth{}, post{}, blur{}, extract{}, sky{}, ssao{}, aoBlur{};
-    // 2 high (two shadow cascades + a wide far one, ambient occlusion, HDR), 1 medium (one cascade), 0 low (no shadows
-    // or bloom). 4x MSAA and bloom on all but low.
+    // 2 high (two shadow cascades + a wide far one, ambient occlusion, HDR), 1 medium (one cascade + the far one), 0 low
+    // (no shadows or bloom). 4x MSAA and bloom on all but low.
     int quality = 2;
     static const char* QUALITY_NAMES[3];
 
     // sun shadows
-    static constexpr int MAXC = 3;   // 0, 1 near the camera; 2 the wide far one (High), redrawn only when it moves
+    static constexpr int MAXC = 3;   // 0, 1 near the camera; 2 the wide far one, redrawn only when it moves
     unsigned shFbo[MAXC]{}, shTex[MAXC]{};
     int shSize = 2048;
     int nCasc = 0;             // cascades rendered this frame
@@ -44,7 +47,12 @@ struct Renderer {
     bool farCasc = false;      // the far cascade is in use this frame
     bool farDirty = true;      // ... and needs drawing again (moved, or the sun turned)
 
-    static constexpr int MAXLAMPS = 16;
+    // street lamps the near pass lights with (sized into the city shader's uniform array). 64 covers every street
+    // view: at most ~54 lamps light a view within 160 m, the median ~25. 64 vec4s are 256 of the 1024 fragment
+    // uniform components GL 3.3 guarantees (desktop drivers, macOS included, give 4096 or more), next to ~30 vec4s
+    // of other uniforms.
+    static constexpr int MAXLAMPS = 64;
+    static constexpr float LAMP_REACH = 20.f;   // how far a street lamp lights, in m (the shader gets it too)
 
     // off-screen scene: multisampled color + depth, resolved into `scene`; alpha = 1 - bloom. Half-float on High
     // (HDR: lights and the sun don't clip, the post pass tone maps them).
@@ -57,6 +65,7 @@ struct Renderer {
     unsigned dsFbo = 0, dsTex = 0;
     RenderTexture2D aoA{}, aoB{};
     float viewFovy = 60, viewNear = 0.15f, viewFar = 270;
+    float outScale = 1;        // the scene is drawn at this and scaled back in post (headroom in 8 bits, see setLook)
 
     void init();
     void setQuality(int q);
@@ -72,7 +81,7 @@ struct Renderer {
     void beginScene(Color clear);   // binds the off-screen target (call inside BeginDrawing)
     void drawSky(const SkyLook& s); // right after beginScene: fills the background, bloom mask included
     float cloudAt(Vector3 dir) const;   // cloud cover (0..1) the last drawSky showed in this direction (for the stars)
-    // street lamps near the camera: xyz and strength (0 = off); applied by the near pass
+    // street lamps in view: xyz and strength (0 = off); applied by the near pass
     void setLamps(const Vector4* l, int n);
     void setView(float fovyDeg, float nearZ, float farZ) { viewFovy = fovyDeg; viewNear = nearZ; viewFar = farZ; }
     // opaque city passes write a bloom mask into alpha; translucent bits must leave it alone
@@ -87,6 +96,7 @@ private:
     float shStrength = 1;
     Matrix shProj[MAXC]{};
     Vector3 farAt{1e9f, 0, 0}, farSun{};   // where the far cascade was last drawn, and for which sun
+    int farWait = 0;                       // frames since it was last drawn
     SkyLook lastSky{};
     void ambientOcclusion();
     void ensureTargets();

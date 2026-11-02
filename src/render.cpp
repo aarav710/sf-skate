@@ -27,6 +27,11 @@ vec3 chunkPos() {
 }
 )"
 
+// how golden the light is: 1 with the sun low (below ~12 degrees), 0 by day and at night
+#define GOLDEN_FN R"(
+float goldenK(float sunY, float nightK) { return (1.0 - smoothstep(0.2, 0.5, sunY)) * (1.0 - smoothstep(0.6, 0.9, nightK)); }
+)"
+
 // ---------------------------------------------------------------- city shader
 // Static meshes bring a normal (w = 1: given explicitly, use as is), the height above the bare ground under the
 // vertex (in vertexTexCoord.x) and the material code in the color alpha. Immediate-mode and instanced models only bring
@@ -37,7 +42,8 @@ static const char* CITY_VS = PACKED_POS R"(
 in vec4 vertexColor;
 layout(location = 14) in vec4 instCol;
 uniform mat4 mvp;
-out vec3 wPos;
+uniform vec3 camPos;
+out vec3 vRel;   // position relative to the camera: precise enough for face normals right up at the lens
 out vec4 vCol;
 #if !FAR
 in vec2 vertexTexCoord;
@@ -45,7 +51,8 @@ in vec4 vertexNormal;
 out vec4 vNH;   // normal (length 2 when given explicitly), height above the bare ground
 #endif
 void main() {
-    wPos = chunkPos();
+    vec3 wPos = chunkPos();
+    vRel = wPos - camPos;
     vCol = instOn == 1 ? instCol : vertexColor;
 #if !FAR
     vNH = vec4(vertexNormal.xyz * (vertexNormal.w > 0.5 ? 2.0 : 1.0), vertexTexCoord.x);
@@ -53,8 +60,8 @@ void main() {
     gl_Position = mvp * vec4(wPos, 1.0);
 })";
 
-static const char* CITY_FS = R"(
-in vec3 wPos;
+static const char* CITY_FS = GOLDEN_FN R"(
+in vec3 vRel;
 in vec4 vCol;
 #if !FAR
 in vec4 vNH;
@@ -69,6 +76,8 @@ uniform float fogDen;
 uniform float night;
 uniform float time;
 uniform float wet;
+uniform float clearK;      // 1 in clear weather, 0 in Karl the Fog or rain
+uniform float outScale;    // < 1: headroom above white in an 8-bit scene (see Renderer::setLook)
 uniform int useVN;
 uniform sampler2DShadow shadowMap0;
 uniform sampler2DShadow shadowMap1;
@@ -80,12 +89,15 @@ uniform sampler2DShadow shadowMap2;
 uniform mat4 lightVP2;
 uniform vec4 farInfo;      // the wide far cascade: on, world texel, -, -
 #if !FAR
-uniform vec4 lamps[16];    // street lamps near the camera: position, strength
+uniform vec4 lamps[MAXLAMPS];   // street lamps in view: position, strength (MAXLAMPS: Renderer::MAXLAMPS)
 uniform int lampN;
 #endif
 out vec4 finalColor;
+vec3 wPos;   // world position (camPos + vRel), set first thing in main
 
 float h21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+// lamps, neon and lit windows come on with the street lamps (the same ramp as lampK in main.cpp), not with the dusk haze
+float lightsOn() { return smoothstep(0.4, 0.9, night); }
 float vnoise(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
@@ -93,8 +105,8 @@ float vnoise(vec2 p) {
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
 
-// ---- the far cascade (High): 2.9 km wide, one hardware-filtered tap. The far pass has only face normals from
-// derivatives, so it leans on a big normal offset rather than a depth bias.
+// ---- the far cascade (Medium and High): 2.9 km wide, one hardware-filtered tap. The far pass has only face normals
+// from derivatives, so it leans on a big normal offset rather than a depth bias.
 float farShadow(vec3 p, vec3 Ng) {
     if (farInfo.x < 0.5) return 1.0;
     float t = farInfo.y;
@@ -111,21 +123,28 @@ float taps(sampler2DShadow sm, vec3 c) {
     return 0.25 * (texture(sm, c + vec3(-t, -t, 0.0)) + texture(sm, c + vec3(t, -t, 0.0)) +
                    texture(sm, c + vec3(-t, t, 0.0)) + texture(sm, c + vec3(t, t, 0.0)));
 }
+// where to look a point up in a cascade with texels t metres wide: off the surface along its normal (slope-scaled,
+// but no more than 0.2 m unless the cascade's own texels need more, or low casters lose their shadows) and toward
+// the sun (slope-scaled)
+vec3 shadowOffset(vec3 Ng, float k, float t) { return Ng * (min(2.2 * k, max(2.2, 0.2 / t)) * t) + sunDir * (0.8 * k * t); }
 float sunShadow(vec3 p, vec3 Ng, float dist) {
     if (shadowInfo.x < 0.5) return 1.0;
     if (dist > 270.0) return mix(1.0, farShadow(p, Ng), shadowInfo.w);
-    vec3 off0 = Ng * shadowInfo.y * 2.2 + sunDir * shadowInfo.y * 0.8;
-    vec4 l0 = lightVP0 * vec4(p + off0, 1.0);
+    // a surface the sun only grazes needs a bigger offset (slope-scaled), or it shadows itself in stripes; less on
+    // the ground, so the long shadows of a low sun stay attached to their casters
+    float nl = clamp(dot(Ng, sunDir), 0.0, 1.0);
+    float k = 1.0 + 3.0 * sqrt(1.0 - nl * nl) * (1.0 - 0.6 * Ng.y * Ng.y);
+    vec4 l0 = lightVP0 * vec4(p + shadowOffset(Ng, k, shadowInfo.y), 1.0);
     float e0 = max(abs(l0.x), abs(l0.y));
     float s = 1.0, fade = smoothstep(220.0, 265.0, dist);
     if (e0 < 0.97) {
         s = taps(shadowMap0, l0.xyz * 0.5 + 0.5 - vec3(0.0, 0.0, 0.00002));
         if (e0 > 0.85 && shadowInfo.x > 1.5) {   // blend into the wide cascade near the edge of the sharp one
-            vec4 l1 = lightVP1 * vec4(p + Ng * shadowInfo.z * 2.2 + sunDir * shadowInfo.z * 0.8, 1.0);
+            vec4 l1 = lightVP1 * vec4(p + shadowOffset(Ng, k, shadowInfo.z), 1.0);
             s = mix(s, taps(shadowMap1, l1.xyz * 0.5 + 0.5 - vec3(0.0, 0.0, 0.00004)), smoothstep(0.85, 0.97, e0));
         }
     } else if (shadowInfo.x > 1.5) {
-        vec4 l1 = lightVP1 * vec4(p + Ng * shadowInfo.z * 2.2 + sunDir * shadowInfo.z * 0.8, 1.0);
+        vec4 l1 = lightVP1 * vec4(p + shadowOffset(Ng, k, shadowInfo.z), 1.0);
         float e1 = max(abs(l1.x), abs(l1.y));
         if (e1 >= 0.98) return 1.0;
         s = taps(shadowMap1, l1.xyz * 0.5 + 0.5 - vec3(0.0, 0.0, 0.00004));
@@ -152,7 +171,8 @@ vec3 lampLight(vec3 p, vec3 N) {
     for (int i = 0; i < lampN; i++) {
         vec3 L = lamps[i].xyz - p;
         float d2 = dot(L, L);
-        float reach = clamp(1.0 - d2 / 400.0, 0.0, 1.0);   // 20 m
+        if (d2 >= LAMP_REACH * LAMP_REACH) continue;   // out of its reach (most lamps for most pixels): no light
+        float reach = clamp(1.0 - d2 / (LAMP_REACH * LAMP_REACH), 0.0, 1.0);
         float ndl = max(dot(N, L) * inversesqrt(d2 + 1e-4), 0.0);
         s += vec3(lamps[i].w * reach * reach * ndl / (1.0 + d2 * 0.04));
     }
@@ -169,9 +189,12 @@ float fogAmount(float dist) {
     return 1.0 - exp(-dist * dens * k);
 }
 vec3 fogColor(vec3 V) {
-    float golden = (1.0 - smoothstep(0.2, 0.5, sunDir.y)) * (1.0 - smoothstep(0.6, 0.9, night));
-    float sunAmt = pow(max(dot(-V, sunDir), 0.0), 6.0);
-    vec3 fc = mix(fogCol, sunCol * 1.05, sunAmt * (0.25 + 0.4 * golden) * (1.0 - night * 0.8));
+    float golden = goldenK(sunDir.y, night);
+    float sd = dot(-V, sunDir);
+    float sunAmt = pow(max(sd, 0.0), 6.0);
+    // a low sun only warms its own side of the sky: away from it the haze cools to a dusty mauve (as in the sky)
+    vec3 fc = fogCol * mix(vec3(1.0), vec3(0.86, 0.92, 1.1), golden * (1.0 - smoothstep(-0.3, 0.8, sd)) * clearK);
+    fc = mix(fc, sunCol * 1.05, sunAmt * (0.25 + 0.4 * golden) * (1.0 - night * 0.8));
     fc += vec3(0.07, 0.045, 0.02) * night * exp(-max(wPos.y, 0.0) / 120.0) * (1.0 - wet * 0.3);
     return fc;
 }
@@ -212,8 +235,11 @@ vec3 groundDetail(vec3 base, vec2 p, float near) {
 }
 
 void main() {
-    vec3 Ng = normalize(cross(dFdx(wPos), dFdy(wPos)));
-    vec3 toCam = camPos - wPos;
+    wPos = camPos + vRel;
+    // face normal from the camera-relative position: world coordinates a kilometre out are too coarse for the
+    // derivatives of something a metre from the camera, and the noise shows up as stripes in a low sun
+    vec3 Ng = normalize(cross(dFdx(vRel), dFdy(vRel)));
+    vec3 toCam = -vRel;
     float dist = length(toCam);
     vec3 V = toCam / max(dist, 1e-3);
     if (dot(Ng, V) < 0.0) Ng = -Ng;
@@ -282,7 +308,7 @@ void main() {
                 if (h21(cell + bld * 7.13) < 0.2 + 0.2 * h21(bld * 3.17 + 0.5)) {
                     float tone = h21(bld * 5.3 + vec2(cell.y * 0.37, 0.0));
                     vec3 tint = tone < 0.55 ? vec3(1.0, 0.76, 0.48) : (tone < 0.8 ? vec3(0.95, 0.87, 0.72) : vec3(0.7, 0.84, 1.0));
-                    emis = tint * (0.3 + 0.4 * h21(cell * 1.7)) * night * (m == 6 ? 0.85 : 1.0);
+                    emis = tint * (0.3 + 0.4 * h21(cell * 1.7)) * lightsOn() * (m == 6 ? 0.85 : 1.0);
                     emisBloom = 0.45;
                 }
             } else if (trimmed) {
@@ -358,6 +384,16 @@ void main() {
         // sun (or moon) on the water: a tight glint up close that spreads into a glitter path further out
         float sp = mix(900.0, 120.0, smoothstep(30.0, 1500.0, dist)) * (1.0 + slick);
         vec3 spec = sunCol * (pow(max(dot(R, sunDir), 0.0), sp) * 3.0 + pow(max(dot(R, sunDir), 0.0), 12.0) * 0.05) * sh * (1.0 - wet * 0.7);
+        // a low sun: far out, where the waves are too small to see, the glitter path carries on to the horizon,
+        // narrow side to side and long up and down, broken into glints
+        float lowW = goldenK(sunDir.y, night) * smoothstep(60.0, 500.0, dist);
+        if (lowW > 0.0) {
+            float side = 1.0 - dot(normalize(R.xz + 1e-4), normalize(sunDir.xz + 1e-4));
+            float path = exp(-side * 1200.0) * exp(-abs(R.y - sunDir.y) * 3.0);
+            float glint = smoothstep(0.3, 0.85, vnoise(p * vec2(0.09, 0.05) + vec2(t * 0.35, -t * 0.25)));
+            glint = mix(glint, 0.39, smoothstep(4.0, 12.0, fw));   // its mean, once a pixel spans a glint or more
+            spec += sunCol * path * (0.3 + 1.4 * glint) * lowW * sh * (1.0 - wet * 0.7);
+        }
         col += spec;
         // whitecaps: the bay is windy, so the odd crest breaks white
         float cap = smoothstep(1.0, 1.5, crest + gust * 0.4) * smoothstep(0.55, 0.85, vnoise(p * 0.3 + vec2(t * 0.5, t * 0.2))) * (1.0 - slick);
@@ -370,11 +406,11 @@ void main() {
         // how much you see through: most looking straight down in the shallows, a mirror at a low angle, opaque far off
         float a = mix(0.42 + 0.58 * fres, 1.0, smoothstep(220.0, 650.0, dist));
         a = max(a, cap * 0.9);
-        finalColor = vec4(mix(col, fogColor(V), f), a);
+        finalColor = vec4(mix(col, fogColor(V), f) * outScale, a);
         return;
     } else if (m == 4) {                 // lights
-        emis = base * night * 1.3;
-        bloom = night * 0.95;
+        emis = base * lightsOn() * 1.3;
+        bloom = lightsOn() * 0.95;
     }
 
     // wet streets: darker, glossy, with puddles that mirror the sky
@@ -387,7 +423,9 @@ void main() {
     }
 
     float nl = dot(N, sunDir);
-    float diff = given ? max(nl * 0.8 + 0.2, 0.0) : max(nl, 0.0);   // leaves let a little light through
+    // leaves let a little light through; anything else fades in over the first few degrees, where the shadow map
+    // can't tell lit from shadowed
+    float diff = given ? max(nl * 0.8 + 0.2, 0.0) : max(nl, 0.0) * smoothstep(0.0, 0.1, nl);
 #if FAR
     float sh = diff > 0.0 ? mix(1.0, farShadow(wPos, Ng), shadowInfo.w) : 1.0;
 #else
@@ -397,18 +435,26 @@ void main() {
     float hemi = useVN == 1 ? 0.62 + 0.38 * N.y : 0.72 + 0.28 * N.y;
     // shadows: long ones (a low sun behind Twin Peaks) thin out with distance into the haze, and what the sun
     // misses still gets sky light from the sun's side of the sky, cool blue, most of all with a low sun
-    float lowSun = (1.0 - smoothstep(0.2, 0.5, sunDir.y)) * (1.0 - smoothstep(0.6, 0.9, night));
+    float lowSun = goldenK(sunDir.y, night);
     sh = mix(1.0, sh, (1.0 - 0.7 * smoothstep(120.0, 2200.0, dist)) * (1.0 - 0.3 * lowSun * smoothstep(100.0, 1400.0, dist)));
     vec3 fill = vec3(0.72, 0.88, 1.2) * dot(ambCol, vec3(0.333)) * (0.15 + 0.45 * lowSun);
     vec3 light = ambCol * hemi * ao * 1.06 + (sunCol * sh + fill * (1.0 - sh)) * diff * (0.6 + 0.4 * ao);
+    // with a low sun, most of that sky light reaches the ground whichever way it faces, so the streets stay readable
+    light += fill * (0.15 * lowSun) * (0.6 + 0.4 * N.y) * ao;
     if (m == 10) {                       // rooms: warm lamp light and soft window light, warmer still at night
         vec3 day = (ambCol * 1.2 + sunCol * 0.2 + vec3(0.28, 0.22, 0.12)) * (0.88 + 0.12 * hemi);
-        light = mix(day, vec3(1.0, 0.88, 0.7) * (0.9 + 0.1 * hemi), night);
+        light = mix(day, vec3(1.0, 0.88, 0.7) * (0.9 + 0.1 * hemi), lightsOn());
     }
 #if !FAR
     else if (lampN > 0 && m != 4) light += lampLight(wPos, N) * (0.6 + 0.4 * ao);
 #endif
     vec3 col = base * light;
+    if (m == 5 && lowSun > 0.0) {
+        // a low sun glazes the road and the paving ahead with a faint, broad sheen (not the grass)
+        float gs = max(vCol.r, max(vCol.g, vCol.b)) - min(vCol.r, min(vCol.g, vCol.b));
+        float fr = pow(1.0 - max(dot(N, V), 0.0), 4.0);
+        col += sunCol * (0.18 * pow(max(dot(N, normalize(sunDir + V)), 0.0), 20.0) * fr * sh * lowSun * (1.0 - smoothstep(0.06, 0.12, gs)) * smoothstep(0.0, 0.1, dot(N, sunDir)));
+    }
     if (specK > 0.0) {
         vec3 H = normalize(sunDir + V);
         vec3 sp = sunCol * specK * pow(max(dot(N, H), 0.0), specP) * sh;
@@ -427,7 +473,7 @@ void main() {
         vec3 sp = sunCol * pow(max(dot(Nw, H), 0.0), 90.0) * 1.6 * wetS * sh;
         col += sp;
         // city lights smeared across wet asphalt at night
-        col += vec3(1.0, 0.72, 0.42) * night * wetS * fres * 0.5 * (0.6 + 0.4 * vnoise(wPos.xz * 0.15));
+        col += vec3(1.0, 0.72, 0.42) * lightsOn() * wetS * fres * 0.5 * (0.6 + 0.4 * vnoise(wPos.xz * 0.15));
         bloom += clamp(dot(sp, vec3(0.33)) - 0.2, 0.0, 0.6);
     }
 #if FAR
@@ -455,7 +501,7 @@ void main() {
     float f = fogAmount(dist);
     if (length(emis) > 0.05) f *= 0.75;   // lights shine through the fog a bit
     col = mix(col, fogColor(V), f);
-    finalColor = vec4(col, 1.0 - clamp(bloom * (1.0 - f * 0.8), 0.0, 1.0));
+    finalColor = vec4(col * outScale, 1.0 - clamp(bloom * (1.0 - f * 0.8), 0.0, 1.0));
 })";
 
 // shadow casters only need depth
@@ -504,26 +550,29 @@ float cloudPuffs(vec2 p) {
 }
 float cloudField(vec2 uv, float puffK) { return cloudCoarse(uv) + (cloudPuffs(uv * 3.1 + vec2(9.0, 31.0)) - 0.5) * puffK; }
 )"
-static const char* SKY_FS = "#version 330\n" SKY_NOISE R"(
+static const char* SKY_FS = "#version 330\n" SKY_NOISE GOLDEN_FN R"(
 uniform vec2 res;
 uniform vec3 camF, camR, camU;
 uniform vec2 lens;         // tan(fovy / 2) * aspect, tan(fovy / 2)
 uniform vec3 sunDir, sunCol, top, horizon, fogCol;
 uniform vec4 misc;         // night, time, rain, fog
 uniform vec3 cloudK;       // coverage threshold, opacity, drift time
+uniform float outScale;    // as in the city shader
 out vec4 finalColor;
 void main() {
     vec2 ndc = gl_FragCoord.xy / res * 2.0 - 1.0;
     vec3 dir = normalize(camF + camR * ndc.x * lens.x + camU * ndc.y * lens.y);
     float night = misc.x, rain = misc.z, fogK = misc.w;
     float e = dir.y;
-    float golden = (1.0 - smoothstep(0.2, 0.5, sunDir.y)) * (1.0 - smoothstep(0.6, 0.9, night));
+    float golden = goldenK(sunDir.y, night);
     float sd = dot(dir, sunDir);
 
-    // gradient, then haze at the horizon tinted toward the sun like the city's fog, a faint city glow at night
-    vec3 col = mix(horizon, top, pow(clamp(e / 0.38, 0.0, 1.0), 0.75));
+    // gradient, then haze at the horizon tinted toward the sun like the city's fog, a faint city glow at night. A low
+    // sun only warms its own side: away from it the horizon and the haze turn a dusty mauve.
+    float away = golden * (1.0 - smoothstep(-0.3, 0.8, sd)) * (1.0 - fogK) * (1.0 - rain);
+    vec3 col = mix(mix(horizon, vec3(0.75, 0.6, 0.7), away), top, pow(clamp(e / 0.38, 0.0, 1.0), 0.75));
     float sunAmt = pow(max(sd, 0.0), 6.0);
-    vec3 haze = mix(fogCol, sunCol * 1.05, sunAmt * (0.25 + 0.4 * golden) * (1.0 - night * 0.8));
+    vec3 haze = mix(fogCol * mix(vec3(1.0), vec3(0.86, 0.92, 1.1), away), sunCol * 1.05, sunAmt * (0.25 + 0.4 * golden) * (1.0 - night * 0.8));
     haze += vec3(0.07, 0.045, 0.02) * night;
     col = mix(col, haze, exp(-max(e, 0.0) * 22.0) * 0.4);
     col = mix(col, haze, smoothstep(0.0, -0.04, e));
@@ -579,7 +628,7 @@ void main() {
     col = mix(col, cloudCol, cloud) + halo;
     col = mix(col, discCol, disc);
     float bloom = disc * mix(0.8, 0.45, moonK) * (1.0 - fogK);
-    finalColor = vec4(col, 1.0 - bloom);
+    finalColor = vec4(col * outScale, 1.0 - bloom);
 })";
 
 // ---------------------------------------------------------------- ambient occlusion (High)
@@ -685,6 +734,8 @@ uniform sampler2D depthTex;   // full size depth of the near pass
 uniform vec4 aoInfo;          // on, near, far, -
 uniform vec2 aoTexel;
 uniform float hdrOn;
+uniform float roll;   // golden hour: bright colors start burning toward white sooner, so sunlit pastels stay apart
+uniform float inScale;   // undoes the scene's outScale
 out vec4 finalColor;
 float linz(float d) { float z = d * 2.0 - 1.0; return 2.0 * aoInfo.y * aoInfo.z / (aoInfo.z + aoInfo.y - z * (aoInfo.z - aoInfo.y)); }
 // AO up to full size: the four nearest half-size values, weighted toward those at this pixel's depth
@@ -710,7 +761,7 @@ vec3 shoulder(vec3 c) {
     float m = max(c.r, max(c.g, c.b));
     if (m <= 0.8) return c;
     float t = 0.8 + (m - 0.8) / (1.0 + (m - 0.8) / 0.3);
-    return mix(c * (t / m), vec3(t), smoothstep(1.5, 6.0, m) * 0.7);
+    return mix(c * (t / m), vec3(t), max(smoothstep(1.5, 6.0, m) * 0.7, smoothstep(1.0, 2.5, m) * 0.5 * roll));
 }
 void main() {
     vec2 uv = fragTexCoord;
@@ -724,6 +775,7 @@ void main() {
     }
     if (aoInfo.x > 0.5) c *= mix(1.0, aoAt(uv), c0.a);   // lit surfaces only, not lamps and windows
     c += (texture(bloomTex, uv).rgb * 0.6 + texture(bloomTex2, uv).rgb * 0.8) * params.z;
+    c *= inScale;
     c = c * gain + lift * (1.0 - c);
     float l = dot(c, vec3(0.2126, 0.7152, 0.0722));
     c = mix(vec3(l), c, params.x);
@@ -731,6 +783,7 @@ void main() {
     vec2 v = uv - 0.5;
     c *= 1.0 - params.w * dot(v, v) * 1.6;
     if (hdrOn > 0.5) c = shoulder(max(c, vec3(0.0)));
+    else if (roll > 0.0) c = mix(c, shoulder(max(c, vec3(0.0))), roll);   // Medium, Low: the same roll-off, in the headroom
     // a touch of dither so the sky gradient doesn't band
     c += (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;
     finalColor = vec4(clamp(c, 0.0, 1.0), 1.0);
@@ -738,7 +791,8 @@ void main() {
 
 // ---------------------------------------------------------------- setup
 static Shader cityShader(bool far) {
-    std::string head = std::string("#version 330\n#define FAR ") + (far ? "1" : "0") + "\n";
+    std::string head = std::string("#version 330\n#define FAR ") + (far ? "1" : "0") + "\n#define MAXLAMPS " +
+                       std::to_string(Renderer::MAXLAMPS) + "\n#define LAMP_REACH " + std::to_string(Renderer::LAMP_REACH) + "\n";
     return LoadShaderFromMemory((head + CITY_VS).c_str(), (head + CITY_FS).c_str());
 }
 
@@ -883,6 +937,10 @@ void Renderer::ensureTargets() {
 
 void Renderer::setLook(const Look& L) {
     float misc[3] = {1.f / shSize, L.fogH, 0};
+    // Medium and Low draw into an 8-bit scene, which clips at white. When the grade rolls bright colors off (golden
+    // hour), the scene is drawn at 1/1.5 and the post pass scales it back up, so sunlit walls and the sun have room
+    // above white to roll off into instead of clipping flat.
+    outScale = (!hdr && L.roll > 0.f) ? 1.f / (1.f + 0.5f * L.roll) : 1.f;
     for (Shader* s : {&city, &cityFar}) {
         auto set = [&](const char* n, const void* v, int t) { SetShaderValue(*s, GetShaderLocation(*s, n), v, t); };
         set("camPos", &L.camPos, SHADER_UNIFORM_VEC3);
@@ -895,6 +953,8 @@ void Renderer::setLook(const Look& L) {
         set("night", &L.night, SHADER_UNIFORM_FLOAT);
         set("time", &L.time, SHADER_UNIFORM_FLOAT);
         set("wet", &L.wet, SHADER_UNIFORM_FLOAT);
+        set("clearK", &L.clear, SHADER_UNIFORM_FLOAT);
+        set("outScale", &outScale, SHADER_UNIFORM_FLOAT);
         set("shadowMisc", misc, SHADER_UNIFORM_VEC3);
     }
 }
@@ -937,15 +997,21 @@ int Renderer::planShadows(Vector3 camPos, Vector3 camFwd, Vector3 sunDir, float 
         shProj[k] = MatrixOrtho(-hf, hf, -hf, hf, 1.0, 2 * DIST);
         lightVP[k] = MatrixMultiply(lightView[k], shProj[k]);
     }
-    // the far cascade (High): a 2.9 km square around the camera with only the static city in it, so it is drawn
-    // again only once the camera has gone 300 m from where it was centred, or the sun has moved
-    farCasc = quality == 2 && nCasc > 0;
+    // the far cascade (Medium and High): a 2.9 km square around the camera with only the static city in it, so it is
+    // drawn again only once the camera has gone 300 m from where it was centred, or the sun has moved. Without it,
+    // whatever lies past the near cascade would turn sunlit.
+    farCasc = nCasc > 0;
     if (farCasc) {
         const float FH = 1450.f, FD = 3000.f;
         float tex = 2 * FH / shSize;
         bool moved = sq(camPos.x - farAt.x) + sq(camPos.z - farAt.z) > 300.f * 300.f;
-        if (moved || Vector3DotProduct(farSun, sunDir) < 0.999999f || farAt.x > 1e8f) {
+        // while the sun is turning (a time-of-day change eases it over a few seconds), redraw only every 15th frame
+        // rather than every frame; once it settles the next of those catches up with where it stopped
+        bool turned = Vector3DotProduct(farSun, sunDir) < 0.999999f;
+        farWait++;
+        if (moved || (turned && farWait >= 15) || farAt.x > 1e8f) {
             farDirty = true;
+            farWait = 0;
             farAt = {camPos.x, 0.f, camPos.z};
             farSun = sunDir;
             Vector3 c = farAt;
@@ -1029,6 +1095,7 @@ void Renderer::drawSky(const SkyLook& k) {
     set("fogCol", &k.fog, SHADER_UNIFORM_VEC3);
     set("misc", misc, SHADER_UNIFORM_VEC4);
     set("cloudK", ck, SHADER_UNIFORM_VEC3);
+    set("outScale", &outScale, SHADER_UNIFORM_FLOAT);
     DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), WHITE);
     EndShaderMode();
     glEnable(GL_BLEND);
@@ -1148,6 +1215,9 @@ void Renderer::present(const Grade& g) {
     SetShaderValue(post, GetShaderLocation(post, "aoInfo"), aoInfo, SHADER_UNIFORM_VEC4);
     SetShaderValue(post, GetShaderLocation(post, "aoTexel"), aoTx, SHADER_UNIFORM_VEC2);
     SetShaderValue(post, GetShaderLocation(post, "hdrOn"), &hdrOn, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(post, GetShaderLocation(post, "roll"), &g.roll, SHADER_UNIFORM_FLOAT);
+    float inScale = 1.f / outScale;
+    SetShaderValue(post, GetShaderLocation(post, "inScale"), &inScale, SHADER_UNIFORM_FLOAT);
     SetShaderValueTexture(post, GetShaderLocation(post, "aoTex"), aoA.texture);
     SetShaderValueTexture(post, GetShaderLocation(post, "depthTex"), Texture2D{dsTex, w, h, 1, PIXELFORMAT_UNCOMPRESSED_R32});
     DrawTexturePro(scene.texture, {0, 0, (float)w, -(float)h}, {0, 0, (float)GetScreenWidth(), (float)GetScreenHeight()}, {0, 0}, 0, WHITE);

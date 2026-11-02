@@ -47,7 +47,7 @@ make run
 | T, or F1 / F2 / F3 | time of day (day, golden hour, night), anytime while skating |
 | F | Karl the Fog |
 | G | rain on / off (the streets take a while to soak and to dry) |
-| V | graphics quality: High (two sun-shadow cascades, bloom), Medium (one cascade), Low (no sun shadows or bloom, fastest) |
+| V | graphics quality: High (two sun-shadow cascades, bloom), Medium (one cascade plus the cached far one), Low (no sun shadows or bloom, fastest) |
 | R | reset to the last safe spot |
 | P | pause |
 | B | free roam / cop chase mode |

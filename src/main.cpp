@@ -60,10 +60,12 @@ static Sky PRESETS[3] = {
     {Vector3Normalize({-0.35f, 0.8f, 0.45f}), {0.84f, 0.8f, 0.72f}, {0.38f, 0.42f, 0.5f},
      {0.32f, 0.55f, 0.88f}, {0.76f, 0.85f, 0.94f}, {0.76f, 0.84f, 0.92f}, 0.0f,
      {1.0f, 1.0f, 1.0f}, 1.04f, 1.05f, 0.35f, {0, 0, 0}, 0.0f},
-    // golden hour: sun setting over the Pacific, warm but not burnt; the shade stays readable
-    {Vector3Normalize({-0.9f, 0.16f, 0.25f}), {1.1f, 0.74f, 0.46f}, {0.34f, 0.33f, 0.44f},
+    // golden hour: sun setting over the Pacific, ~16 degrees up (high enough to light the streets, shadows ~3.6x
+    // as long as things are tall), deep amber sun, a warm rosy ambient and a warm grade, so the whole city turns
+    // gold, shade included, not just the walls facing west
+    {Vector3Normalize({-0.9f, 0.26f, 0.25f}), {1.4f, 0.9f, 0.5f}, {0.42f, 0.36f, 0.38f},
      {0.22f, 0.3f, 0.56f}, {0.98f, 0.66f, 0.44f}, {0.88f, 0.66f, 0.55f}, 0.35f,
-     {1.03f, 0.99f, 0.96f}, 1.05f, 1.03f, 0.7f, {0.012f, 0.011f, 0.016f}, 1.0f},
+     {1.1f, 1.0f, 0.86f}, 1.05f, 1.03f, 0.7f, {0.016f, 0.012f, 0.01f}, 1.0f},
     // night: moonlit blue, lights bloom
     {Vector3Normalize({0.3f, 0.6f, -0.4f}), {0.22f, 0.26f, 0.4f}, {0.1f, 0.11f, 0.17f},
      {0.01f, 0.02f, 0.06f}, {0.07f, 0.09f, 0.16f}, {0.07f, 0.09f, 0.15f}, 1.0f,

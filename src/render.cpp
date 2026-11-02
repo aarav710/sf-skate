@@ -37,7 +37,8 @@ static const char* CITY_VS = PACKED_POS R"(
 in vec4 vertexColor;
 layout(location = 14) in vec4 instCol;
 uniform mat4 mvp;
-out vec3 wPos;
+uniform vec3 camPos;
+out vec3 vRel;   // position relative to the camera: precise enough for face normals right up at the lens
 out vec4 vCol;
 #if !FAR
 in vec2 vertexTexCoord;
@@ -45,7 +46,8 @@ in vec4 vertexNormal;
 out vec4 vNH;   // normal (length 2 when given explicitly), height above the bare ground
 #endif
 void main() {
-    wPos = chunkPos();
+    vec3 wPos = chunkPos();
+    vRel = wPos - camPos;
     vCol = instOn == 1 ? instCol : vertexColor;
 #if !FAR
     vNH = vec4(vertexNormal.xyz * (vertexNormal.w > 0.5 ? 2.0 : 1.0), vertexTexCoord.x);
@@ -54,7 +56,7 @@ void main() {
 })";
 
 static const char* CITY_FS = R"(
-in vec3 wPos;
+in vec3 vRel;
 in vec4 vCol;
 #if !FAR
 in vec4 vNH;
@@ -84,6 +86,7 @@ uniform vec4 lamps[16];    // street lamps near the camera: position, strength
 uniform int lampN;
 #endif
 out vec4 finalColor;
+vec3 wPos;   // world position (camPos + vRel), set first thing in main
 
 float h21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
 // lamps, neon and lit windows come on with the street lamps, not with the dusk haze
@@ -116,18 +119,23 @@ float taps(sampler2DShadow sm, vec3 c) {
 float sunShadow(vec3 p, vec3 Ng, float dist) {
     if (shadowInfo.x < 0.5) return 1.0;
     if (dist > 270.0) return mix(1.0, farShadow(p, Ng), shadowInfo.w);
-    vec3 off0 = Ng * shadowInfo.y * 2.2 + sunDir * shadowInfo.y * 0.8;
+    // a surface the sun only grazes needs a bigger offset (slope-scaled), or it shadows itself in stripes; less on
+    // the ground, so the long shadows of a low sun stay attached to their casters
+    float nl = clamp(dot(Ng, sunDir), 0.0, 1.0);
+    float k = 1.0 + 3.0 * sqrt(1.0 - nl * nl) * (1.0 - 0.6 * Ng.y * Ng.y);
+    vec3 off = (Ng * 2.2 + sunDir * 0.8) * k;
+    vec3 off0 = off * shadowInfo.y;
     vec4 l0 = lightVP0 * vec4(p + off0, 1.0);
     float e0 = max(abs(l0.x), abs(l0.y));
     float s = 1.0, fade = smoothstep(220.0, 265.0, dist);
     if (e0 < 0.97) {
         s = taps(shadowMap0, l0.xyz * 0.5 + 0.5 - vec3(0.0, 0.0, 0.00002));
         if (e0 > 0.85 && shadowInfo.x > 1.5) {   // blend into the wide cascade near the edge of the sharp one
-            vec4 l1 = lightVP1 * vec4(p + Ng * shadowInfo.z * 2.2 + sunDir * shadowInfo.z * 0.8, 1.0);
+            vec4 l1 = lightVP1 * vec4(p + off * shadowInfo.z, 1.0);
             s = mix(s, taps(shadowMap1, l1.xyz * 0.5 + 0.5 - vec3(0.0, 0.0, 0.00004)), smoothstep(0.85, 0.97, e0));
         }
     } else if (shadowInfo.x > 1.5) {
-        vec4 l1 = lightVP1 * vec4(p + Ng * shadowInfo.z * 2.2 + sunDir * shadowInfo.z * 0.8, 1.0);
+        vec4 l1 = lightVP1 * vec4(p + off * shadowInfo.z, 1.0);
         float e1 = max(abs(l1.x), abs(l1.y));
         if (e1 >= 0.98) return 1.0;
         s = taps(shadowMap1, l1.xyz * 0.5 + 0.5 - vec3(0.0, 0.0, 0.00004));
@@ -214,8 +222,11 @@ vec3 groundDetail(vec3 base, vec2 p, float near) {
 }
 
 void main() {
-    vec3 Ng = normalize(cross(dFdx(wPos), dFdy(wPos)));
-    vec3 toCam = camPos - wPos;
+    wPos = camPos + vRel;
+    // face normal from the camera-relative position: world coordinates a kilometre out are too coarse for the
+    // derivatives of something a metre from the camera, and the noise shows up as stripes in a low sun
+    vec3 Ng = normalize(cross(dFdx(vRel), dFdy(vRel)));
+    vec3 toCam = -vRel;
     float dist = length(toCam);
     vec3 V = toCam / max(dist, 1e-3);
     if (dot(Ng, V) < 0.0) Ng = -Ng;
@@ -389,7 +400,9 @@ void main() {
     }
 
     float nl = dot(N, sunDir);
-    float diff = given ? max(nl * 0.8 + 0.2, 0.0) : max(nl, 0.0);   // leaves let a little light through
+    // leaves let a little light through; anything else fades in over the first few degrees, where the shadow map
+    // can't tell lit from shadowed
+    float diff = given ? max(nl * 0.8 + 0.2, 0.0) : max(nl, 0.0) * smoothstep(0.0, 0.1, nl);
 #if FAR
     float sh = diff > 0.0 ? mix(1.0, farShadow(wPos, Ng), shadowInfo.w) : 1.0;
 #else

@@ -104,10 +104,21 @@ inline int signalState(int node, int axis, float t) {
 struct Spot { const char* name; Vector3 pos; float yaw; };
 struct Seat { Vector3 pos; float yaw; bool grass; };   // where someone can sit: the seat surface (or lawn) and the way they face
 struct MapLabel { const char* name; float x, z; int size; };
-struct Pond { float x0, z0, x1, z1; const char* kind = "pond"; };   // kind names it in the splash message
+struct Pond { float x0, z0, x1, z1; const char* kind = "pond"; float y = NAN; };   // kind names it in the splash message; y is the drawn water surface (NaN: not recorded)
 // The Palace of Fine Arts lagoon. Its edges lie on both the 10 m ground-mesh grid and the 4 m heightfield grid, so
 // the basin dug under it (rawHeight) keeps every drawn ground triangle inside it below the water surface.
 constexpr float LAGOON_X0 = -800, LAGOON_X1 = -740, LAGOON_Z0 = -1040, LAGOON_Z1 = -980, LAGOON_Y = 3.6f;
+// Other ponds drawn over sloping ground: a basin is dug under each (rawHeight) so the whole splash rectangle sits below
+// its water surface y, banked up just outside. Edges are on the 10 m ground-mesh grid; the dig reaches a few metres
+// past them (the 4 m heightfield grid is not aligned with it). The water sheet is laid out to POND_SHEET past the edge.
+struct Basin { float x0, z0, x1, z1, y; };
+constexpr float POND_PAD = 4.f, POND_SHEET = 5.f;
+constexpr Basin STOW_LAKE = {-840, 370, -760, 410, 5.0f};
+// Menlo Park salt ponds, two columns on the marsh between the rising bank and the bay shore (the west one sits on the
+// bank). Only land ones: a pond over the open bay would float its water sheet above the sea.
+constexpr Basin SALT_PONDS[] = {
+    {3630, 9330, 3740, 9530, 3.0f},  {3630, 9560, 3740, 9790, 3.0f},   {3630, 9820, 3740, 10050, 3.0f}, {3770, 9820, 3850, 10050, 2.4f},
+    {3630, 10080, 3740, 10310, 3.0f}, {3770, 10080, 3850, 10310, 2.4f}, {3630, 10340, 3740, 10570, 3.0f}, {3770, 10340, 3850, 10570, 2.4f}};
 
 // Static geometry is split into layers per 400 m cell: the main layer is always drawn; foliage detail (every leaf)
 // only up close, swapped for low-poly canopy blobs further out; house interiors only near the camera.

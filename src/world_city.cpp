@@ -1662,16 +1662,18 @@ void World::buildParks() {
     // Golden Gate Park: forest with meadows, JFK Drive through the middle, Stow Lake
     float pz0 = gz(12) + 8, pz1 = gz(14) - 8;
     roadStrip(*this, {gx(0) - 60, 335}, {gx(8), 335}, 5.0f, 5.0f, 0, 0.08f, C_ASPHALT);
-    ponds.push_back({-840, 365, -760, 410, "lake"});
+    // the lake sits in a basin dug into the slope (rawHeight), so the whole pond is drawn as water
+    ponds.push_back({STOW_LAKE.x0, STOW_LAKE.z0, STOW_LAKE.x1, STOW_LAKE.z1, "lake", STOW_LAKE.y});
     {
-        MeshBuilder& m = mb(-800, 387);
-        float y = terrain(-800, 387) - 0.3f;
-        m.quad({-840, y, 365}, {-760, y, 365}, {-760, y, 410}, {-840, y, 410}, col(40, 90, 100, M_WATER));
+        MeshBuilder& m = mb(-800, 390);
+        float e = POND_SHEET, y = STOW_LAKE.y;
+        m.quad({STOW_LAKE.x0 - e, y, STOW_LAKE.z0 - e}, {STOW_LAKE.x1 + e, y, STOW_LAKE.z0 - e}, {STOW_LAKE.x1 + e, y, STOW_LAKE.z1 + e},
+               {STOW_LAKE.x0 - e, y, STOW_LAKE.z1 + e}, col(40, 90, 100, M_WATER));
     }
     for (int k = 0; k < 2600; k++) {
         float x = r.range(-1460, gx(8) - 6), z = r.range(pz0, pz1);
         if (fabsf(z - 335) < 9) continue;
-        if (x > -845 && x < -755 && z > 360 && z < 415) continue;
+        if (x > -850 && x < -750 && z > 355 && z < 425) continue;
         if (hash01((int)floorf(x / 70), (int)floorf(z / 70), 9) < 0.3f) continue; // meadow
         addTree(x, z, r.chance(0.4f) ? 3 : (r.chance(0.5f) ? 1 : 0), r.range(0.9f, 1.4f), r, true);
     }

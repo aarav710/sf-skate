@@ -211,6 +211,21 @@ float alcatrazRoad(float x, float z, float* roadY) {
     return best;
 }
 
+// Dig a basin under a pond: a short shelf just under the water surface y, then the bed, banked up just outside.
+// pad widens the dug rectangle past the pond's edges.
+static void digBasin(float& best, float x, float z, float x0, float z0, float x1, float z1, float y, float pad) {
+    float ex = std::max(x0 - pad - x, x - x1 - pad), ez = std::max(z0 - pad - z, z - z1 - pad);
+    if (ex > 40 || ez > 40) return;
+    float d = (ex > 0 || ez > 0) ? sqrtf(sq(std::max(ex, 0.f)) + sq(std::max(ez, 0.f))) : std::max(ex, ez);
+    if (d <= 0) {
+        best = lerpf(y - 0.2f, y - 1.5f, smooth01(0, 8, -d - pad));   // a flat shelf, then the bed from the pond's edge in
+    } else if (d < 40) {
+        float rim = lerpf(y - 0.2f, y + 0.6f, smooth01(0, 4, d));
+        best += std::max(rim - best, 0.f) * (1 - smooth01(4, 24, d));        // raise a low shore above the water
+        best = std::min(best, rim + 0.15f * d);                                // and ease a high one down to it
+    }
+}
+
 static float baseHeight(float x, float z) {
     float best = -14.f;
     for (auto& P : gPolys) {
@@ -247,18 +262,11 @@ static float baseHeight(float x, float z) {
         float d = sqrtf(sq(x - F.x) + sq(z - F.z));
         if (d < F.r1 && best > 0) best = lerpf(best, F.h, 1 - smooth01(F.r0, F.r1, d));
     }
-    // Palace of Fine Arts lagoon: dig a basin under the water and bank it up just outside, so the whole pond
-    // rectangle (where you splash) is drawn as water and the lawn around it stays above the surface
+    // ponds: dig a basin under the water and bank it up just outside, so the whole pond rectangle (where you
+    // splash) is drawn as water and the ground around it stays above the surface
     if (best > 0) {
-        float ex = std::max(LAGOON_X0 - x, x - LAGOON_X1), ez = std::max(LAGOON_Z0 - z, z - LAGOON_Z1);
-        float d = (ex > 0 || ez > 0) ? sqrtf(sq(std::max(ex, 0.f)) + sq(std::max(ez, 0.f))) : std::max(ex, ez);
-        if (d <= 0) {
-            best = lerpf(LAGOON_Y - 0.2f, LAGOON_Y - 1.5f, smooth01(0, 8, -d));   // a short shelf, then the bed
-        } else if (d < 40) {
-            float rim = lerpf(LAGOON_Y - 0.2f, LAGOON_Y + 0.6f, smooth01(0, 4, d));
-            best += std::max(rim - best, 0.f) * (1 - smooth01(4, 24, d));        // raise a low shore above the water
-            best = std::min(best, rim + 0.15f * d);                                // and ease a high one down to it
-        }
+        digBasin(best, x, z, LAGOON_X0, LAGOON_Z0, LAGOON_X1, LAGOON_Z1, LAGOON_Y, 0);   // (edges on both ground grids)
+        digBasin(best, x, z, STOW_LAKE.x0, STOW_LAKE.z0, STOW_LAKE.x1, STOW_LAKE.z1, STOW_LAKE.y, POND_PAD);
     }
     // Menlo Park: gentle bayside flats rising slowly toward the wooded hills in the west
     {
@@ -270,6 +278,9 @@ static float baseHeight(float x, float z) {
             best = lerpf(best, target, 1 - smooth01(0, 400, d));
         }
     }
+    // Menlo Park salt ponds (after the marsh above, which would level the basins again)
+    if (best > 0 && x > 3580 && x < 3930 && z > 8990 && z < 10620)
+        for (const Basin& B : SALT_PONDS) digBasin(best, x, z, B.x0, B.z0, B.x1, B.z1, B.y, POND_PAD);
     return best;
 }
 

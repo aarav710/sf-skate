@@ -1109,7 +1109,7 @@ int main() {
         // than the shader takes, the nearest are kept and the fade is pulled in to end at the first one left out,
         // so nothing pops as lamps swap in or out of the set.
         {
-            constexpr float LAMP_REACH = 20.f, LAMP_FULL = 120.f, LAMP_END = 160.f;
+            constexpr float LAMP_REACH = Renderer::LAMP_REACH, LAMP_FULL = 120.f, LAMP_END = 160.f;
             float lampK = smooth01(0.4f, 0.9f, sky.night);
             static std::vector<std::pair<float, int>> near;   // keeps its capacity: no allocation per frame
             near.clear();

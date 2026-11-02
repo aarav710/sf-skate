@@ -374,6 +374,15 @@ void main() {
         // sun (or moon) on the water: a tight glint up close that spreads into a glitter path further out
         float sp = mix(900.0, 120.0, smoothstep(30.0, 1500.0, dist)) * (1.0 + slick);
         vec3 spec = sunCol * (pow(max(dot(R, sunDir), 0.0), sp) * 3.0 + pow(max(dot(R, sunDir), 0.0), 12.0) * 0.05) * sh * (1.0 - wet * 0.7);
+        // a low sun: far out, where the waves are too small to see, the glitter path carries on to the horizon,
+        // narrow side to side and long up and down, broken into glints
+        float lowW = (1.0 - smoothstep(0.2, 0.5, sunDir.y)) * (1.0 - smoothstep(0.6, 0.9, night)) * smoothstep(60.0, 500.0, dist);
+        if (lowW > 0.0) {
+            float side = 1.0 - dot(normalize(R.xz + 1e-4), normalize(sunDir.xz + 1e-4));
+            float path = exp(-side * 1200.0) * exp(-abs(R.y - sunDir.y) * 3.0);
+            float glint = smoothstep(0.3, 0.85, vnoise(p * vec2(0.09, 0.05) + vec2(t * 0.35, -t * 0.25)));
+            spec += sunCol * path * (0.3 + 1.4 * glint) * lowW * sh * (1.0 - wet * 0.7);
+        }
         col += spec;
         // whitecaps: the bay is windy, so the odd crest breaks white
         float cap = smoothstep(1.0, 1.5, crest + gust * 0.4) * smoothstep(0.55, 0.85, vnoise(p * 0.3 + vec2(t * 0.5, t * 0.2))) * (1.0 - slick);

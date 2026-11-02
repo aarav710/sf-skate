@@ -1220,7 +1220,7 @@ void World::buildMeta() {
     tok("SFO Runway 28R", 1560, 2262);
     tok("Alcatraz", 263, -1893);   // out in the yard: skate in the front door and through the cellhouse to get it
     {
-        Vector3 p = trackPoint(stations[0].s + 40, 6.2f, nullptr);
+        Vector3 p = trackPoint(stations[0].s + 27, 6.2f, nullptr);
         tokens.push_back({{p.x, ground(p.x, p.z, 200) + 1.4f, p.z}, "4th & King"});
         p = trackPoint(stations.back().s + 30, 6.2f, nullptr);
         tokens.push_back({{p.x, ground(p.x, p.z, 200) + 1.4f, p.z}, "Menlo Park Station"});

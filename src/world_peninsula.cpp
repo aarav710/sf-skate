@@ -66,8 +66,9 @@ void World::buildCaltrain() {
         }
         return false;
     };
-    // the stretches of [s0, s1] along the track where the strip at `lat` (+/- w) is clear of streets
-    auto clearRuns = [&](float s0, float s1, float lat, float w) {
+    // the stretches of [s0, s1] along the track where the strip at `lat` (+/- w) is clear of streets, at least minLen long
+    // (a short stub of platform left between two streets would only be a step to trip over)
+    auto clearRuns = [&](float s0, float s1, float lat, float w, float minLen = 3) {
         std::vector<std::pair<float, float>> runs;
         float from = s0;
         bool open = false;
@@ -78,9 +79,9 @@ void World::buildCaltrain() {
                 blocked |= onStreet(q.x, q.z);
             }
             if (!blocked && !open) { open = true; from = s; }
-            if (blocked && open) { open = false; if (s - 1 - from >= 3) runs.push_back({from, s - 1}); }
+            if (blocked && open) { open = false; if (s - 1 - from >= minLen) runs.push_back({from, s - 1}); }
         }
-        if (open && s1 - from >= 3) runs.push_back({from, s1});
+        if (open && s1 - from >= minLen) runs.push_back({from, s1});
         return runs;
     };
     for (auto& st : list) {
@@ -94,7 +95,7 @@ void World::buildCaltrain() {
         for (int side = -1; side <= 1; side += 2) {
             float top = c.y + 0.47f;
             MeshBuilder& m = mb(c.x, c.z);
-            for (auto& run : clearRuns(s - 70, s + 70, side * 6.2f, 2.0f)) {
+            for (auto& run : clearRuns(s - 70, s + 70, side * 6.2f, 2.0f, 25)) {
                 Vector3 a = trackPoint(run.first, side * 6.2f, nullptr), b = trackPoint(run.second, side * 6.2f, nullptr);
                 m.beam({a.x, top - 0.6f, a.z}, {b.x, top - 0.6f, b.z}, 4.0f, 1.2f, plat);
                 Vector3 ea = trackPoint(run.first, side * 4.4f, nullptr), eb = trackPoint(run.second, side * 4.4f, nullptr);
@@ -130,7 +131,8 @@ void World::buildCaltrain() {
 // Where you step off at a station: on the platform (west side first), inside the line of overhead-wire poles
 // (lateral 6.4), clear of the station building, with an open run of 50 m along the platform ahead. You face
 // along the platform toward whichever end the spot is nearer (south when it's in the middle). The platforms
-// stop short of the streets that cross the line, so a spot is only taken where the deck runs unbroken ahead.
+// stop short of the streets that cross the line (at 4th & King that leaves one 92 m piece), so the open run
+// is as far as the deck goes (at least 20 m); a spot is tried facing the nearer end first, then the other way.
 Vector3 World::caltrainDropoff(int station, float* yaw) const {
     float s0 = stations[station].s;
     auto deck = [&](float s, float lat, Vector3* at) {   // the platform surface there, if there is one
@@ -145,21 +147,18 @@ Vector3 World::caltrainDropoff(int station, float* yaw) const {
             trackPoint(s0 + k, lat, &d);
             Vector3 p;
             if (!deck(s0 + k, lat, &p)) continue;
-            float dir = k < 0 ? -1.f : 1.f;
+          for (float dir : {k < 0 ? -1.f : 1.f, k < 0 ? 1.f : -1.f}) {   // toward the nearer end first, then the other way
             bool clear = true;
             for (float t = 0; t <= 50 && clear; t += 1) {   // the spot itself, then the way ahead
                 Vector3 q;
-                if (!deck(s0 + k + dir * t, lat, &q)) {   // past the platform end (but not a gap at a street)
-                    if (fabsf(k + dir * t) < 68) { clear = false; break; }
-                    q = trackPoint(s0 + k + dir * t, lat, nullptr);
-                    q.y += 0.47f;
-                }
+                if (!deck(s0 + k + dir * t, lat, &q)) { if (t < 20) clear = false; break; }   // the deck ends here (a street, or the platform's end)
                 Vector3 r = q;
                 if (collide(r, t == 0 ? 1.0f : 0.6f, q.y, 1.8f, &n)) clear = false;
             }
             if (!clear) continue;
             if (yaw) *yaw = atan2f(d.y * dir, d.x * dir);
             return p;
+          }
         }
     Vector3 c = trackPoint(s0, 6.2f, nullptr);   // no clear spot found: the old drop-off
     if (yaw) *yaw = PI;
@@ -383,8 +382,8 @@ void World::buildMenlo() {
         float dz1 = SCA - mp.roadHalf - 5, dz0 = dz1 - 32;   // the depot's 32 m, clear of the street and its sidewalk
         auto onSCA = [&](float z0, float z1) { return z1 > SCA - mp.roadHalf - 4 && z0 < SCA + mp.roadHalf + 4; };
         float px1 = c.x - 8.5f, px0 = mp.node(7, 0).x + 5;
-        groundPad(*this, px0, c.z - 45, px1, SCA - mp.roadHalf - 2, 0.12f, C_PLAZA);
-        groundPad(*this, px0, SCA + mp.roadHalf + 2, px1, c.z + 45, 0.12f, C_PLAZA);
+        groundPad(*this, px0, c.z - 45, px1, SCA - mp.roadHalf - 0.3f, 0.12f, C_PLAZA);
+        groundPad(*this, px0, SCA + mp.roadHalf + 0.3f, px1, c.z + 45, 0.12f, C_PLAZA);
         Color yel = col(238, 204, 92, M_HOUSE), trim = col(250, 248, 240), brown = col(120, 72, 52);
         addBox(x0, dz0, x1, dz1, y - 1, y + 5.2f, PK_BUILDING, yel, yel);
         MeshBuilder& m = mb(c.x, c.z);

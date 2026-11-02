@@ -1518,6 +1518,21 @@ int main() {
                                 u = g->sp;   // one hit per lane is enough
                             }
                     }
+        for (auto& tk : W.tokens)   // and no token hangs over a lane of those streets (the platform gaps are streets)
+            for (const Grid* g : grids)
+                for (int j = 0; j < g->nj; j++)
+                    for (int i = 0; i < g->ni; i++)
+                        for (int d = 0; d < 4; d += 2) {
+                            if (!g->edge(i, j, d)) continue;
+                            Vector2 a = g->node(i, j), dir = {(float)DI[d], (float)DJ[d]};
+                            float u = (tk.pos.x - a.x) * dir.x + (tk.pos.z - a.y) * dir.y;
+                            float off = fabsf((tk.pos.x - a.x) * dir.y - (tk.pos.z - a.y) * dir.x);
+                            float s;
+                            if (u > 0 && u < g->sp && off < g->roadHalf && W.railDistance(tk.pos.x, tk.pos.z, &s) < 40) {
+                                blocked++;
+                                det += std::string(" token ") + tk.name;
+                            }
+                        }
         // the spawn at 4th & King, facing along the platform
         const Spot* sp = nullptr;
         for (auto& s : W.spots) if (strcmp(s.name, "Caltrain 4th & King") == 0) sp = &s;

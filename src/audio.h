@@ -4,7 +4,7 @@
 
 struct Sfx {
     bool ok = false;
-    Sound pop{}, land{}, bail{}, splash{}, honk{}, token{}, clack{}, siren{}, gull{}, flutter{}, bell{}, coo{};
+    Sound pop{}, land{}, bail{}, splash{}, honk{}, token{}, clack{}, gull{}, flutter{}, bell{}, coo{};
     AudioStream loop{};
     void init();
     void shutdown();

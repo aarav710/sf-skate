@@ -1,4 +1,4 @@
-// Instanced drawing for the small moving models (people, pets, cars, cops). Same calls as raylib's DrawCube,
+// Instanced drawing for the small moving models (people, pets, cars). Same calls as raylib's DrawCube,
 // DrawSphereEx, DrawCylinderEx and rlPushMatrix / rlTranslatef / rlRotatef / rlScalef, but instead of emitting every
 // vertex each frame, each shape is queued as one instance (a 3x4 world matrix and a color) of a mesh built once at
 // startup from raylib's own output, so the shapes, colors and material codes come out the same. flush() then draws

@@ -970,6 +970,57 @@ int main() {
         snprintf(b, sizeof b, "x=%.2f y=%.1f state=%d", s.p.pos.x, s.p.pos.y, s.p.state);
         check(s.p.pos.x < -1086 && s.p.pos.y > 25, "bridge railing holds", b);
     }
+    {   // the Golden Gate's ends are flush in every lane and on both sidewalks, at a cruise and flat out, both ways: the
+        // Presidio hill fell 1.2 m across the approach road, so its east lanes met the deck's flat end as a wall
+        // ("Slammed into a wall") and ground came up through its west side; and rolling off either end hopped the board
+        struct { float from, to, seam; } ends[] = {{-840, -1100, -960}, {-1100, -840, -960},        // the city end, north and back
+                                                   {-2300, -2425, -2410}, {-2422, -2300, -2410}};   // the Marin end
+        int ok = 0, tot = 0;
+        char det[700] = "";
+        for (auto& e : ends)
+            for (float lat : {-12.5f, -10.f, -6.f, -2.f, 2.f, 6.f, 10.f, 12.5f})
+                for (float v : {10.f, 18.f}) {
+                    int dir = e.to < e.from ? -1 : 1;
+                    float yaw = dir < 0 ? -PI / 2 : PI / 2;
+                    Sim s; s.spawn(-1100 + lat, e.from, yaw, v);
+                    bool there = false, hop = false;
+                    for (int f = 0; f < 60 * 40 && !there && s.p.state != Player::BAIL; f++) {
+                        Input in;
+                        in.push = s.p.speed < v;
+                        in.steer = clampf(wrapPi(yaw - s.p.yaw) * 3.f, -1.f, 1.f);
+                        s.p.update(1.f / 60, in, W);
+                        hop |= s.p.state == Player::AIR && fabsf(s.p.pos.z - e.seam) < 15;
+                        there = dir < 0 ? s.p.pos.z < e.to : s.p.pos.z > e.to;
+                    }
+                    tot++;
+                    if (there && !hop) { ok++; continue; }
+                    char one[120];
+                    snprintf(one, sizeof one, "x=%.1f %s %.0f m/s: %s at z=%.1f; ", -1100 + lat, dir < 0 ? "N" : "S", v,
+                             !there ? (s.p.state == Player::BAIL ? s.p.subPopup.c_str() : "stuck") : "hopped the seam", s.p.pos.z);
+                    strncat(det, one, sizeof det - strlen(det) - 1);
+                }
+        snprintf(b, sizeof b, "%d/%d rides across the seams. %.180s", ok, tot, det);
+        check(ok == tot, "Golden Gate ends ride on flush", b);
+    }
+    {   // ...and the ground stays under the deck across its whole width, with no step at either end
+        float worstStep = 0, worstUp = -1e9f, ux = 0, uz = 0;
+        std::vector<const Platform*> decks;
+        for (const Platform& pl : W.plats)
+            if (pl.kind == PK_DECK && pl.x0 < -1100 && pl.x1 > -1100) decks.push_back(&pl);
+        for (float x = -1113.5f; x <= -1086.5f; x += 0.5f) {
+            worstStep = std::max(worstStep, fabsf(W.ground(x, -960.1f, W.terrain(x, -959.9f) + 0.5f) - W.terrain(x, -959.9f)));
+            worstStep = std::max(worstStep, fabsf(W.ground(x, -2409.9f, W.terrain(x, -2410.1f) + 0.5f) - W.terrain(x, -2410.1f)));
+            for (float z : {-960.f, -2410.f})
+                for (float d = 0; d <= 120; d += 0.5f) {
+                    float zz = z == -960.f ? z - d : z + d, top = -1e9f;
+                    for (const Platform* pl : decks)
+                        if (pl->contains(x, zz)) top = std::max(top, pl->top(x, zz));
+                    if (top > -1e8f && W.terrain(x, zz) - top > worstUp) { worstUp = W.terrain(x, zz) - top; ux = x; uz = zz; }
+                }
+        }
+        snprintf(b, sizeof b, "biggest step at an end %.2f m; ground highest %.2f m from the deck top at (%.1f, %.1f)", worstStep, worstUp, ux, uz);
+        check(worstStep < 0.06f && worstUp < -0.02f, "Golden Gate deck over the ground", b);
+    }
     {   // a jet ski at full throttle stops at piers, bridge bases and the Balclutha instead of driving through (#63)
         struct { const char* name; float x0, z0, x1, z1, sx, sz, yaw; } hits[] = {
             {"Pier 39", 990, -1300, 1060, -1105, 930, -1200, 0},

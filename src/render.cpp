@@ -386,6 +386,7 @@ void main() {
             float side = 1.0 - dot(normalize(R.xz + 1e-4), normalize(sunDir.xz + 1e-4));
             float path = exp(-side * 1200.0) * exp(-abs(R.y - sunDir.y) * 3.0);
             float glint = smoothstep(0.3, 0.85, vnoise(p * vec2(0.09, 0.05) + vec2(t * 0.35, -t * 0.25)));
+            glint = mix(glint, 0.39, smoothstep(4.0, 12.0, fw));   // its mean, once a pixel spans a glint or more
             spec += sunCol * path * (0.3 + 1.4 * glint) * lowW * sh * (1.0 - wet * 0.7);
         }
         col += spec;

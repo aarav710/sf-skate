@@ -461,7 +461,6 @@ void Player::land(World& w, float g, bool brake, bool hop) {
     if (fakie && !combo.empty()) combo.back() += " to Fakie";
     speed = hv * cosf(diff) * (sketchy ? 0.78f : 0.97f);
     rideVy = surfaceRate(w, pos, g, fwd(), speed);   // already rolling with the slope: on a downhill ride() mustn't read the next frame as a drop
-
     state = RIDE;
     crouch = clampf(0.75f + impact / 40.f, 0.75f, 1.f);
     evLand = true;

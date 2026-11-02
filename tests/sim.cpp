@@ -2359,6 +2359,66 @@ int main() {
         snprintf(b, sizeof b, "%d of %d drops onto a stopped vehicle missed the roof%s%s", bad, tot, det.empty() ? "" : ": ", det.c_str());
         check(bad == 0, "Stopped vehicles have a roof to land on", b);
     }
+    {   // a vehicle that pulls away carries a skater standing on its roof along with it (#128), turning with it too;
+        // before, it slid out from under them and they dropped to the street. Each kind is stopped by the traffic,
+        // the skater put on the roof (standing, as the player update leaves them), then the car let go for 8 s.
+        int bad = 0, moved = 0;
+        std::string det;
+        struct { int type; const char* n; } kinds[] = {{CT_SEDAN, "car"}, {CT_BUS, "bus"}, {CT_CABLECAR, "cable car"},
+                                                       {CT_STREETCAR, "streetcar"}, {CT_LRV, "LRV"}, {CT_PEDALBUS, "pedal bus"}};
+        for (auto& k : kinds) {
+            Traffic T; T.init(W);
+            Player far; far.spawn({0, W.ground(0, 0, 1000) + 200, 0}, 0);   // out of everyone's way
+            for (int f = 0; f < 60 * 3; f++) T.update(1.f / 60, W, far);
+            std::vector<int> cands;   // (some are held up by lights or the traffic ahead: the first that gets away will do)
+            for (size_t i = 0; i < T.cars.size() && cands.size() < 8; i++)
+                if (T.cars[i].type == k.type && T.cars[i].placed && T.cars[i].mode <= 2) cands.push_back((int)i);
+            for (int ci : cands) {
+                T.cars[ci].stopT = 1e9f;
+                for (int f = 0; f < 60 * 20 && T.cars[ci].speed > 0.02f; f++) T.update(1.f / 60, W, far);
+                Car& c = T.cars[ci];
+                if (c.speed > 0.02f) continue;
+                const CarModel& m = carModel(k.type);
+                Sim s; s.spawn(c.pos.x, c.pos.z, c.yaw);
+                s.p.pos.x = c.pos.x + cosf(c.yaw) * 0.5f; s.p.pos.z = c.pos.z + sinf(c.yaw) * 0.5f;
+                s.p.pos.y = c.pos.y + (m.height - 0.1f) * cosf(c.pitch) + 0.5f * tanf(c.pitch);
+                s.p.state = Player::RIDE; s.p.speed = 0;
+                T.update(1.f / 60, W, s.p);   // publish the roof
+                c.stopT = 0.3f;
+                Vector3 c0 = c.pos;
+                float low = 1e9f, lat = 0, along = 0, yawDrift = 0, yaw0 = wrapPi(s.p.yaw - c.yaw);
+                bool off = false, bailed = false;
+                for (int f = 0; f < 60 * 8; f++) {
+                    Input hold; hold.brake = true;   // (standing still: a pitched roof would roll them off otherwise)
+                    s.run(1, hold);
+                    T.update(1.f / 60, W, s.p);
+                    T.interact(s.p);
+                    if (s.p.state == Player::BAIL) bailed = true;
+                    float dx = s.p.pos.x - c.pos.x, dz = s.p.pos.z - c.pos.z;
+                    along = dx * cosf(c.yaw) + dz * sinf(c.yaw); lat = -dx * sinf(c.yaw) + dz * cosf(c.yaw);
+                    float roof = c.pos.y + (m.height - 0.1f) * cosf(c.pitch) + along * tanf(c.pitch);
+                    low = std::min(low, s.p.pos.y - roof);
+                    yawDrift = std::max(yawDrift, fabsf(wrapPi(s.p.yaw - c.yaw - yaw0)));
+                    if (s.p.state != Player::RIDE || fabsf(along) > m.halfLen || fabsf(lat) > m.halfWid) off = true;
+                }
+                float cm = sqrtf(sq(c.pos.x - c0.x) + sq(c.pos.z - c0.z));
+                if (cm < 4) continue;   // (held up by traffic or the end of its line: nothing to check)
+                moved++;
+                bool ok = !off && !bailed && low > -0.1f && fabsf(along - 0.5f) < 1.0f && fabsf(lat) < 0.5f && yawDrift < 0.1f;
+                if (!ok) {
+                    char one[160];
+                    snprintf(one, sizeof one, "%s%s: car moved %.1f m, skater %s, lowest %+.2f, %.1f m along, %.1f across, yaw off %.2f",
+                             det.empty() ? "" : "; ", k.n, cm, bailed ? "bailed" : off ? "left the roof" : "stayed", low, along, lat, yawDrift);
+                    det += one;
+                    bad++;
+                }
+                break;
+            }
+        }
+        W.vehicleTops.clear();
+        snprintf(b, sizeof b, "%d of %d vehicles pulling away lost their rider%s%s", bad, moved, det.empty() ? "" : ": ", det.c_str());
+        check(bad == 0 && moved >= 3, "A moving vehicle carries a skater on its roof", b);
+    }
     {   // the "SFO Airport" label covers the airport fill, and not the East Bay shore and hills beyond it
         int wrong = 0, land = 0, missed = 0, fill = 0;
         for (float x = AX0 + 10; x < WX1; x += 40)

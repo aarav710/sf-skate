@@ -86,6 +86,8 @@ uniform int lampN;
 out vec4 finalColor;
 
 float h21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
+// lamps, neon and lit windows come on with the street lamps, not with the dusk haze
+float lightsOn() { return smoothstep(0.4, 0.9, night); }
 float vnoise(vec2 p) {
     vec2 i = floor(p), f = fract(p);
     f = f * f * (3.0 - 2.0 * f);
@@ -282,7 +284,7 @@ void main() {
                 if (h21(cell + bld * 7.13) < 0.2 + 0.2 * h21(bld * 3.17 + 0.5)) {
                     float tone = h21(bld * 5.3 + vec2(cell.y * 0.37, 0.0));
                     vec3 tint = tone < 0.55 ? vec3(1.0, 0.76, 0.48) : (tone < 0.8 ? vec3(0.95, 0.87, 0.72) : vec3(0.7, 0.84, 1.0));
-                    emis = tint * (0.3 + 0.4 * h21(cell * 1.7)) * night * (m == 6 ? 0.85 : 1.0);
+                    emis = tint * (0.3 + 0.4 * h21(cell * 1.7)) * lightsOn() * (m == 6 ? 0.85 : 1.0);
                     emisBloom = 0.45;
                 }
             } else if (trimmed) {
@@ -373,8 +375,8 @@ void main() {
         finalColor = vec4(mix(col, fogColor(V), f), a);
         return;
     } else if (m == 4) {                 // lights
-        emis = base * night * 1.3;
-        bloom = night * 0.95;
+        emis = base * lightsOn() * 1.3;
+        bloom = lightsOn() * 0.95;
     }
 
     // wet streets: darker, glossy, with puddles that mirror the sky
@@ -403,7 +405,7 @@ void main() {
     vec3 light = ambCol * hemi * ao * 1.06 + (sunCol * sh + fill * (1.0 - sh)) * diff * (0.6 + 0.4 * ao);
     if (m == 10) {                       // rooms: warm lamp light and soft window light, warmer still at night
         vec3 day = (ambCol * 1.2 + sunCol * 0.2 + vec3(0.28, 0.22, 0.12)) * (0.88 + 0.12 * hemi);
-        light = mix(day, vec3(1.0, 0.88, 0.7) * (0.9 + 0.1 * hemi), night);
+        light = mix(day, vec3(1.0, 0.88, 0.7) * (0.9 + 0.1 * hemi), lightsOn());
     }
 #if !FAR
     else if (lampN > 0 && m != 4) light += lampLight(wPos, N) * (0.6 + 0.4 * ao);
@@ -427,7 +429,7 @@ void main() {
         vec3 sp = sunCol * pow(max(dot(Nw, H), 0.0), 90.0) * 1.6 * wetS * sh;
         col += sp;
         // city lights smeared across wet asphalt at night
-        col += vec3(1.0, 0.72, 0.42) * night * wetS * fres * 0.5 * (0.6 + 0.4 * vnoise(wPos.xz * 0.15));
+        col += vec3(1.0, 0.72, 0.42) * lightsOn() * wetS * fres * 0.5 * (0.6 + 0.4 * vnoise(wPos.xz * 0.15));
         bloom += clamp(dot(sp, vec3(0.33)) - 0.2, 0.0, 0.6);
     }
 #if FAR

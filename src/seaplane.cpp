@@ -94,7 +94,7 @@ bool Seaplanes::dismount(Player& p, World& w) {
     moored[cur].pos = {pos.x, 0, pos.z};
     moored[cur].yaw = yaw;
     riding = false; cur = -1;
-    p.spawn({best.x, w.ground(best.x, best.z, best.y + 2), best.z}, atan2f(best.z - pos.z, best.x - pos.x));
+    p.spawnAshore(w, {best.x, w.ground(best.x, best.z, best.y + 2), best.z}, atan2f(best.z - pos.z, best.x - pos.x));
     return true;
 }
 

@@ -85,6 +85,47 @@ void Player::respawnSafe(World& w) {
     spawn(safePos, y);
 }
 
+// Step ashore from a jet ski or seaplane at `shore` (the nearest dry land, right at the waterline), facing `inland`.
+// The waterline itself is a bad place to stand: the shore slopes down to the water and the first push or turn rolls
+// the board in. So look inland (a short way either side too) for a spot on bare ground (not a deck, prop or house, no
+// wall on the way there), clear of anything solid, where the board has a
+// heading it stays at rest on, and take the one with the most dry land around it and the gentlest slope. If there's
+// nowhere (a pier, a seawall), stay at the shore with the board turned across the slope.
+void Player::spawnAshore(World& w, Vector3 shore, float inland) {
+    float bestScore = -1e9f, bestYaw = inland;
+    Vector3 best = shore;
+    bool found = false;
+    for (float d = 2; d <= 16; d += 1)
+        for (float turn : {0.f, 0.6f, -0.6f, 1.2f, -1.2f}) {
+            float a = inland + turn, x = shore.x + cosf(a) * d, z = shore.z + sinf(a) * d;
+            float h = w.terrain(x, z);
+            if (h < 0.5f || !w.inPlay(x, z) || w.isWater(x, z, h)) continue;
+            Vector3 q = {x, w.ground(x, z, h + 2), z}, c = q;
+            // bare ground only: not on a pier deck, a porch or a prop (ground() sees those up to 2 m over the terrain)
+            if (q.y > h + 0.3f || w.overPier(x, z) || w.houseAt(x, z, q.y) >= 0) continue;
+            bool walled = false;   // and no wall between the shore and here
+            for (float t = 1; t < d && !walled; t += 1) {
+                float px = shore.x + cosf(a) * t, pz = shore.z + sinf(a) * t;
+                walled = w.solidAt({px, w.terrain(px, pz) + 0.8f, pz});
+            }
+            if (walled) continue;
+            if (w.solidAt({x, h + 1.2f, z}) || (w.collide(c, 0.45f, q.y, 1.8f, nullptr) && sq(c.x - q.x) + sq(c.z - q.z) > 1e-4f)) continue;
+            float ry;
+            if (!restHeading(w, q, inland, &ry)) continue;
+            float clear = 12;   // metres to the nearest water, up to 12
+            for (int k = 0; k < 16 && clear > 2; k++)
+                for (float r = 1; r < clear; r += 1)
+                    if (w.isWater(q.x + cosf(k * PI / 8) * r, q.z + sinf(k * PI / 8) * r, q.y)) { clear = r; break; }
+            if (clear < 2) continue;
+            float gx = w.skaterGround(x + 0.7f, z, q.y + 0.2f) - w.skaterGround(x - 0.7f, z, q.y + 0.2f);
+            float gz = w.skaterGround(x, z + 0.7f, q.y + 0.2f) - w.skaterGround(x, z - 0.7f, q.y + 0.2f);
+            float score = clear - 15 * sqrtf(gx * gx + gz * gz) / 1.4f - 0.1f * d;
+            if (score > bestScore) { bestScore = score; best = q; bestYaw = ry; found = true; }
+        }
+    if (!found) restHeading(w, shore, inland, &bestYaw);
+    spawn(best, bestYaw);
+}
+
 void Player::spawn(Vector3 p, float y) {
     pos = p; yaw = y; speed = 0; vel = {0, 0, 0}; vy = 0; rideVy = 0;
     parked = true;   // several spots (Twin Peaks, Union Square...) are on steep hills: don't roll off before the first input

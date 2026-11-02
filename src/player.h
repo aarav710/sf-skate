@@ -65,7 +65,7 @@ struct Player {
 
     void spawn(Vector3 p, float yaw);
     void spawnAshore(World& w, Vector3 shore, float inland);   // off a jet ski/seaplane: a few metres inland, board at rest
-    void respawnSafe(World& w);  // back to safePos, turned so the board stays at rest there
+    void respawnSafe(World& w);   // back to safePos, turned so the board stays at rest there
     void update(float dt, const Input& in, World& w);
     void bail(const char* why);
     Vector3 fwd() const { return {cosf(yaw), 0, sinf(yaw)}; }

@@ -87,7 +87,8 @@ void Player::respawnSafe(World& w) {
 
 // Step ashore from a jet ski or seaplane at `shore` (the nearest dry land, right at the waterline), facing `inland`.
 // The waterline itself is a bad place to stand: the shore slopes down to the water and the first push or turn rolls
-// the board in. So look inland (a short way either side too) for a spot clear of anything solid where the board has a
+// the board in. So look inland (a short way either side too) for a spot on bare ground (not a deck, prop or house, no
+// wall on the way there), clear of anything solid, where the board has a
 // heading it stays at rest on, and take the one with the most dry land around it and the gentlest slope. If there's
 // nowhere (a pier, a seawall), stay at the shore with the board turned across the slope.
 void Player::spawnAshore(World& w, Vector3 shore, float inland) {
@@ -100,6 +101,14 @@ void Player::spawnAshore(World& w, Vector3 shore, float inland) {
             float h = w.terrain(x, z);
             if (h < 0.5f || !w.inPlay(x, z) || w.isWater(x, z, h)) continue;
             Vector3 q = {x, w.ground(x, z, h + 2), z}, c = q;
+            // bare ground only: not on a pier deck, a porch or a prop (ground() sees those up to 2 m over the terrain)
+            if (q.y > h + 0.3f || w.overPier(x, z) || w.houseAt(x, z, q.y) >= 0) continue;
+            bool walled = false;   // and no wall between the shore and here
+            for (float t = 1; t < d && !walled; t += 1) {
+                float px = shore.x + cosf(a) * t, pz = shore.z + sinf(a) * t;
+                walled = w.solidAt({px, w.terrain(px, pz) + 0.8f, pz});
+            }
+            if (walled) continue;
             if (w.solidAt({x, h + 1.2f, z}) || (w.collide(c, 0.45f, q.y, 1.8f, nullptr) && sq(c.x - q.x) + sq(c.z - q.z) > 1e-4f)) continue;
             float ry;
             if (!restHeading(w, q, inland, &ry)) continue;

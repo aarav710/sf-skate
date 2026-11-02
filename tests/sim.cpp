@@ -907,6 +907,29 @@ int main() {
         snprintf(b, sizeof b, "%d/%d dismounts splashed%s", bad, tried, worst.c_str());
         check(tried >= 20 && bad == 0, "jet ski dismount doesn't roll back into the water", b);
     }
+    {   // ...and the spot it picks is bare ground: not on a pier deck, a prop or a porch, not in a house, no wall in the way (#129)
+        int n = 0, bad = 0;
+        for (float x = WX0 + 120; x < WX1 - 120; x += 25)
+            for (float z = WZ0 + 120; z < WZ1 - 120; z += 25) {
+                if (W.terrain(x, z) >= 0.05f || W.solidAt({x, 0.8f, z}) || !W.isWater(x, z, 0)) continue;
+                JetSkis js;
+                js.skis.push_back({{x, 0, z}, 0, 0});
+                Player p; p.spawn({x, 0, z}, 0);
+                js.mount(0, p);
+                if (!js.dismount(p, W)) continue;
+                n++;
+                bool walled = false;   // the line from the water to the spot, checked at knee height
+                float d = hypotf(p.pos.x - x, p.pos.z - z);
+                for (float t = 1; t < d && !walled; t += 1) {
+                    float px = x + (p.pos.x - x) * t / d, pz = z + (p.pos.z - z) * t / d;
+                    walled = W.solidAt({px, W.terrain(px, pz) + 0.8f, pz});
+                }
+                if (p.pos.y > W.terrain(p.pos.x, p.pos.z) + 0.3f || W.overPier(p.pos.x, p.pos.z) ||
+                    W.houseAt(p.pos.x, p.pos.z, p.pos.y) >= 0 || walled) bad++;
+            }
+        snprintf(b, sizeof b, "%d of %d dismount spots on a deck, prop, in a house or behind a wall", bad, n);
+        check(n > 100 && bad == 0, "jet ski dismount lands on bare ground", b);
+    }
     {   // the splash message names the water: ocean, bay, fountain, lake, lagoon, pool, salt pond (rolling in and dropping in)
         float sea = -1440;   // the Pacific, west of the city
         while (!W.isWater(sea, 0, 0) && sea > -3000) sea -= 5;

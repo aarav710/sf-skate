@@ -137,21 +137,43 @@ void World::addBridgePier(MeshBuilder& m, float x0, float z0, float x1, float z1
 void World::buildGoldenGate() {
     const float X = -1100, HW = 14;
     Color orange = col(192, 58, 40), conc = col(160, 158, 152);
-    // approach road through the Presidio
+    // approach road through the Presidio, as wide as the deck it runs onto: its 22 m roadway and lane dashes, and its
+    // sidewalks (raised as on the deck) from just north of the street it leaves. It lies on the ground, which is graded
+    // level from side to side over its last stretch (rawHeight), so every lane and both sidewalks meet the deck's end
+    // flush. The deck starts only 0.05 m over the ground, so a board rolling off it onto the hill doesn't take off over
+    // the drop, and the road (0.08 m up, as everywhere) comes down to that over its last 10 m
     {
-        Vector2 a = {X, gz(4)}, b = {X, -960};
-        float L = Vector2Distance(a, b);
-        for (float s = 0; s < L; s += 5) {
-            float z0 = a.y - s, z1 = std::max(a.y - s - 5, b.y);
+        const float RW = HW - 3, ZEND = -960, WALK0 = gz(4) - 9;   // (the cross street is 7 m wide each side of gz(4))
+        Color walk = col(150, 148, 144, M_GROUND), stripe = col(230, 230, 225, M_GROUND);
+        auto T = [&](float l, float z, float off) {
+            return V3(X + l, terrain(X + l, z) + off - 0.03f * smooth01(ZEND + 10, ZEND, z), z);
+        };
+        for (float z0 = gz(4); z0 > ZEND + 0.01f; z0 -= 5) {
+            float z1 = std::max(z0 - 5, ZEND);
             MeshBuilder& m = mb(X, z0);
-            for (int q = 0; q < 2; q++) {
-                float l0 = q ? 0 : -9, l1 = q ? 9 : 0;
-                m.quad({X + l0, terrain(X + l0, z0) + 0.08f, z0}, {X + l1, terrain(X + l1, z0) + 0.08f, z0},
-                       {X + l1, terrain(X + l1, z1) + 0.08f, z1}, {X + l0, terrain(X + l0, z1) + 0.08f, z1}, C_ASPHALT);
+            for (int q = 0; q < 8; q++) {   // strips narrow enough to follow the ground triangles where it isn't level
+                float l0 = -RW + q * RW / 4, l1 = l0 + RW / 4;
+                m.quad(T(l0, z0, 0.08f), T(l1, z0, 0.08f), T(l1, z1, 0.08f), T(l0, z1, 0.08f), C_ASPHALT);
+            }
+            if (z0 > WALK0 + 0.01f) continue;
+            for (int sd = -1; sd <= 1; sd += 2) {
+                float li = sd * RW, lo = sd * HW;
+                m.quad(T(li, z0, 0.2f), T(lo, z0, 0.2f), T(lo, z1, 0.2f), T(li, z1, 0.2f), walk);
+                m.quad(T(li, z0, 0.08f), T(li, z0, 0.2f), T(li, z1, 0.2f), T(li, z1, 0.08f), walk);   // curb
+                m.quad(T(lo, z0, -0.1f), T(lo, z0, 0.2f), T(lo, z1, 0.2f), T(lo, z1, -0.1f), walk);
             }
         }
+        // lane dashes in line with the deck's, every 20 m
+        for (float c = ZEND + 10; c < WALK0 - 10; c += 20)
+            for (float lat = -RW + RW / 3; lat < RW - 0.01f; lat += RW / 3) {
+                if (fabsf(lat) < 0.5f) continue;
+                mb(X, c).quad(T(lat - 0.08f, c + 2, 0.1f), T(lat + 0.08f, c + 2, 0.1f), T(lat + 0.08f, c - 2, 0.1f),
+                              T(lat - 0.08f, c - 2, 0.1f), stripe);
+            }
     }
-    gGG = {{-960, terrain(X, -960) + 0.1f}, {-1100, 30}, {-1700, 36}, {-2300, 30}, {-2410, terrain(X, -2410) + 0.1f}};
+    // each end is 0.05 m over the ground: the road runs onto it in the city, and in Marin it is just under the Vista Point
+    // plaza's paving (0.06 m up). A board rolling off it doesn't take off over the drop, as it did off 0.1 m
+    gGG = {{-960, terrain(X, -960) + 0.05f}, {-1100, 30}, {-1700, 36}, {-2300, 30}, {-2410, terrain(X, -2410) + 0.05f}};
     deckSegments(1, X, HW, gGG, orange, orange, "Golden Gate Railing", 900001);
     MeshBuilder& m = mbKey(900002);
     // towers
@@ -203,7 +225,10 @@ void World::buildGoldenGate() {
     {
         float y = terrain(X, -2410);
         MeshBuilder& v = mb(X, -2410);
-        groundPad(*this, X - 45, -2445, X + 45, -2375, 0.06f, C_PLAZA);
+        // the paving goes round the deck's last 35 m rather than over it, and on from its end
+        groundPad(*this, X - 45, -2445, X - HW, -2375, 0.06f, C_PLAZA);
+        groundPad(*this, X + HW, -2445, X + 45, -2375, 0.06f, C_PLAZA);
+        groundPad(*this, X - HW, -2445, X + HW, -2410, 0.06f, C_PLAZA);
         RNG r(31);
         for (int k = 0; k < 8; k++) {
             float px = X + 22 + (k % 4) * 5, pz = -2430 + (k / 4) * 9;

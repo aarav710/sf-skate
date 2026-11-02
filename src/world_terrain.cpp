@@ -153,7 +153,7 @@ static float landHeight(int id, float x, float z) {
         float h = 3.f + (AZ_TOP - 3.f) * (1.f - smooth01(0.5f, 0.98f, d));
         float cliff = smooth01(0.5f, 0.65f, d) * (1.f - smooth01(0.85f, 1.f, d));
         h += cliff * 1.8f * sinf(x * 0.21f + z * 0.13f) * cosf(z * 0.19f - x * 0.07f);   // rock ribs
-        return h;   // (the road's shelf is cut in rawHeight, after the beach, so by the dock it runs out along a seawall)
+        return h;   // (the road's shelf is cut in baseHeight, after the beach, so by the dock it runs out along a seawall)
     }
     case P_SFO: return AIRPORT_Y;
     case P_PEN: {
@@ -211,7 +211,7 @@ float alcatrazRoad(float x, float z, float* roadY) {
     return best;
 }
 
-static float rawHeight(float x, float z) {
+static float baseHeight(float x, float z) {
     float best = -14.f;
     for (auto& P : gPolys) {
         if (x < P.minx - 150 || x > P.maxx + 150 || z < P.minz - 150 || z > P.maxz + 150) continue;
@@ -271,6 +271,30 @@ static float rawHeight(float x, float z) {
         }
     }
     return best;
+}
+
+// The Golden Gate's ends. The Presidio hillside falls about 1.2 m from west to east across the approach road, but the
+// deck is flat side to side: its east lanes started a wall-high step above the road and the ground came up through
+// its west side. So the last stretch of the approach, and the ground under the deck's first metres, is graded level
+// across at the centre line's own height (the deck starts 0.05 m over it), easing back into the hillside to the sides
+// and at both ends. The 40 m flat band covers the 10 m ground-mesh lines either side of the 28 m deck (x -1120..-1080),
+// so the drawn triangles (and the ground the skater rides) are level across it too.
+// At the Marin end the hillside, before the Vista Point flat takes over, reached a little above the deck's west edge:
+// there the ground under the bridge is held just under the deck.
+constexpr float GG_X = -1100, GG_FLAT = 20, GG_EASE = 60;
+static float rawHeight(float x, float z) {
+    float h = baseHeight(x, z);
+    float dx = fabsf(x - GG_X);
+    if (dx >= GG_EASE || h <= 0) return h;
+    float across = 1 - smooth01(GG_FLAT, GG_EASE, dx);
+    if (z < -870 && z > -1015) {
+        float w = across * smooth01(-870, -910, z) * (1 - smooth01(-990, -1015, z));
+        if (w > 0) h = lerpf(h, baseHeight(GG_X, z), w);
+    } else if (z < -2280 && z > -2375) {
+        float w = across * (1 - smooth01(-2350, -2375, z));
+        if (w > 0) h = lerpf(h, std::min(h, 29.9f), w);
+    }
+    return h;
 }
 
 // ---------------------------------------------------------------- Caltrain corridor

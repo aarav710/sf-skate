@@ -91,6 +91,7 @@ private:
     float shStrength = 1;
     Matrix shProj[MAXC]{};
     Vector3 farAt{1e9f, 0, 0}, farSun{};   // where the far cascade was last drawn, and for which sun
+    int farWait = 0;                       // frames since it was last drawn
     SkyLook lastSky{};
     void ambientOcclusion();
     void ensureTargets();

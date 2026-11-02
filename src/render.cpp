@@ -1003,8 +1003,13 @@ int Renderer::planShadows(Vector3 camPos, Vector3 camFwd, Vector3 sunDir, float 
         const float FH = 1450.f, FD = 3000.f;
         float tex = 2 * FH / shSize;
         bool moved = sq(camPos.x - farAt.x) + sq(camPos.z - farAt.z) > 300.f * 300.f;
-        if (moved || Vector3DotProduct(farSun, sunDir) < 0.999999f || farAt.x > 1e8f) {
+        // while the sun is turning (a time-of-day change eases it over a few seconds), redraw only every 15th frame
+        // rather than every frame; once it settles the next of those catches up with where it stopped
+        bool turned = Vector3DotProduct(farSun, sunDir) < 0.999999f;
+        farWait++;
+        if (moved || (turned && farWait >= 15) || farAt.x > 1e8f) {
             farDirty = true;
+            farWait = 0;
             farAt = {camPos.x, 0.f, camPos.z};
             farSun = sunDir;
             Vector3 c = farAt;

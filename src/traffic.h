@@ -32,6 +32,9 @@ struct Car {
                                 // to pull out across a main road whatever its traffic does
     float still = 0;            // how long it's been stood still (s)
     bool passing = false;       // main-road cars: given up waiting for grid cars stood in the way, easing past them
+    Vector3 lastPos{};          // where it was at the start of the last update (to carry a skater riding on its roof)
+    float lastYaw = 0, lastPitch = 0;
+    bool lastPlaced = false;
 };
 
 struct Ped {
@@ -109,10 +112,12 @@ struct Traffic {
     std::vector<uint64_t> carCells;   // (40 m cell << 32 | car index), sorted: who's near whom, for every car each frame
 
     void init(World& w);
-    void update(float dt, World& w, const Player& p);
+    void update(float dt, World& w, Player& p);   // (also carries a skater riding on a car's roof along with it)
+    int rideCar = -1;                  // the car (index) the skater was last carried on, -1 if none
     void interact(Player& p);
     // put the roofs of the vehicles near `at` into w.vehicleTops, for the skater to land on (update does this each frame)
     void publishRoofs(World& w, Vector3 at) const;
+    void carryRider(Player& pl, float dt);
     // nearPass: everything within reach of the near clip range; otherwise only cars far enough to need the far pass
     void draw(Vector3 cam, Vector3 camFwd, bool nearPass) const;
     // sun shadow casters: cars within rCars of c, people (and their dogs) within rPeds

@@ -80,7 +80,7 @@ uniform sampler2DShadow shadowMap2;
 uniform mat4 lightVP2;
 uniform vec4 farInfo;      // the wide far cascade: on, world texel, -, -
 #if !FAR
-uniform vec4 lamps[16];    // street lamps near the camera: position, strength
+uniform vec4 lamps[MAXLAMPS];   // street lamps in view: position, strength (MAXLAMPS: Renderer::MAXLAMPS)
 uniform int lampN;
 #endif
 out vec4 finalColor;
@@ -738,7 +738,8 @@ void main() {
 
 // ---------------------------------------------------------------- setup
 static Shader cityShader(bool far) {
-    std::string head = std::string("#version 330\n#define FAR ") + (far ? "1" : "0") + "\n";
+    std::string head = std::string("#version 330\n#define FAR ") + (far ? "1" : "0") + "\n#define MAXLAMPS " +
+                       std::to_string(Renderer::MAXLAMPS) + "\n";
     return LoadShaderFromMemory((head + CITY_VS).c_str(), (head + CITY_FS).c_str());
 }
 

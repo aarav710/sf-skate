@@ -44,7 +44,11 @@ struct Renderer {
     bool farCasc = false;      // the far cascade is in use this frame
     bool farDirty = true;      // ... and needs drawing again (moved, or the sun turned)
 
-    static constexpr int MAXLAMPS = 16;
+    // street lamps the near pass lights with (sized into the city shader's uniform array). 64 covers every street
+    // view: at most ~54 lamps light a view within 160 m, the median ~25. 64 vec4s are 256 of the 1024 fragment
+    // uniform components GL 3.3 guarantees (desktop drivers, macOS included, give 4096 or more), next to ~30 vec4s
+    // of other uniforms.
+    static constexpr int MAXLAMPS = 64;
 
     // off-screen scene: multisampled color + depth, resolved into `scene`; alpha = 1 - bloom. Half-float on High
     // (HDR: lights and the sun don't clip, the post pass tone maps them).

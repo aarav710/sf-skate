@@ -52,27 +52,30 @@ struct Sky {
     float night;
     Vector3 gain;             // color grade: tint, saturation, contrast, how much the lights bloom
     float sat, contrast, bloom;
+    Vector3 lift;             // raises the shadows a little
+    float roll;               // how early bright colors burn toward white (keeps sunlit pastels apart)
 };
 static Sky PRESETS[3] = {
     // day: crisp and a little cool in the shade
     {Vector3Normalize({-0.35f, 0.8f, 0.45f}), {0.84f, 0.8f, 0.72f}, {0.38f, 0.42f, 0.5f},
      {0.32f, 0.55f, 0.88f}, {0.76f, 0.85f, 0.94f}, {0.76f, 0.84f, 0.92f}, 0.0f,
-     {1.0f, 1.0f, 1.0f}, 1.04f, 1.05f, 0.35f},
-    // golden hour: sun setting over the Pacific, warm and saturated
-    {Vector3Normalize({-0.9f, 0.16f, 0.25f}), {1.32f, 0.84f, 0.5f}, {0.31f, 0.28f, 0.38f},
+     {1.0f, 1.0f, 1.0f}, 1.04f, 1.05f, 0.35f, {0, 0, 0}, 0.0f},
+    // golden hour: sun setting over the Pacific, warm but not burnt; the shade stays readable
+    {Vector3Normalize({-0.9f, 0.16f, 0.25f}), {1.1f, 0.74f, 0.46f}, {0.34f, 0.33f, 0.44f},
      {0.22f, 0.3f, 0.56f}, {0.98f, 0.66f, 0.44f}, {0.88f, 0.66f, 0.55f}, 0.35f,
-     {1.05f, 0.99f, 0.92f}, 1.12f, 1.07f, 0.7f},
+     {1.03f, 0.99f, 0.96f}, 1.05f, 1.03f, 0.7f, {0.012f, 0.011f, 0.016f}, 1.0f},
     // night: moonlit blue, lights bloom
     {Vector3Normalize({0.3f, 0.6f, -0.4f}), {0.22f, 0.26f, 0.4f}, {0.1f, 0.11f, 0.17f},
      {0.01f, 0.02f, 0.06f}, {0.07f, 0.09f, 0.16f}, {0.07f, 0.09f, 0.15f}, 1.0f,
-     {0.96f, 0.99f, 1.06f}, 0.96f, 1.06f, 1.1f},
+     {0.96f, 0.99f, 1.06f}, 0.96f, 1.06f, 1.1f, {0, 0, 0}, 0.0f},
 };
 static const char* PRESET_NAMES[3] = {"Day", "Golden Hour", "Night"};
 
 static Sky lerpSky(const Sky& a, const Sky& b, float t) {
     return {Vector3Normalize(Vector3Lerp(a.sunDir, b.sunDir, t)), Vector3Lerp(a.sunCol, b.sunCol, t), Vector3Lerp(a.amb, b.amb, t),
             Vector3Lerp(a.top, b.top, t), Vector3Lerp(a.horizon, b.horizon, t), Vector3Lerp(a.fog, b.fog, t), lerpf(a.night, b.night, t),
-            Vector3Lerp(a.gain, b.gain, t), lerpf(a.sat, b.sat, t), lerpf(a.contrast, b.contrast, t), lerpf(a.bloom, b.bloom, t)};
+            Vector3Lerp(a.gain, b.gain, t), lerpf(a.sat, b.sat, t), lerpf(a.contrast, b.contrast, t), lerpf(a.bloom, b.bloom, t),
+            Vector3Lerp(a.lift, b.lift, t), lerpf(a.roll, b.roll, t)};
 }
 static Color toColor(Vector3 v) { return {(unsigned char)clampf(v.x * 255, 0, 255), (unsigned char)clampf(v.y * 255, 0, 255), (unsigned char)clampf(v.z * 255, 0, 255), 255}; }
 
@@ -587,7 +590,7 @@ int main() {
         if (IsKeyPressed(KEY_V) && !title) {
             R.setQuality((R.quality + 2) % 3);
             P.say(TextFormat("Graphics: %s", Renderer::QUALITY_NAMES[R.quality]), WHITE,
-                  R.quality == 2 ? "Sharp + distant shadows, soft occlusion, HDR, bloom" : R.quality == 1 ? "Softer shadows, bloom" : "No sun shadows or bloom (fastest)");
+                  R.quality == 2 ? "Sharp + distant shadows, soft occlusion, HDR, bloom" : R.quality == 1 ? "Softer + distant shadows, bloom" : "No sun shadows or bloom (fastest)");
         }
         if (IsKeyPressed(KEY_Y) && !title) {
             gCap60 = !gCap60;
@@ -1098,6 +1101,8 @@ int main() {
 
         // ---------------- shader uniforms
         Look look{cam.position, sky.sunDir, lit.sunCol, lit.amb, fogC, horizonC, fogUse, sky.night, now};
+        look.clear = (1.f - clampf((fogDen - 0.00011f) / (0.0022f - 0.00011f), 0, 1)) * (1.f - rainK);   // as fogK, rain for the sky
+        look.roll = sky.roll;
         look.fogH = heavyFog ? 70.f : 300.f - 120.f * rainK;
         look.wet = WX.wet;
         R.setLook(look);
@@ -1223,7 +1228,7 @@ int main() {
                 EndShaderMode();
                 R.endCascade();
             }
-            // the wide far cascade (High): only the static city, so only when it has moved
+            // the wide far cascade: only the static city, so only when it has moved
             if (R.farCasc && R.farDirty) {
                 R.beginCascade(2);
                 W.drawCasters(R.lightView[2], R.half[2], 6000.f, R.depth, true);
@@ -1377,6 +1382,8 @@ int main() {
             g.gain = lit.gain;
             g.sat = lit.sat;
             g.contrast = sky.contrast;
+            g.lift = sky.lift;
+            g.roll = sky.roll;
             g.bloom = sky.bloom * (heavyFog ? 1.2f : 1.f);
             g.vignette = 0.22f;
             g.blur = (title || paused) ? 0.f : smooth01(14.f, 45.f, camSpd) * 0.012f;

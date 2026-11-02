@@ -10,6 +10,8 @@ struct Look {
     float fogDen, night, time;
     float wet = 0;            // 0 dry .. 1 soaked streets (rain)
     float fogH = 300;         // haze scale height: low for Karl the Fog, which pools in the valleys
+    float clear = 1;          // 1 clear .. 0 in Karl the Fog or rain: turns the golden-hour haze tint off
+    float roll = 0;           // the grade's roll (see Grade): buys an 8-bit scene headroom above white
 };
 
 // The sky behind everything: gradient, haze at the horizon, sun or moon, and a drifting cloud layer.
@@ -25,17 +27,18 @@ struct SkyLook {
 struct Grade {
     Vector3 gain{1, 1, 1}, lift{0, 0, 0};
     float sat = 1, contrast = 1, bloom = 0.5f, vignette = 0.25f, blur = 0;
+    float roll = 0;           // 0 .. 1: bright colors start burning toward white earlier (golden hour)
 };
 
 struct Renderer {
     Shader city{}, cityFar{}, depth{}, post{}, blur{}, extract{}, sky{}, ssao{}, aoBlur{};
-    // 2 high (two shadow cascades + a wide far one, ambient occlusion, HDR), 1 medium (one cascade), 0 low (no shadows
-    // or bloom). 4x MSAA and bloom on all but low.
+    // 2 high (two shadow cascades + a wide far one, ambient occlusion, HDR), 1 medium (one cascade + the far one), 0 low
+    // (no shadows or bloom). 4x MSAA and bloom on all but low.
     int quality = 2;
     static const char* QUALITY_NAMES[3];
 
     // sun shadows
-    static constexpr int MAXC = 3;   // 0, 1 near the camera; 2 the wide far one (High), redrawn only when it moves
+    static constexpr int MAXC = 3;   // 0, 1 near the camera; 2 the wide far one, redrawn only when it moves
     unsigned shFbo[MAXC]{}, shTex[MAXC]{};
     int shSize = 2048;
     int nCasc = 0;             // cascades rendered this frame
@@ -62,6 +65,7 @@ struct Renderer {
     unsigned dsFbo = 0, dsTex = 0;
     RenderTexture2D aoA{}, aoB{};
     float viewFovy = 60, viewNear = 0.15f, viewFar = 270;
+    float outScale = 1;        // the scene is drawn at this and scaled back in post (headroom in 8 bits, see setLook)
 
     void init();
     void setQuality(int q);
@@ -92,6 +96,7 @@ private:
     float shStrength = 1;
     Matrix shProj[MAXC]{};
     Vector3 farAt{1e9f, 0, 0}, farSun{};   // where the far cascade was last drawn, and for which sun
+    int farWait = 0;                       // frames since it was last drawn
     SkyLook lastSky{};
     void ambientOcclusion();
     void ensureTargets();

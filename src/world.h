@@ -217,6 +217,10 @@ struct World {
     float ceiling(float x, float z, float feetY) const;        // lowest underside above the feet (1e9 if open sky)
     int houseAt(float x, float z, float y) const;              // index into houses if inside one, else -1
     bool doorBlocked(float x, float z, float pad) const;       // is (x,z) on the way from the sidewalk to a front door?
+    // is (x,z) within walkOff + pad of the centreline of a street that has a drivable edge (any grid), i.e. on the
+    // lanes or the sidewalk walking line (or pad past it)? Keeps solid trunks off both
+    bool nearGridStreet(float x, float z, float pad) const;
+    bool nearPedPath(float x, float z, float reach) const;     // within `reach` of a promenade / walkway centreline (walkers keep +-1 m of it)
     // how far to step a sidewalk walker at (x,z), out toward the street, to keep them clear of the front steps
     // of a house (routeDir: the way their route runs, or zero); zero when no stoop is near
     Vector2 stoopDetour(float x, float z, Vector2 routeDir) const;
@@ -314,6 +318,7 @@ private:
     void buildBayBridge();
     void buildLandmarks();
     void buildWaterfront();
+    void buildPedPaths();
     void buildParks();
     void buildAlcatraz();
     void buildSkateSpots();
@@ -336,7 +341,7 @@ private:
     void addTower(float x0, float z0, float x1, float z1, float H, RNG& r);
     // geo null: collision only (the city build); otherwise the mesh only, into geo
     void addHouseInterior(const House& h, float base, float top, float doorU, RNG& hr, MeshBuilder* geo);
-    void addTree(float x, float z, int type, float scale, RNG& r, bool solid = true);
+    void addTree(float x, float z, int type, float scale, RNG& r, bool solid = true, bool streetOK = false);   // streetOK: may stand on a street (the Embarcadero median)
     void addShrub(float x, float z, float scale, RNG& r, bool flowering = false);
     void addFlowerBed(float x0, float z0, float x1, float z1, int count, RNG& r);
     void addLamp(float x, float z, float yaw);

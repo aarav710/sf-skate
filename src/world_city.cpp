@@ -1239,8 +1239,11 @@ float World::treesNear(float x, float z) const {
     return n;
 }
 
-void World::addTree(float x, float z, int type, float s, RNG& r, bool solid) {
+void World::addTree(float x, float z, int type, float s, RNG& r, bool solid, bool streetOK) {
     if (solid && doorBlocked(x, z, 2.6f)) return; // never plant a trunk in front of a front door
+    // ...nor in a traffic lane, on the sidewalk walking line (the street trees stand 1 m+ outside it) or on a promenade
+    // (walkers follow these without dodging trunks)
+    if (solid && !streetOK && (nearGridStreet(x, z, 0.5f) || nearPedPath(x, z, 2.2f))) return;
     float y = terrain(x, z);
     if (y < 0.8f) return;
     if (buildingAt(x, z, 0.5f * s, y - 0.2f, y + 5.f)) return;   // not inside a building or landmark base
@@ -1597,7 +1600,7 @@ void World::buildStreetFurniture(const Grid& g, bool oakland) {
                     float rs;
                     if (!oakland && c.y > 800 && railDistance(c.x, c.y, &rs) < 12) continue;
                     if (embarcadero) { // palm-lined median on the Embarcadero
-                        if (slot % 3 == 0) addTree(c.x, c.y, 2, r.range(0.9f, 1.15f), r, true);
+                        if (slot % 3 == 0) addTree(c.x, c.y, 2, r.range(0.9f, 1.15f), r, true, true);
                         continue;
                     }
                     int style = buildStyleAt(c.x, c.y);

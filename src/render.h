@@ -10,6 +10,7 @@ struct Look {
     float fogDen, night, time;
     float wet = 0;            // 0 dry .. 1 soaked streets (rain)
     float fogH = 300;         // haze scale height: low for Karl the Fog, which pools in the valleys
+    float clear = 1;          // 1 clear .. 0 in Karl the Fog or rain: turns the golden-hour haze tint off
 };
 
 // The sky behind everything: gradient, haze at the horizon, sun or moon, and a drifting cloud layer.

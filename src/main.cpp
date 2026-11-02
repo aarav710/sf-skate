@@ -1101,6 +1101,7 @@ int main() {
 
         // ---------------- shader uniforms
         Look look{cam.position, sky.sunDir, lit.sunCol, lit.amb, fogC, horizonC, fogUse, sky.night, now};
+        look.clear = (1.f - clampf((fogDen - 0.00011f) / (0.0022f - 0.00011f), 0, 1)) * (1.f - rainK);   // as fogK, rain for the sky
         look.fogH = heavyFog ? 70.f : 300.f - 120.f * rainK;
         look.wet = WX.wet;
         R.setLook(look);

@@ -768,6 +768,65 @@ int main() {
         snprintf(b, sizeof b, "%d of 4 ballpark structures stopped the skater%s", ok, why.c_str());
         check(ok == 4, "Oracle Park structures are solid", b);
     }
+    {   // Treasure Island's three hangars and the warehouse are solid (issue #135): ride east into each hangar's west face
+        // and south into the warehouse's north face, and check nothing else was left inside the new boxes
+        struct Run { const char* name; float x, z, yaw; bool alongX; float wall; int dir; };
+        const Run runs[] = {
+            {"hangar 1", 2498, -470, 0, true, 2510, 1},
+            {"hangar 2", 2598, -470, 0, true, 2610, 1},
+            {"hangar 3", 2698, -470, 0, true, 2710, 1},
+            {"warehouse", 2620, -80, PI / 2, false, -52, 1},
+        };
+        int ok = 0;
+        std::string why;
+        for (const Run& r : runs) {
+            Sim s; s.spawn(r.x, r.z, r.yaw, 8);
+            Input in; in.push = true;
+            float deepest = -1e9f;
+            s.run(300, in, [&](Player& q) {
+                float c = r.alongX ? q.pos.x : q.pos.z;
+                deepest = std::max(deepest, (c - r.wall) * r.dir);
+                return false;
+            });
+            if (deepest < 0) ok++;
+            else if (why.empty()) { char w[96]; snprintf(w, sizeof w, " (first miss: %s, %.1f m past its face)", r.name, deepest); why = w; }
+        }
+        // anything placed inside those footprints (tokens, spawn spots, lamps, seats, tourists)?
+        auto inBox = [](float x, float z) {
+            for (int k = 0; k < 3; k++) if (fabsf(x - (2550 + k * 100)) < 40.5f && fabsf(z + 480) < 30.5f) return true;
+            return fabsf(x - 2620) < 50.5f && fabsf(z + 40) < 12.5f;
+        };
+        int stray = 0;
+        for (auto& t : W.tokens) if (inBox(t.pos.x, t.pos.z)) stray++;
+        for (auto& sp : W.spots) if (inBox(sp.pos.x, sp.pos.z)) stray++;
+        for (auto& l : W.lamps) if (inBox(l.x, l.z)) stray++;
+        for (auto& se : W.seats) if (inBox(se.pos.x, se.pos.z)) stray++;
+        for (auto& t : W.tourists) if (inBox(t.x, t.z)) stray++;
+        snprintf(b, sizeof b, "%d of 4 buildings stopped the skater, %d objects inside them%s", ok, stray, why.c_str());
+        check(ok == 4 && stray == 0, "Treasure Island hangars are solid", b);
+    }
+    {   // the grandstand stands east of the street beside it (issue #140): the lane and sidewalk are clear, no lamp is
+        // buried in the wall
+        int wallHits = 0, samples = 0;
+        for (float z = 686; z < 866; z += 2)
+            for (float x : {1148.f, 1152.f, 1157.4f, 1160.f, 1163.f, 1164.f, 1166.f}) {
+                samples++;
+                for (auto& pl : W.plats)
+                    if (pl.kind == PK_BUILDING && pl.contains(x, z) && pl.x1 - pl.x0 < 600 && std::max(pl.h0, pl.h1) - pl.base > 5) { wallHits++; break; }
+            }
+        int lamps = 0, buried = 0;
+        for (auto& p : W.plats) {
+            if (p.kind != PK_POLE || p.x1 - p.x0 > 1.8f || p.z1 - p.z0 > 1.8f) continue;
+            float x = (p.x0 + p.x1) / 2, z = (p.z0 + p.z1) / 2, tall = std::max(p.h0, p.h1) - p.base;
+            if (x > 1140 && x < 1170 && z > 684 && z < 868 && tall > 5.9f && tall < 7.6f) {
+                lamps++;
+                for (auto& pl : W.plats)
+                    if (pl.kind == PK_BUILDING && pl.contains(x, z) && pl.x1 - pl.x0 < 600) { buried++; break; }
+            }
+        }
+        snprintf(b, sizeof b, "%d of %d lane/sidewalk samples inside a building, %d of %d lamps buried", wallHits, samples, buried, lamps);
+        check(wallHits == 0 && buried == 0 && lamps >= 3, "Oracle Park street side is clear", b);
+    }
     {   // ride into the Pacific
         Sim s; s.spawn(-1440, 0, PI, 6);
         Input in; in.push = true;

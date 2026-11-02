@@ -447,7 +447,7 @@ void main() {
         // a low sun glazes the road and the paving ahead with a faint, broad sheen (not the grass)
         float gs = max(vCol.r, max(vCol.g, vCol.b)) - min(vCol.r, min(vCol.g, vCol.b));
         float fr = pow(1.0 - max(dot(N, V), 0.0), 4.0);
-        col += sunCol * (0.18 * pow(max(dot(N, normalize(sunDir + V)), 0.0), 20.0) * fr * sh * lowSun * (1.0 - smoothstep(0.06, 0.12, gs)));
+        col += sunCol * (0.18 * pow(max(dot(N, normalize(sunDir + V)), 0.0), 20.0) * fr * sh * lowSun * (1.0 - smoothstep(0.06, 0.12, gs)) * smoothstep(0.0, 0.1, dot(N, sunDir)));
     }
     if (specK > 0.0) {
         vec3 H = normalize(sunDir + V);

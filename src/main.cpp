@@ -1101,26 +1101,47 @@ int main() {
         look.fogH = heavyFog ? 70.f : 300.f - 120.f * rainK;
         look.wet = WX.wet;
         R.setLook(look);
-        // street lamps: the 16 nearest the camera light the street at night. The furthest of them fade out, so one
-        // swapping in or out of the set doesn't pop.
+        // street lamps: at night every lamp whose pool of light can show on screen lights the street, out to
+        // LAMP_END from the camera. A lamp lights up to LAMP_REACH around it (lampLight() in the shader), so the ones
+        // whose reach sphere lies wholly outside the view frustum are skipped: that is most of them, and what lets
+        // the lamps in view reach this far. Each fades from full strength at LAMP_FULL to nothing at LAMP_END (by its
+        // 3D distance, so lamps down a hillside count as much as the ones on the level). If more lamps are in view
+        // than the shader takes, the nearest are kept and the fade is pulled in to end at the first one left out,
+        // so nothing pops as lamps swap in or out of the set.
         {
+            constexpr float LAMP_REACH = Renderer::LAMP_REACH, LAMP_FULL = 120.f, LAMP_END = 160.f;
             float lampK = smooth01(0.4f, 0.9f, sky.night);
-            static std::vector<std::pair<float, int>> near;
+            static std::vector<std::pair<float, int>> near;   // keeps its capacity: no allocation per frame
             near.clear();
-            if (lampK > 0.01f && !title)
+            if (lampK > 0.01f && !title) {
+                // the frustum's side planes, in camera space (x right, y up, z forward): a sphere is outside when
+                // its center lies further than its radius beyond one of them
+                Vector3 rt = Vector3Normalize(Vector3CrossProduct(camFwd, cam.up)), up = Vector3CrossProduct(rt, camFwd);
+                float th = tanf(cam.fovy * 0.5f * DEG2RAD), tw = th * (float)GetScreenWidth() / std::max(GetScreenHeight(), 1);
+                float cy = 1.f / sqrtf(1.f + th * th), sy = th * cy, cx = 1.f / sqrtf(1.f + tw * tw), sx = tw * cx;
                 for (int i = 0; i < (int)W.lamps.size(); i++) {
-                    const Vector3& l = W.lamps[i];
-                    float d2 = sq(l.x - cam.position.x) + sq(l.z - cam.position.z);
-                    if (d2 < 160.f * 160.f && fabsf(l.y - cam.position.y) < 60.f) near.push_back({d2, i});
+                    Vector3 d = Vector3Subtract(W.lamps[i], cam.position);
+                    float d2 = Vector3DotProduct(d, d);
+                    if (d2 >= LAMP_END * LAMP_END) continue;
+                    float z = Vector3DotProduct(d, camFwd);
+                    if (z < -LAMP_REACH) continue;
+                    if (fabsf(Vector3DotProduct(d, rt)) * cx - z * sx > LAMP_REACH) continue;
+                    if (fabsf(Vector3DotProduct(d, up)) * cy - z * sy > LAMP_REACH) continue;
+                    near.push_back({d2, i});
                 }
-            int n = std::min((int)near.size(), Renderer::MAXLAMPS + 1);
-            std::partial_sort(near.begin(), near.begin() + n, near.end());
-            float edge = n > Renderer::MAXLAMPS ? sqrtf(near[Renderer::MAXLAMPS].first) : 160.f;
+            }
+            float full = LAMP_FULL, end = LAMP_END;
+            int m = (int)near.size();
+            if (m > Renderer::MAXLAMPS) {
+                std::nth_element(near.begin(), near.begin() + Renderer::MAXLAMPS, near.end());
+                end = sqrtf(near[Renderer::MAXLAMPS].first);   // the nearest lamp left out: everything kept is nearer
+                full = end * (LAMP_FULL / LAMP_END);
+                m = Renderer::MAXLAMPS;
+            }
             Vector4 lamps[Renderer::MAXLAMPS];
-            int m = std::min(n, Renderer::MAXLAMPS);
             for (int k = 0; k < m; k++) {
                 const Vector3& l = W.lamps[near[k].second];
-                lamps[k] = {l.x, l.y, l.z, 2.f * lampK * (1.f - smooth01(edge * 0.75f, edge, sqrtf(near[k].first)))};
+                lamps[k] = {l.x, l.y, l.z, 2.f * lampK * (1.f - smooth01(full, end, sqrtf(near[k].first)))};
             }
             R.setLamps(lamps, m);
         }

@@ -80,7 +80,7 @@ uniform sampler2DShadow shadowMap2;
 uniform mat4 lightVP2;
 uniform vec4 farInfo;      // the wide far cascade: on, world texel, -, -
 #if !FAR
-uniform vec4 lamps[16];    // street lamps near the camera: position, strength
+uniform vec4 lamps[MAXLAMPS];   // street lamps in view: position, strength (MAXLAMPS: Renderer::MAXLAMPS)
 uniform int lampN;
 #endif
 out vec4 finalColor;
@@ -152,7 +152,8 @@ vec3 lampLight(vec3 p, vec3 N) {
     for (int i = 0; i < lampN; i++) {
         vec3 L = lamps[i].xyz - p;
         float d2 = dot(L, L);
-        float reach = clamp(1.0 - d2 / 400.0, 0.0, 1.0);   // 20 m
+        if (d2 >= LAMP_REACH * LAMP_REACH) continue;   // out of its reach (most lamps for most pixels): no light
+        float reach = clamp(1.0 - d2 / (LAMP_REACH * LAMP_REACH), 0.0, 1.0);
         float ndl = max(dot(N, L) * inversesqrt(d2 + 1e-4), 0.0);
         s += vec3(lamps[i].w * reach * reach * ndl / (1.0 + d2 * 0.04));
     }
@@ -738,7 +739,8 @@ void main() {
 
 // ---------------------------------------------------------------- setup
 static Shader cityShader(bool far) {
-    std::string head = std::string("#version 330\n#define FAR ") + (far ? "1" : "0") + "\n";
+    std::string head = std::string("#version 330\n#define FAR ") + (far ? "1" : "0") + "\n#define MAXLAMPS " +
+                       std::to_string(Renderer::MAXLAMPS) + "\n#define LAMP_REACH " + std::to_string(Renderer::LAMP_REACH) + "\n";
     return LoadShaderFromMemory((head + CITY_VS).c_str(), (head + CITY_FS).c_str());
 }
 

@@ -44,7 +44,12 @@ struct Renderer {
     bool farCasc = false;      // the far cascade is in use this frame
     bool farDirty = true;      // ... and needs drawing again (moved, or the sun turned)
 
-    static constexpr int MAXLAMPS = 16;
+    // street lamps the near pass lights with (sized into the city shader's uniform array). 64 covers every street
+    // view: at most ~54 lamps light a view within 160 m, the median ~25. 64 vec4s are 256 of the 1024 fragment
+    // uniform components GL 3.3 guarantees (desktop drivers, macOS included, give 4096 or more), next to ~30 vec4s
+    // of other uniforms.
+    static constexpr int MAXLAMPS = 64;
+    static constexpr float LAMP_REACH = 20.f;   // how far a street lamp lights, in m (the shader gets it too)
 
     // off-screen scene: multisampled color + depth, resolved into `scene`; alpha = 1 - bloom. Half-float on High
     // (HDR: lights and the sun don't clip, the post pass tone maps them).
@@ -72,7 +77,7 @@ struct Renderer {
     void beginScene(Color clear);   // binds the off-screen target (call inside BeginDrawing)
     void drawSky(const SkyLook& s); // right after beginScene: fills the background, bloom mask included
     float cloudAt(Vector3 dir) const;   // cloud cover (0..1) the last drawSky showed in this direction (for the stars)
-    // street lamps near the camera: xyz and strength (0 = off); applied by the near pass
+    // street lamps in view: xyz and strength (0 = off); applied by the near pass
     void setLamps(const Vector4* l, int n);
     void setView(float fovyDeg, float nearZ, float farZ) { viewFovy = fovyDeg; viewNear = nearZ; viewFar = farZ; }
     // opaque city passes write a bloom mask into alpha; translucent bits must leave it alone

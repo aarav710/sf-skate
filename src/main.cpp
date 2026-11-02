@@ -590,7 +590,7 @@ int main() {
         if (IsKeyPressed(KEY_V) && !title) {
             R.setQuality((R.quality + 2) % 3);
             P.say(TextFormat("Graphics: %s", Renderer::QUALITY_NAMES[R.quality]), WHITE,
-                  R.quality == 2 ? "Sharp + distant shadows, soft occlusion, HDR, bloom" : R.quality == 1 ? "Softer shadows, bloom" : "No sun shadows or bloom (fastest)");
+                  R.quality == 2 ? "Sharp + distant shadows, soft occlusion, HDR, bloom" : R.quality == 1 ? "Softer + distant shadows, bloom" : "No sun shadows or bloom (fastest)");
         }
         if (IsKeyPressed(KEY_Y) && !title) {
             gCap60 = !gCap60;

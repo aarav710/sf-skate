@@ -27,6 +27,11 @@ vec3 chunkPos() {
 }
 )"
 
+// how golden the light is: 1 with the sun low (below ~12 degrees), 0 by day and at night
+#define GOLDEN_FN R"(
+float goldenK(float sunY, float nightK) { return (1.0 - smoothstep(0.2, 0.5, sunY)) * (1.0 - smoothstep(0.6, 0.9, nightK)); }
+)"
+
 // ---------------------------------------------------------------- city shader
 // Static meshes bring a normal (w = 1: given explicitly, use as is), the height above the bare ground under the
 // vertex (in vertexTexCoord.x) and the material code in the color alpha. Immediate-mode and instanced models only bring
@@ -55,7 +60,7 @@ void main() {
     gl_Position = mvp * vec4(wPos, 1.0);
 })";
 
-static const char* CITY_FS = R"(
+static const char* CITY_FS = GOLDEN_FN R"(
 in vec3 vRel;
 in vec4 vCol;
 #if !FAR
@@ -89,7 +94,7 @@ out vec4 finalColor;
 vec3 wPos;   // world position (camPos + vRel), set first thing in main
 
 float h21(vec2 p) { p = fract(p * vec2(123.34, 456.21)); p += dot(p, p + 45.32); return fract(p.x * p.y); }
-// lamps, neon and lit windows come on with the street lamps, not with the dusk haze
+// lamps, neon and lit windows come on with the street lamps (the same ramp as lampK in main.cpp), not with the dusk haze
 float lightsOn() { return smoothstep(0.4, 0.9, night); }
 float vnoise(vec2 p) {
     vec2 i = floor(p), f = fract(p);
@@ -179,7 +184,7 @@ float fogAmount(float dist) {
     return 1.0 - exp(-dist * dens * k);
 }
 vec3 fogColor(vec3 V) {
-    float golden = (1.0 - smoothstep(0.2, 0.5, sunDir.y)) * (1.0 - smoothstep(0.6, 0.9, night));
+    float golden = goldenK(sunDir.y, night);
     float sd = dot(-V, sunDir);
     float sunAmt = pow(max(sd, 0.0), 6.0);
     // a low sun only warms its own side of the sky: away from it the haze cools to a dusty mauve (as in the sky)
@@ -376,7 +381,7 @@ void main() {
         vec3 spec = sunCol * (pow(max(dot(R, sunDir), 0.0), sp) * 3.0 + pow(max(dot(R, sunDir), 0.0), 12.0) * 0.05) * sh * (1.0 - wet * 0.7);
         // a low sun: far out, where the waves are too small to see, the glitter path carries on to the horizon,
         // narrow side to side and long up and down, broken into glints
-        float lowW = (1.0 - smoothstep(0.2, 0.5, sunDir.y)) * (1.0 - smoothstep(0.6, 0.9, night)) * smoothstep(60.0, 500.0, dist);
+        float lowW = goldenK(sunDir.y, night) * smoothstep(60.0, 500.0, dist);
         if (lowW > 0.0) {
             float side = 1.0 - dot(normalize(R.xz + 1e-4), normalize(sunDir.xz + 1e-4));
             float path = exp(-side * 1200.0) * exp(-abs(R.y - sunDir.y) * 3.0);
@@ -424,7 +429,7 @@ void main() {
     float hemi = useVN == 1 ? 0.62 + 0.38 * N.y : 0.72 + 0.28 * N.y;
     // shadows: long ones (a low sun behind Twin Peaks) thin out with distance into the haze, and what the sun
     // misses still gets sky light from the sun's side of the sky, cool blue, most of all with a low sun
-    float lowSun = (1.0 - smoothstep(0.2, 0.5, sunDir.y)) * (1.0 - smoothstep(0.6, 0.9, night));
+    float lowSun = goldenK(sunDir.y, night);
     sh = mix(1.0, sh, (1.0 - 0.7 * smoothstep(120.0, 2200.0, dist)) * (1.0 - 0.3 * lowSun * smoothstep(100.0, 1400.0, dist)));
     vec3 fill = vec3(0.72, 0.88, 1.2) * dot(ambCol, vec3(0.333)) * (0.15 + 0.45 * lowSun);
     vec3 light = ambCol * hemi * ao * 1.06 + (sunCol * sh + fill * (1.0 - sh)) * diff * (0.6 + 0.4 * ao);
@@ -539,7 +544,7 @@ float cloudPuffs(vec2 p) {
 }
 float cloudField(vec2 uv, float puffK) { return cloudCoarse(uv) + (cloudPuffs(uv * 3.1 + vec2(9.0, 31.0)) - 0.5) * puffK; }
 )"
-static const char* SKY_FS = "#version 330\n" SKY_NOISE R"(
+static const char* SKY_FS = "#version 330\n" SKY_NOISE GOLDEN_FN R"(
 uniform vec2 res;
 uniform vec3 camF, camR, camU;
 uniform vec2 lens;         // tan(fovy / 2) * aspect, tan(fovy / 2)
@@ -552,7 +557,7 @@ void main() {
     vec3 dir = normalize(camF + camR * ndc.x * lens.x + camU * ndc.y * lens.y);
     float night = misc.x, rain = misc.z, fogK = misc.w;
     float e = dir.y;
-    float golden = (1.0 - smoothstep(0.2, 0.5, sunDir.y)) * (1.0 - smoothstep(0.6, 0.9, night));
+    float golden = goldenK(sunDir.y, night);
     float sd = dot(dir, sunDir);
 
     // gradient, then haze at the horizon tinted toward the sun like the city's fog, a faint city glow at night. A low

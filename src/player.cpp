@@ -4,11 +4,19 @@
 static const Color C_GOLD = {255, 205, 60, 255};
 static const Color C_RED = {255, 80, 70, 255};
 
-// how fast the ground under a board at p rolling at speed along f rises (+) or falls (-), m/s
-static float groundRate(World& w, Vector3 p, Vector3 f, float speed) {
-    float hF = w.skaterGround(p.x + f.x * 0.5f, p.z + f.z * 0.5f, p.y + 0.2f);
-    float hB = w.skaterGround(p.x - f.x * 0.5f, p.z - f.z * 0.5f, p.y + 0.2f);
-    return clampf(speed * (hF - hB), -30, 30);
+// How fast the surface a board at p (on ground height g) rolls on falls away (-) or rises (+) going along dir at
+// speed spd, m/s, measured the way a rolling board feels it: a ledge or stair it isn't on doesn't count (only what
+// it could roll onto from here, ROLL_UP measured at p), and a sample past a drop edge continues the surface instead
+// (the climb off a kicker isn't a plunge, a deck near its edge isn't a slope)
+static float surfaceRate(World& w, Vector3 p, float g, Vector3 dir, float spd) {
+    Vector2 at = {p.x, p.z};
+    float hF = w.skaterGround(p.x + dir.x * 0.5f, p.z + dir.z * 0.5f, g, ROLL_UP, &at);
+    float hB = w.skaterGround(p.x - dir.x * 0.5f, p.z - dir.z * 0.5f, g, ROLL_UP, &at);
+    bool edgeF = hF < g - STEP_UP, edgeB = hB < g - STEP_UP;
+    if (edgeF && edgeB) hF = hB = g;
+    else if (edgeF) hF = 2 * g - hB;
+    else if (edgeB) hB = 2 * g - hF;
+    return clampf(spd * (hF - hB), -30, 30);
 }
 
 // How high a board at p can roll to going dist along dir: steps along over each surface it can ride onto from
@@ -257,17 +265,9 @@ void Player::ride(float dt, const Input& in, World& w) {
         grabbed = false;   // rolling fakie keeps its yaw: the air and the landing read it from yaw vs velocity
         return;
     }
-    Vector3 f2 = fwd();
-    Vector2 at = {np.x, np.z};   // (the slope the board is on: a lip ahead it can't roll up isn't a climb)
-    float hF2 = w.skaterGround(np.x + f2.x * 0.5f, np.z + f2.z * 0.5f, g, ROLL_UP, &at);
-    float hB2 = w.skaterGround(np.x - f2.x * 0.5f, np.z - f2.z * 0.5f, g, ROLL_UP, &at);
-    // same edge rule as the slope above: a sample past a lip reads the ground far below, which would make
-    // the climb off a kicker a huge plunge (and the roll-off a "Way too much drop" bail). Continue the surface instead
-    bool edgeF2 = hF2 < g - STEP_UP, edgeB2 = hB2 < g - STEP_UP;
-    if (edgeF2 && edgeB2) hF2 = hB2 = g;
-    else if (edgeF2) hF2 = 2 * g - hB2;
-    else if (edgeB2) hB2 = 2 * g - hF2;
-    rideVy = clampf(speed * (hF2 - hB2), -30, 30);
+    // (the slope the board is on: a lip ahead it can't roll up isn't a climb, and the edge rule keeps the climb off
+    // a kicker from reading as a huge plunge and the roll-off as a "Way too much drop" bail)
+    rideVy = surfaceRate(w, {np.x, g, np.z}, g, fwd(), speed);
     pos = np;
     pos.y = g;
 
@@ -305,6 +305,13 @@ void Player::air(float dt, const Input& in, World& w) {
     float spin = bouncing ? 0.f : in.steer * 6.0f * dt;
     yaw = wrapPi(yaw + spin);
     spinAccum += spin;
+    if (bouncing && in.steer != 0) {
+        // a landing hop is no time for a spin, but the rider can still carve it: turn the travel and the board
+        // together (no spin scored, nothing for the landing to call sideways), as on the ground but gentler
+        float t = in.steer * 1.2f * dt, c = cosf(t), s = sinf(t);
+        vel = {vel.x * c - vel.z * s, vel.y, vel.x * s + vel.z * c};
+        yaw = wrapPi(yaw + t);
+    }
     crouch = lerpf(crouch, in.grab ? 1.0f : 0.55f, 1 - expf(-dt * 10));
 
     // flip tricks
@@ -395,12 +402,11 @@ void Player::air(float dt, const Input& in, World& w) {
     // landing
     float g = w.skaterGround(pos.x, pos.z, std::max(prevY, pos.y));
     if (pos.y <= g && vy <= 0) {
-        bool pop = bouncing && (ollieQueued || in.ollie); // Space during a landing bounce pops as it touches down
+        bool hop = bouncing, pop = bouncing && (ollieQueued || in.ollie); // Space during a landing bounce pops as it touches down
         bouncing = ollieQueued = false;
-        land(w, g);
-        if (pop && (state == RIDE || bouncing)) { // (on a steep downhill the touchdown may start another bounce: pop anyway)
-            bouncing = false;
-            float up = groundRate(w, pos, fwd(), speed);
+        land(w, g, in.brake, hop);
+        if (pop && state == RIDE) {   // (a hop's touchdown never bounces again, so this is always a clean roll-away)
+            float up = rideVy;   // the slope landed on (land() set it)
             ollie(7.4f + clampf(fabsf(speed) * 0.03f, 0, 0.6f));
             vy += std::max(up, 0.f); // uphill: keep the climb, as ride() does
         }
@@ -409,7 +415,7 @@ void Player::air(float dt, const Input& in, World& w) {
     if (bouncing && in.ollie) ollieQueued = true;
 }
 
-void Player::land(World& w, float g) {
+void Player::land(World& w, float g, bool brake, bool hop) {
     pos.y = g;
     if (w.isWater(pos.x, pos.z, g)) {
         splashed = true;
@@ -419,8 +425,13 @@ void Player::land(World& w, float g) {
     }
     if (flipT >= 0 && flipT < flipDur * 0.8f) { bail("Didn't finish the flip"); return; }
     if (shoveT >= 0 && shoveT < shoveDur * 0.75f) { bail("Didn't finish the shove-it"); return; }
-    if (vy < -21.f) { bail("Way too much drop"); return; }
     float hv = sqrtf(vel.x * vel.x + vel.z * vel.z);
+    // the hit is the fall speed against the surface, not against the world: rolling down a hill the board must fall
+    // as fast as the road does just to stay on it, and that is no impact at all. A ledge or stair it dropped off
+    // behind it isn't the surface (surfaceRate), so real drops still land hard
+    Vector3 travel = hv > 0.5f ? Vector3{vel.x / hv, 0, vel.z / hv} : fwd();
+    float impact = std::max(surfaceRate(w, pos, g, travel, hv) - vy, 0.f);
+    if (impact > 21.f) { bail("Way too much drop"); return; }
     // barely moving: forgive the angle, but keep a backwards drift backwards
     float diff = hv > 1.f ? wrapPi(yaw - atan2f(vel.z, vel.x)) : (vel.x * cosf(yaw) + vel.z * sinf(yaw) < 0 ? PI : 0.f);
     bool fakie = false;
@@ -436,7 +447,6 @@ void Player::land(World& w, float g) {
     flipT = shoveT = -1;
     flipAngle = shoveAngle = 0;
     // how clean was it? lined up and gentle is a stomp, crooked or from a height is sketchy
-    float impact = -vy;
     float quality = 1.f - clampf(fabsf(fabsf(diff) > PI / 2 ? fabsf(diff) - PI : diff) / 0.5f, 0.f, 1.f) * 0.7f - clampf((impact - 9.f) / 12.f, 0.f, 1.f) * 0.5f;
     bool stomp = quality > 0.85f && impact > 3.f && !airClip, sketchy = quality < 0.45f;
     airClip = false;
@@ -450,7 +460,8 @@ void Player::land(World& w, float g) {
     landShake = clampf(impact / 18.f, 0.f, 1.f);
     if (fakie && !combo.empty()) combo.back() += " to Fakie";
     speed = hv * cosf(diff) * (sketchy ? 0.78f : 0.97f);
-    rideVy = 0;
+    rideVy = surfaceRate(w, pos, g, fwd(), speed);   // already rolling with the slope: on a downhill ride() mustn't read the next frame as a drop
+
     state = RIDE;
     crouch = clampf(0.75f + impact / 40.f, 0.75f, 1.f);
     evLand = true;
@@ -461,18 +472,19 @@ void Player::land(World& w, float g) {
         combo.clear(); comboPts = 0;
     } else bankCombo();
     landNote.clear();
-    // the trucks and knees take the hit, then spring back: a real landing bounces
-    if (impact > 4.5f && state == RIDE) {
-        float bv = clampf(impact * (stomp ? 0.3f : 0.22f), 1.2f, 3.4f);
+    // the trucks and knees take the hit, then spring back: a real landing bounces, once, off the surface (up off it
+    // and on along the hill, so a hop lands as gently as it left and dies out). Holding the brake absorbs it instead
+    if (impact > 4.5f && state == RIDE && !brake && !hop) {
+        float bv = std::min(impact * (stomp ? 0.3f : 0.22f), 3.4f);
         vel = Vector3Scale(fwd(), speed);
-        vy = bv;
+        vy = bv + rideVy;
         state = AIR;
         airTime = 0;
         spinAccum = 0;
         grabbed = false;
         bouncing = true;
         bounceY = g;
-        bounceRate = groundRate(w, pos, fwd(), speed);
+        bounceRate = rideVy;
     }
 }
 

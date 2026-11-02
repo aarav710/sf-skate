@@ -50,7 +50,7 @@ struct Player {
     std::string subPopup;
     std::string landNote;     // how the last landing went, shown with the banked combo
     float landShake = 0;      // 0..1 camera kick from a hard landing, decays in the camera
-    bool bouncing = false;    // AIR is just the hop after a landing: no spins, flips or grabs
+    bool bouncing = false;    // AIR is just the hop after a landing: no spins, flips or grabs (steer carves the hop instead)
     float bounceY = 0, bounceRate = 0; // ground height and its rise/fall rate along the hop at its start; ground well below that line = rolled off into real air
     bool ollieQueued = false; // Space pressed during the hop: pop as the wheels come back down
 
@@ -81,7 +81,7 @@ private:
     void grind(float dt, const Input& in, World& w);
     void bailUpdate(float dt, World& w);
     void ollie(float strength);
-    void land(World& w, float g);
+    void land(World& w, float g, bool brake, bool hop);   // brake: absorb, no bounce; hop: touching down from a landing bounce
     void addTrick(const std::string& n, float pts);
     void bankCombo();
 };

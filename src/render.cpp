@@ -27,9 +27,10 @@ vec3 chunkPos() {
 }
 )"
 
-// how golden the light is: 1 with the sun low (below ~12 degrees), 0 by day and at night
+// how golden the light is: 1 with the sun low (below ~19 degrees, so the golden-hour sun at ~16 gets all of it),
+// fading out by ~37 degrees; 0 by day and at night
 #define GOLDEN_FN R"(
-float goldenK(float sunY, float nightK) { return (1.0 - smoothstep(0.2, 0.5, sunY)) * (1.0 - smoothstep(0.6, 0.9, nightK)); }
+float goldenK(float sunY, float nightK) { return (1.0 - smoothstep(0.32, 0.6, sunY)) * (1.0 - smoothstep(0.6, 0.9, nightK)); }
 )"
 
 // ---------------------------------------------------------------- city shader
@@ -434,13 +435,18 @@ void main() {
     // sky light from above; immediate-mode models (flat normals, lots of small downward faces) get a gentler falloff
     float hemi = useVN == 1 ? 0.62 + 0.38 * N.y : 0.72 + 0.28 * N.y;
     // shadows: long ones (a low sun behind Twin Peaks) thin out with distance into the haze, and what the sun
-    // misses still gets sky light from the sun's side of the sky, cool blue, most of all with a low sun
+    // misses still gets sky light from the sun's side of the sky, cool blue, a little more with a low sun (not so
+    // much that it cancels the warm sun out)
     float lowSun = goldenK(sunDir.y, night);
     sh = mix(1.0, sh, (1.0 - 0.7 * smoothstep(120.0, 2200.0, dist)) * (1.0 - 0.3 * lowSun * smoothstep(100.0, 1400.0, dist)));
-    vec3 fill = vec3(0.72, 0.88, 1.2) * dot(ambCol, vec3(0.333)) * (0.15 + 0.45 * lowSun);
+    vec3 fill = vec3(0.72, 0.88, 1.2) * dot(ambCol, vec3(0.333)) * (0.15 + 0.2 * lowSun);
     vec3 light = ambCol * hemi * ao * 1.06 + (sunCol * sh + fill * (1.0 - sh)) * diff * (0.6 + 0.4 * ao);
     // with a low sun, most of that sky light reaches the ground whichever way it faces, so the streets stay readable
     light += fill * (0.15 * lowSun) * (0.6 + 0.4 * N.y) * ao;
+    // and warm light bounced off the sunlit streets and walls wraps around from the sun's side, shade included, so
+    // the whole city turns golden rather than just the faces looking straight at the sun
+    vec2 sunXZ = normalize(sunDir.xz + vec2(1e-4));
+    light += sunCol * (0.12 * lowSun) * (0.5 + 0.5 * dot(N.xz, sunXZ)) * ao;
     if (m == 10) {                       // rooms: warm lamp light and soft window light, warmer still at night
         vec3 day = (ambCol * 1.2 + sunCol * 0.2 + vec3(0.28, 0.22, 0.12)) * (0.88 + 0.12 * hemi);
         light = mix(day, vec3(1.0, 0.88, 0.7) * (0.9 + 0.1 * hemi), lightsOn());
@@ -734,7 +740,7 @@ uniform sampler2D depthTex;   // full size depth of the near pass
 uniform vec4 aoInfo;          // on, near, far, -
 uniform vec2 aoTexel;
 uniform float hdrOn;
-uniform float roll;   // golden hour: bright colors start burning toward white sooner, so sunlit pastels stay apart
+uniform float roll;   // golden hour: bright colors roll off (and start burning toward white sooner, so sunlit pastels stay apart)
 uniform float inScale;   // undoes the scene's outScale
 out vec4 finalColor;
 float linz(float d) { float z = d * 2.0 - 1.0; return 2.0 * aoInfo.y * aoInfo.z / (aoInfo.z + aoInfo.y - z * (aoInfo.z - aoInfo.y)); }
@@ -756,12 +762,13 @@ float aoAt(vec2 uv) {
     return s / ws;
 }
 // HDR (High): colors below 0.8 pass as they are; above that the brightest channel rolls off smoothly (keeping the
-// hue, so warm lights stay warm instead of clipping to white), and only very bright light burns toward white
-vec3 shoulder(vec3 c) {
+// hue, so warm lights stay warm instead of clipping to white), and only very bright light burns toward white.
+// burn: how much the grade's roll adds to that burn
+vec3 shoulder(vec3 c, float burn) {
     float m = max(c.r, max(c.g, c.b));
     if (m <= 0.8) return c;
     float t = 0.8 + (m - 0.8) / (1.0 + (m - 0.8) / 0.3);
-    return mix(c * (t / m), vec3(t), max(smoothstep(1.5, 6.0, m) * 0.7, smoothstep(1.0, 2.5, m) * 0.5 * roll));
+    return mix(c * (t / m), vec3(t), max(smoothstep(1.5, 6.0, m) * 0.7, smoothstep(1.0, 2.5, m) * 0.5 * burn));
 }
 void main() {
     vec2 uv = fragTexCoord;
@@ -782,8 +789,10 @@ void main() {
     c = (c - 0.5) * params.y + 0.5;
     vec2 v = uv - 0.5;
     c *= 1.0 - params.w * dot(v, v) * 1.6;
-    if (hdrOn > 0.5) c = shoulder(max(c, vec3(0.0)));
-    else if (roll > 0.0) c = mix(c, shoulder(max(c, vec3(0.0))), roll);   // Medium, Low: the same roll-off, in the headroom
+    if (hdrOn > 0.5) c = shoulder(max(c, vec3(0.0)), roll);
+    // Medium, Low: the same roll-off, in the headroom, burning toward white half as much (8 bits already flatten
+    // the brightest sunlit gold, so it would wash out sooner than on High)
+    else if (roll > 0.0) c = mix(c, shoulder(max(c, vec3(0.0)), roll * 0.5), roll);
     // a touch of dither so the sky gradient doesn't band
     c += (fract(sin(dot(gl_FragCoord.xy, vec2(12.9898, 78.233))) * 43758.5453) - 0.5) / 255.0;
     finalColor = vec4(clamp(c, 0.0, 1.0), 1.0);

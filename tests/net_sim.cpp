@@ -15,10 +15,12 @@ struct Link {
     double lat, jit, loss;
     RNG r;
     std::multimap<double, netp::MsgCarSnapshot> q;
+    double spikeEvery = 0;   // (> 0: every this many s, what's sent in the next 0.1 s takes 350 ms: a wifi hiccup)
     Link(double l, double j, double lo, uint32_t seed) : lat(l), jit(j), loss(lo), r(seed) {}
     void send(double t, const netp::MsgCarSnapshot& m) {
         if (r.f() < loss) return;
-        q.insert({t + lat + jit * r.f(), m});
+        bool spike = spikeEvery > 0 && fmod(t, spikeEvery) < 0.1;
+        q.insert({t + (spike ? 0.35 : lat + jit * r.f()), m});
     }
     template <class F> void deliver(double t, F f) {
         while (!q.empty() && q.begin()->first <= t) { f(q.begin()->second); q.erase(q.begin()); }
@@ -104,16 +106,55 @@ void netSimChecks(World& W, CheckFn check) {
             prevS = s; prevT = tt;
             if (f > 600) { worst = std::max(worst, fabs(s - t)); sumErr += fabs(s - t); n++; worstMargin = std::max(worstMargin, sc.margin); }
         }
-        // a host whose clock jumps (it took over from another, a second behind): once most of the window has it, the clock
-        // snaps rather than slewing for 20 s
-        SessionClock sj;
-        for (int k = 0; k < 40; k++) sj.sample(k * 0.1, k * 0.1 + 0.05, 50, 50);
-        double before = sj.sessionTime(4.0);
-        for (int k = 40; k < 60; k++) sj.sample(k * 0.1 - 1.0, k * 0.1 + 0.05, 50, 50);
-        double after = sj.sessionTime(6.0);
+        // a host clock that jumps: 1 s on, the clock jumps after it; 1 s back, it slews back (never backwards: a clock
+        // that steps back freezes the traffic); 6 s back (a stall the host gave up on), it jumps back
+        auto jump = [](double by) {
+            SessionClock sj;
+            for (int k = 0; k < 40; k++) { sj.sample(k * 0.1, k * 0.1 + 0.05, 50, 50); sj.sessionTime(k * 0.1 + 0.05); }
+            double prev = sj.sessionTime(3.95), low = 1e9;
+            for (int k = 40; k < 80; k++) {
+                sj.sample(k * 0.1 + by, k * 0.1 + 0.05, 50, 50);
+                double s = sj.sessionTime(k * 0.1 + 0.05);
+                low = std::min(low, s - prev);
+                prev = s;
+            }
+            return std::pair<double, double>{sj.sessionTime(8.0) - 8.0, low};   // where it ended up, and its smallest step
+        };
+        auto fwd = jump(1), back1 = jump(-1), back6 = jump(-6);
         snprintf(b, sizeof b, "off by %.2f ms on average, %.2f ms at worst; went backwards %d times; %d of %d snapshots late; margin up to %.0f ms; "
-                 "a host clock 1 s back: %.2f -> %.2f", n ? sumErr / n * 1000 : 0, worst * 1000, back, lateN, sent, worstMargin * 1000, before, after);
-        check(n > 2900 && worst < 0.005 && back == 0 && lateN == 0 && fabs(after - 5.0) < 0.05, "session clock follows the host", b);
+                 "host clock jumps +1 s: ends %+.2f s; -1 s: %+.2f s, smallest step %.3f s; -6 s: %+.2f s",
+                 n ? sumErr / n * 1000 : 0, worst * 1000, back, lateN, sent, worstMargin * 1000, fwd.first, back1.first, back1.second, back6.first);
+        check(n > 2900 && worst < 0.005 && back == 0 && lateN == 0 && fabs(fwd.first - 1) < 0.05 && back1.first > -0.2 && back1.first < -0.05 &&
+              back1.second > 0.09 && fabs(back6.first + 6) < 0.05, "session clock follows the host", b);
+    }
+    {   // wifi hiccups: one snapshot in 50 takes 350 ms. Its own snapshot is dropped, but the traffic mustn't stall
+        // (the clock stepping back) or let the others come in late.
+        SessionClock sc;
+        RNG r(9);
+        std::multimap<double, double> q;
+        int stalled = 0, lateN = 0, spikes = 0, sent = 0;
+        double prevT = -1e9;
+        for (int f = 0; f < 60 * 120; f++) {
+            double t = f / 60.0;
+            if (f % 6 == 0) {
+                bool spike = fmod(t, 5) < 0.09;
+                q.insert({t + (spike ? 0.35 : 0.05 + 0.03 * r.f()), spike ? -t : t});   // (negative: the spiked one)
+                sent++; spikes += spike;
+            }
+            while (!q.empty() && q.begin()->first <= t) {
+                double S = fabs(q.begin()->second);
+                if (sc.valid() && f > 600 && q.begin()->second > 0 && sc.trafficTime(t) > S) lateN++;
+                sc.sample(S, t, 60, 60);
+                q.erase(q.begin());
+            }
+            if (!sc.valid()) continue;
+            double tt = sc.trafficTime(t);
+            if (f > 600 && tt - prevT < 0.5 / 60) stalled++;
+            prevT = tt;
+        }
+        snprintf(b, sizeof b, "%d of %d snapshots held up 350 ms; traffic stood still %d frames of %d; %d of the others late", spikes, sent, stalled,
+                 60 * 110, lateN);
+        check(spikes > 20 && stalled == 0 && lateN < sent / 100, "session clock rides out latency spikes", b);
     }
 
     // a downtown street six blocks long, as in "traffic is deterministic": the host and the client skate back and forth
@@ -152,28 +193,42 @@ void netSimChecks(World& W, CheckFn check) {
     // Host H and client C from the same seed for SECS s; the host sends snapshots (or not) over a 50-80 ms link that
     // loses 5%. Each second (on the host's steps), the cars within 100 m of the client's skater are compared at the same
     // step on both. Returns the comparisons over the run and the last one.
-    struct Run { Cmp all, last; float trainErr = 0; int applied = 0, late = 0, stale = 0, bad = 0, honks = 0; double bytes = 0, bytes3 = 0, secs = 0; int maxCars = 0; };
+    // Host frames: hostFps a second (the host's traffic runs on its clock, TrafficSync::hostStep), with no frame at all
+    // for 0.5 s at hitchAt; spikeEvery: wifi hiccups on the link (see Link).
+    struct Run { Cmp all, last; float trainErr = 0; int applied = 0, late = 0, stale = 0, bad = 0, honks = 0, stalled = 0; double bytes = 0, bytes3 = 0, secs = 0; int maxCars = 0; };
+    struct Cfg { bool snaps = true; double hostFps = 60, hitchAt = -1, spikeEvery = 0; int secs = 120; uint32_t seed = 11; };
     const int SECS = 120;
-    auto runPair = [&](bool snaps) {
+    auto runPair = [&](Cfg cfg) {
         Run out;
         Traffic H, C;
         H.init(W); C.init(W);
-        TrafficSync ts;
+        TrafficSync ts, hts;
         ts.synced = true; ts.wantFull = false;   // (the same seed and both from the start: already in step)
-        Link link(LAT, JIT, LOSS, snaps ? 11 : 12);
+        Link link(LAT, JIT, LOSS, cfg.seed);
+        link.spikeEvery = cfg.spikeEvery;
+        bool snaps = cfg.snaps;
         std::map<long long, std::vector<CarRec>> hostAt;
         std::map<long long, std::vector<float>> trainsAt;
         Vector3 far3 = {(float)g.node(g.ni / 4, g.nj / 4).x, 0, (float)g.node(g.ni / 4, g.nj / 4).y};   // (a third player, for the bandwidth)
-        for (int f = 0; f <= 60 * SECS; f++) {
+        double nextFrame = 0, nextSend = 0;
+        int zeroRun = 0;
+        for (int f = 0; f <= 60 * cfg.secs; f++) {
             double t = f / 60.0;
-            H.update(Traffic::STEP, W, hostActors(t, true));
-            out.honks += H.evHonk;
-            long long hs = stepOf(H.simTime);
-            if (hs % 60 == 0) {
-                hostAt[hs] = carsOf(H);
-                for (auto& tr : H.trains) trainsAt[hs].push_back(tr.s);
+            bool hostFrame = t >= nextFrame - 1e-9 && !(cfg.hitchAt >= 0 && t >= cfg.hitchAt && t < cfg.hitchAt + 0.5);
+            if (hostFrame) {
+                nextFrame = std::max(nextFrame + 1 / cfg.hostFps, t);
+                long long before = stepOf(H.simTime);
+                float a;
+                hts.hostStep(H, W, hostActors(t, true), t, &a);
+                out.honks += H.evHonk;
+                long long hs = stepOf(H.simTime);
+                if (hs / 30 != before / 30 || hs == 0) {   // (now and then: a frame can run several steps)
+                    hostAt[hs] = carsOf(H);
+                    for (auto& tr : H.trains) trainsAt[hs].push_back(tr.s);
+                }
             }
-            if (f % 6 == 0) {
+            if (hostFrame && t >= nextSend - 1e-9) {
+                nextSend = std::max(nextSend + TrafficSync::INTERVAL, t);
                 Vector3 seen = skater(t - LAT - 0.015, 2).pos;   // (the latest state the host has of the client)
                 auto parts = TrafficSync::snapshot(H, {seen}, RTT);
                 for (auto& m : parts) { link.send(t, m); out.bytes += netp::pack(m).size() + 40; }   // (+ UDP/IP + ENet)
@@ -185,7 +240,10 @@ void netSimChecks(World& W, CheckFn check) {
                 else ts.clock.sample(m.simTime, t + 777, RTT, RTT);
             });
             float alpha;
-            ts.step(C, W, clientActors(t), t + 777, &alpha);
+            int n = ts.step(C, W, clientActors(t), t + 777, &alpha);
+            // stood still: three or more frames in a row with no step (one now and then is the clock slewing)
+            zeroRun = n == 0 ? zeroRun + 1 : 0;
+            if (t > 10) out.stalled += zeroRun == 3 ? 3 : zeroRun > 3;
             long long cs = stepOf(C.simTime);
             auto it = hostAt.find(cs);
             if (it != hostAt.end() && t > 10) {
@@ -198,7 +256,7 @@ void netSimChecks(World& W, CheckFn check) {
             }
         }
         out.applied = ts.applied; out.late = ts.late; out.stale = ts.stale; out.bad = ts.bad;
-        out.secs = SECS;
+        out.secs = cfg.secs;
         return out;
     };
 
@@ -206,7 +264,7 @@ void netSimChecks(World& W, CheckFn check) {
     // car snapshots, and both run AFTER s more. Cars compared as above; people compared with the host's at the step the
     // snapshot was taken at, right after it's applied (caught up, and for comparison a plain init + applyFull), and at
     // the end.
-    struct JoinRun { Cmp near, all; bool fullOk = false; double fullMs = 0; size_t fullBytes = 0; PedCmp atJoin, atJoinPlain, atEnd; int applied = 0, late = 0; };
+    struct JoinRun { Cmp near, all; bool fullOk = false; double fullMs = 0; size_t fullBytes = 0; PedCmp atJoin, atJoinPlain, atEnd; int applied = 0, late = 0, catchFrames = 0; double catchMs = 0; };
     const double JOIN_AT = 300, AFTER = 60;
     auto runJoin = [&] {
         JoinRun out;
@@ -225,12 +283,14 @@ void netSimChecks(World& W, CheckFn check) {
         std::vector<PedRec> pedsEnd;
         long long endStep = stepOf(JOIN_AT + AFTER - 1);
         bool joined = false;
+        std::map<long long, std::vector<PedRec>> pedsAt;
         for (int f = (int)(60 * JOIN_AT) + 1; f <= (int)(60 * (JOIN_AT + AFTER)); f++) {
             double t = f / 60.0;
             H.update(Traffic::STEP, W, hostActors(t, true));
             long long hs = stepOf(H.simTime);
             if (hs % 60 == 0) hostAt[hs] = carsOf(H);
             if (hs == endStep) pedsEnd = pedsOf(H);
+            if (t >= fullArrives - 0.1 && t < fullArrives + 3) pedsAt[hs] = pedsOf(H);
             if (f % 6 == 0) for (auto& m : TrafficSync::snapshot(H, {skater(t - LAT - 0.015, 2).pos}, RTT)) link.send(t, m);
             link.deliver(t, [&](const netp::MsgCarSnapshot& m) { ts.onCarSnapshot(m, t + 777, RTT, C); });
             if (!joined && t >= fullArrives) {
@@ -238,14 +298,20 @@ void netSimChecks(World& W, CheckFn check) {
                 auto t0 = clk::now();
                 out.fullOk = ts.onFull(C, W, full.data(), full.size());
                 out.fullMs = std::chrono::duration<double, std::milli>(clk::now() - t0).count();
-                out.atJoin = comparePeds(pedsAtFull, C);
                 Traffic X; X.init(W); X.applyFull(full.data(), full.size());
                 out.atJoinPlain = comparePeds(pedsAtFull, X);
                 (void)fullStep;
             }
             float alpha;
+            bool catching = joined && ts.pedsOwed() > 0;
+            auto t1 = clk::now();
             if (ts.step(C, W, clientActors(t), t + 777, &alpha) < 0) C.update(Traffic::STEP, W, clientActors(t));   // (its own until then)
             long long cs = stepOf(C.simTime);
+            if (catching) {
+                out.catchFrames++;
+                out.catchMs = std::max(out.catchMs, std::chrono::duration<double, std::milli>(clk::now() - t1).count());
+                if (ts.pedsOwed() == 0 && pedsAt.count(cs)) out.atJoin = comparePeds(pedsAt[cs], C);   // (all caught up)
+            }
             if (cs == endStep && !pedsEnd.empty()) out.atEnd = comparePeds(pedsEnd, C);
             auto it = hostAt.find(cs);
             if (it != hostAt.end() && ts.synced && t > fullArrives + 5) {
@@ -261,9 +327,14 @@ void netSimChecks(World& W, CheckFn check) {
         return out;
     };
 
-    auto f1 = std::async(std::launch::async, runPair, true), f2 = std::async(std::launch::async, runPair, false);
+    Cfg plain, off, slow, spiky;
+    off.snaps = false; off.seed = 12;
+    slow.hostFps = 20; slow.hitchAt = 30; slow.secs = 60; slow.seed = 14;
+    spiky.spikeEvery = 5; spiky.secs = 60; spiky.seed = 15;
+    auto f1 = std::async(std::launch::async, runPair, plain), f2 = std::async(std::launch::async, runPair, off);
     auto f3 = std::async(std::launch::async, runJoin);
-    Run with = f1.get(), without = f2.get();
+    auto f4 = std::async(std::launch::async, runPair, slow), f5 = std::async(std::launch::async, runPair, spiky);
+    Run with = f1.get(), without = f2.get(), slowR = f4.get(), spikeR = f5.get();
     JoinRun jr = f3.get();
 
     snprintf(b, sizeof b, "street (%d, %d), %d s, %d honks; near the client: %d car samples, worst %.3f m (mean %.4f), %d off route, last second: "
@@ -275,16 +346,25 @@ void netSimChecks(World& W, CheckFn check) {
     check(i0 >= 0 && with.honks > 0 && with.last.n > 5 && with.last.worst < 0.5f && with.last.routeBad == 0 && with.all.routeBad == 0 &&
           with.all.worst < 0.5f && with.trainErr < 0.01f && with.applied > 1000 && with.bad == 0,
           "shared traffic: client matches host", b);
+    for (int k = 0; k < 2; k++) {
+        const Run& r = k ? spikeR : slowR;
+        int parts = r.applied + r.late + r.stale;
+        snprintf(b, sizeof b, "%s, %d s: parts applied %d, late %d (%.1f%%), stale %d; client traffic stood still %d frames; near the client %d samples, "
+                 "worst %.3f m, %d off route", k ? "a 350 ms hiccup every 5 s" : "host at 20 fps with a 0.5 s hitch", (int)r.secs, r.applied, r.late,
+                 parts ? 100.0 * r.late / parts : 0, r.stale, r.stalled, r.all.n, r.all.worst, r.all.routeBad);
+        check(r.applied > 1000 && r.late < parts / 20 && r.stalled < 10 && r.all.n > 100 && r.all.worst < 0.5f && r.all.routeBad == 0,
+              k ? "shared traffic: latency spikes" : "shared traffic: slow, hitching host", b);
+    }
     snprintf(b, sizeof b, "the same with no car snapshots: %d car samples, worst %.2f m (mean %.3f), %d off route; last second %d cars, worst %.2f m",
              without.all.n, without.all.worst, without.all.n ? without.all.sum / without.all.n : 0, without.all.routeBad, without.last.n, without.last.worst);
     check(without.all.worst > 2 * std::max(with.all.worst, 0.05f), "shared traffic: diverges without snapshots", b);
     snprintf(b, sizeof b, "full snapshot %zu B applied %s in %.0f ms; then near the client %d samples, worst %.3f m, %d off route; all cars: %d, worst %.3f m, "
-             "%d off route; parts applied %d late %d; people at join: %d of %d on the host's leg, %.2f/%.2f/%.1f m (median/90%%/worst) "
+             "%d off route; parts applied %d late %d; people caught up over %d frames (at most %.0f ms a frame, with its steps): %d of %d on the host's leg, %.2f/%.2f/%.1f m (median/90%%/worst) "
              "(not caught up: %d, %.1f/%.1f m); after %.0f s: %d, %.2f/%.2f/%.1f m",
              jr.fullBytes, jr.fullOk ? "ok" : "FAILED", jr.fullMs, jr.near.n, jr.near.worst, jr.near.routeBad, jr.all.n, jr.all.worst, jr.all.routeBad,
-             jr.applied, jr.late, jr.atJoin.same, jr.atJoin.n, jr.atJoin.med, jr.atJoin.p90, jr.atJoin.worst, jr.atJoinPlain.same, jr.atJoinPlain.med,
+             jr.applied, jr.late, jr.catchFrames, jr.catchMs, jr.atJoin.same, jr.atJoin.n, jr.atJoin.med, jr.atJoin.p90, jr.atJoin.worst, jr.atJoinPlain.same, jr.atJoinPlain.med,
              jr.atJoinPlain.p90, AFTER, jr.atEnd.same, jr.atEnd.med, jr.atEnd.p90, jr.atEnd.worst);
-    check(jr.fullOk && jr.near.n > 100 && jr.near.worst < 0.5f && jr.near.routeBad == 0 && jr.all.routeBad == 0 &&
+    check(jr.fullOk && jr.atJoin.n > 5000 && jr.catchFrames > 5 && jr.catchMs < 150 && jr.near.n > 100 && jr.near.worst < 0.5f && jr.near.routeBad == 0 && jr.all.routeBad == 0 &&
           jr.atJoin.same > jr.atJoin.n * 9 / 10 && jr.atJoin.p90 < 1.f && jr.atJoinPlain.same < jr.atJoin.n / 2 && jr.atEnd.same > jr.atEnd.n * 9 / 10,
           "shared traffic: joining mid-session", b);
 }

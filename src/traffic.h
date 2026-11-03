@@ -189,7 +189,8 @@ struct Traffic {
     // People walk their routes `steps` steps on, as the fixed steps would have taken them with nobody about (each
     // one's route is their own, see pedRoute), and are placed there. For a machine that joins a session: right after
     // init, with the steps the session has run, its people are where the host's are (bar any the skaters disturbed).
-    void catchUpPeds(long long steps, World& w);
+    // (people from..to-1 only: the catching up can be spread over frames, as each person's route is their own)
+    void catchUpPeds(long long steps, World& w, size_t from = 0, size_t to = (size_t)-1);
 
 private:
     RNG rng{20240};                    // init's draws only: nothing in update takes from a shared stream

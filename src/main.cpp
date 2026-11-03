@@ -465,11 +465,12 @@ static void syncRemotes(double now, std::vector<std::pair<std::string, Color>>& 
 
 // Everyone the traffic reacts to: this skater and every other player here, in player id order (the same order on
 // every machine, so the same players make the same traffic). Anyone on a train or in a seaplane is out of its way.
+static uint8_t gMyVehicle = netp::PlayerState::ON_FOOT;   // what this player rides (a PlayerState::Vehicle), as sent
 static std::vector<TrafficActor> trafficActors() {
-    std::vector<std::pair<uint8_t, TrafficActor>> v{{RM.myId, TrafficActor::of(P)}};
+    std::vector<std::pair<uint8_t, TrafficActor>> v;
+    if (inTraffic(gMyVehicle)) v.push_back({RM.myId, TrafficActor::of(P)});
     for (auto& r : RM.list)
-        if (r.hasPose && !r.leaving && r.cur.vehicle != netp::PlayerState::TRAIN && r.cur.vehicle != netp::PlayerState::SEAPLANE)
-            v.push_back({r.id, actorOf(r.cur)});
+        if (r.hasPose && !r.leaving && inTraffic(r.cur.vehicle)) v.push_back({r.id, actorOf(r.cur)});
     std::stable_sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     std::vector<TrafficActor> out;
     for (auto& e : v) out.push_back(e.second);
@@ -477,15 +478,17 @@ static std::vector<TrafficActor> trafficActors() {
 }
 
 // The traffic's frame. In a session, a machine that isn't the host runs it on the session clock, taking the host's
-// snapshots at their steps (TS); the host, and anyone on their own, on their own frames.
+// snapshots at their steps (TS); the host on its own clock (not the capped frame time: the session's time has to
+// keep up with real time); anyone on their own, on their own frames.
 static void advanceTraffic(float dt) {
     if (gTrafficRan) return;
     gTrafficRan = true;
     std::vector<TrafficActor> actors = trafficActors();
-    if (NET.status == Net::IN_SESSION && !NET.isHost()) {
+    if (NET.status == Net::IN_SESSION) {
         T.beginFrame();
         float alpha;
-        if (TS.step(T, W, actors, GetTime(), &alpha) >= 0) { T.endFrame(alpha, dt, W, P); return; }
+        int n = NET.isHost() ? TS.hostStep(T, W, actors, GetTime(), &alpha) : TS.step(T, W, actors, GetTime(), &alpha);
+        if (n >= 0) { T.endFrame(alpha, dt, W, P); return; }
     }
     T.advance(dt, W, P, actors);
 }
@@ -497,8 +500,9 @@ static void syncTraffic(double now) {
     static uint8_t host = 0;
     static Every carTimer{TrafficSync::INTERVAL};
     static std::vector<std::pair<uint8_t, double>> lastFull;   // who was sent one, when
-    if (NET.status != Net::IN_SESSION) {
-        if (host) { TS.reset(); T.acc = 0; host = 0; }
+    static std::vector<uint8_t> waiting;                        // asked again while one was on its way
+    if (NET.status != Net::IN_SESSION) {   // (out of the session, or never in one): on our own again
+        if (host) { TS.reset(); T.acc = 0; host = 0; lastFull.clear(); waiting.clear(); carTimer.reset(); }
         return;
     }
     if (NET.hostId != host) {
@@ -515,16 +519,21 @@ static void syncTraffic(double now) {
             for (auto& r : NET.remotes) if (r.hasState) others.push_back({r.state.x, r.state.y, r.state.z});
             for (auto& m : TrafficSync::snapshot(T, others, NET.rttMs)) NET.sendCarSnapshot(m, now);
         }
-        for (uint8_t id : NET.fullRequests) {
+        for (uint8_t id : NET.fullRequests)
+            if (std::find(waiting.begin(), waiting.end(), id) == waiting.end()) waiting.push_back(id);
+        NET.fullRequests.clear();
+        for (size_t k = 0; k < waiting.size();) {
+            uint8_t id = waiting[k];
             auto it = std::find_if(lastFull.begin(), lastFull.end(), [&](const auto& e) { return e.first == id; });
-            if (it != lastFull.end() && now - it->second < 3) continue;   // (one on its way)
+            if (!NET.remote(id)) { waiting.erase(waiting.begin() + k); continue; }   // (gone)
+            if (it != lastFull.end() && now - it->second < 3) { k++; continue; }     // one just went: this one after it
+            waiting.erase(waiting.begin() + k);
             if (it == lastFull.end()) lastFull.push_back({id, now}); else it->second = now;
             std::vector<uint8_t> full;
             T.serializeFull(full);
             NET.sendFull(id, full, now);
             TraceLog(LOG_INFO, "SFSKATE: net: full snapshot (%zu B) to player %u", full.size(), (unsigned)id);
         }
-        NET.fullRequests.clear();
         return;
     }
     for (auto& in : NET.carInbox) TS.onCarSnapshot(in.m, in.recvAt, NET.rttMs, T);
@@ -889,6 +898,8 @@ int main(int argc, char** argv) {
         float dt = std::min(GetFrameTime(), 1.f / 30.f);
         float now = (float)GetTime();
         gTrafficRan = false;
+        gMyVehicle = JS.riding ? netp::PlayerState::JETSKI : SP.riding ? netp::PlayerState::SEAPLANE
+                   : ride.on ? netp::PlayerState::TRAIN : netp::PlayerState::ON_FOOT;
         int sw = GetScreenWidth(), sh2 = GetScreenHeight();
 
         if (autotest && getenv("SFSKATE_RIDE")) { // test hook: ride the train south and take a few shots
@@ -1236,9 +1247,9 @@ int main(int argc, char** argv) {
         } else if (title) {
             advanceTraffic(dt);
         }
-        // a session's traffic is everyone's: on a machine that follows the host it runs on whatever this one is doing
-        // (paused, on the map), or it would fall behind the session clock
-        if (NET.status == Net::IN_SESSION && !NET.isHost() && TS.synced) advanceTraffic(dt);
+        // a session's traffic is everyone's: it runs on whatever this machine is doing (paused, on the map), or the
+        // session clock would stop with it (on the host) or leave it behind (anyone else)
+        if (NET.status == Net::IN_SESSION) advanceTraffic(dt);
         // sounds
         if (P.evPop) S.play(S.pop, 0.8f, 1.0f + GetRandomValue(-10, 10) / 100.f);
         if (P.evLand) S.play(S.land, 0.9f);
@@ -1679,10 +1690,10 @@ int main(int argc, char** argv) {
             }
             std::vector<std::pair<std::string, Color>> toasts;
             syncRemotes(tn, toasts);
-            syncTraffic(tn);
             netLogCars();
             for (auto& t : toasts) P.say(t.first, t.second, "Multiplayer");
         }
+        syncTraffic(GetTime());   // (also after the session ends, to go back to traffic of our own)
         if (gFakeNet || !RM.empty()) {
             double rn = gFakeNet && autotest ? atFrame / 60.0 : GetTime();   // the autotest steps a fixed 60 Hz clock, for repeatable shots
             if (gFakeNet) fakeRemotes(rn, P.pos);

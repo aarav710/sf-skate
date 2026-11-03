@@ -20,7 +20,7 @@ double SlewedOffset::at(double local) {
     if (last > -1e17) {
         double dt = std::max(0.0, local - last);
         double d = target - cur;
-        if (fabs(d) > SNAP) cur = target;
+        if (d > SNAP || d < -BACK_SNAP) cur = target;
         else cur += std::clamp(d, -SLEW * dt, SLEW * dt);
     }
     last = std::max(last, local);
@@ -37,9 +37,10 @@ void SessionClock::sample(double simTime, double recvAt, double hostRttMs, doubl
     std::vector<double> v(seen.begin(), seen.end());
     std::sort(v.begin(), v.end());
     // the median arrival offset: a late packet or two moves it less than the mean, and it doesn't hang on the one
-    // quickest packet the way the earliest does. The spread below it is how late a snapshot gets here.
+    // quickest packet the way the earliest does. The spread below it is how late snapshots get here.
     double med = v[v.size() / 2];
-    margin = std::clamp(med - v[0] + 0.02, MARGIN_MIN, MARGIN_MAX);
+    // (the 10th percentile, not the earliest: one packet held up by a wifi hiccup mustn't pull the traffic back)
+    margin = std::clamp(med - v[v.size() / 10] + 0.02, MARGIN_MIN, MARGIN_MAX);
     traffic.aim(med - margin);
     session.aim(med + std::max(oneWay, 0.0));
 }
@@ -117,7 +118,10 @@ bool TrafficSync::onFull(Traffic& T, World& w, const uint8_t* data, size_t n) {
     // from the start again, so the people (not in the snapshot) can be walked on from where the host's started
     T.init(w, sd);
     if (!T.applyFull(data, n)) { bad++; return false; }
-    T.catchUpPeds(std::min(stepOf(st), CATCHUP_MAX), w);
+    // the people catch up over the next frames (CATCHUP_WORK a frame), rather than in one long freeze
+    pedSteps_ = std::min(stepOf(st), CATCHUP_MAX);
+    pedNext_ = 0;
+    pedEnd_ = T.peds.size();
     synced = true;
     wantFull = false;
     pending_.clear();
@@ -131,13 +135,32 @@ bool TrafficSync::shouldAsk(double now) {
     return true;
 }
 
+void TrafficSync::catchUp(Traffic& T, World& w) {
+    if (pedNext_ >= pedEnd_ || pedSteps_ <= 0) return;
+    size_t n = (size_t)std::max(1LL, CATCHUP_WORK / pedSteps_);
+    size_t to = std::min(pedEnd_, pedNext_ + n);
+    T.catchUpPeds(pedSteps_, w, pedNext_, to);
+    pedNext_ = to;
+}
+
 int TrafficSync::step(Traffic& T, World& w, const std::vector<TrafficActor>& actors, double now, float* alpha) {
     if (!synced || !clock.valid()) return -1;
+    catchUp(T, w);
     double target = clock.trafficTime(now);
     long long cur = stepOf(T.simTime), want = (long long)floor(target / (double)Traffic::STEP);
     // far out of step (a long hitch, the host's clock somewhere else): rather than run hundreds of steps, ask for
     // the host's traffic again, and catch up at MAX_STEPS a frame meanwhile
     if (fabs((double)(want - cur) * Traffic::STEP) > RESYNC && !wantFull) { wantFull = true; askedAt = -1e18; }
+    return runTo(T, w, actors, target, alpha);
+}
+
+int TrafficSync::hostStep(Traffic& T, World& w, const std::vector<TrafficActor>& actors, double now, float* alpha) {
+    if (!anchored_ || (now + anchor_ - T.simTime) > RESYNC) { anchor_ = T.simTime - now; anchored_ = true; }
+    return runTo(T, w, actors, now + anchor_, alpha);
+}
+
+int TrafficSync::runTo(Traffic& T, World& w, const std::vector<TrafficActor>& actors, double target, float* alpha) {
+    long long cur = stepOf(T.simTime), want = (long long)floor(target / (double)Traffic::STEP + 1e-6);
     int n = (int)std::clamp(want - cur, 0LL, (long long)Traffic::MAX_STEPS);
     bool honk = false;
     for (int k = 0; k < n; k++) {

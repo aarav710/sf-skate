@@ -9,9 +9,11 @@
 #include <map>
 
 // An offset from our clock to another one that changes smoothly: toward its target at most SLEW s per s (so a clock
-// read through it runs 5% fast or slow, never backwards), or in one jump when it's more than SNAP off.
+// read through it runs 5% fast or slow, never backwards). It jumps ahead when it's more than SNAP behind, but only
+// jumps back when it's more than BACK_SNAP ahead: a clock that steps back stops the traffic for that long, while one
+// a little ahead only means the snapshots of the next few seconds come in too late to use.
 struct SlewedOffset {
-    static constexpr double SLEW = 0.05, SNAP = 0.25;
+    static constexpr double SLEW = 0.05, SNAP = 0.25, BACK_SNAP = 5.0;
     double cur = 0, target = 0, last = 0;
     bool valid = false;
     void aim(double t);              // a new target (the first one is taken at once)
@@ -44,7 +46,9 @@ public:
     static constexpr double INTERVAL = 0.1;       // 10 a second
     static constexpr double RESYNC = 5.0;         // further off the session clock than this: ask for a full snapshot
     static constexpr double ASK_EVERY = 10.0;     // asking again while one doesn't come
-    static constexpr long long CATCHUP_MAX = 20 * 60 * 60;   // people catch up on at most 20 min of steps (~0.5 s)
+    static constexpr long long CATCHUP_MAX = 20 * 60 * 60;   // people catch up on at most 20 min of steps
+    static constexpr long long CATCHUP_WORK = 3000000;       // person-steps of catching up a frame (~10 ms): 5 min of
+                                                             // session in ~0.3 s of frames, 20 min in ~1.5 s
 
     // --- host
     // the cars within R_SYNC of any of `others`, nearest one first, at most MAX_CARS
@@ -68,6 +72,12 @@ public:
     // snapshot applied right at the step it was taken at. *alpha: how far the frame is into the next step, for
     // Traffic::endFrame. Returns the steps run; -1 if there's no clock yet (the caller runs T on its own frames).
     int step(Traffic& T, World& w, const std::vector<TrafficActor>& actors, double now, float* alpha);
+    // A frame on the host: its traffic time is the session clock, and it runs at the rate of our clock `now` (not
+    // the game's frame time, which is capped for slow frames), at most MAX_STEPS a frame, so a slow or hitching host
+    // catches up instead of slowing everyone's clock down. More than RESYNC behind (a long stall), it gives up on
+    // the backlog: the clock steps back and the others take a full snapshot again.
+    int hostStep(Traffic& T, World& w, const std::vector<TrafficActor>& actors, double now, float* alpha);
+    long long pedsOwed() const { return pedNext_ < pedEnd_ ? pedSteps_ : 0; }
     void hostChanged();         // the old host's snapshots go, and the clock starts over from the new one's
     void reset() { *this = TrafficSync(); }
     size_t pending() const { return pending_.size(); }
@@ -75,11 +85,20 @@ public:
 private:
     std::map<long long, std::vector<netp::MsgCarSnapshot>> pending_;   // by the step they were taken at
     long long lastApplied_ = -1;
+    bool anchored_ = false;
+    double anchor_ = 0;          // host: traffic time minus our clock
+    long long pedSteps_ = 0;     // people still to catch up by this many steps: from pedNext_ to pedEnd_
+    size_t pedNext_ = 0, pedEnd_ = 0;
     void applyDue(Traffic& T);
+    int runTo(Traffic& T, World& w, const std::vector<TrafficActor>& actors, double target, float* alpha);
+    void catchUp(Traffic& T, World& w);
 };
 
 // another player as the traffic sees them, from the state they sent (as TrafficActor::of for the local skater)
 TrafficActor actorOf(const netp::PlayerState& s);
+// whether a player riding this (a PlayerState::Vehicle) is in the traffic's way: not on a train or in a seaplane. The
+// same test for this player and every other one, so all machines have the same actors.
+inline bool inTraffic(uint8_t vehicle) { return vehicle != netp::PlayerState::TRAIN && vehicle != netp::PlayerState::SEAPLANE; }
 
 // the step a traffic time falls on (simTime is a whole number of steps, added up in doubles)
 inline long long stepOf(double simTime) { return llround(simTime / (double)Traffic::STEP); }

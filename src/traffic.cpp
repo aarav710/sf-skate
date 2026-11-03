@@ -2245,9 +2245,9 @@ bool Traffic::applyTrains(const uint8_t* data, size_t size) {
     return true;
 }
 
-void Traffic::catchUpPeds(long long steps, World& w) {
+void Traffic::catchUpPeds(long long steps, World& w, size_t from, size_t to) {
     if (steps <= 0) return;
-    for (size_t pi = 0; pi < peds.size(); pi++) {
+    for (size_t pi = from; pi < std::min(to, peds.size()); pi++) {
         Ped& p = peds[pi];
         if (p.mode == 3) continue;   // sitting: never moves
         // one person at a time, all their steps (the same calls the steps make for someone nobody's near)

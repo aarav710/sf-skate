@@ -647,6 +647,25 @@ static void limitChecks() {
     bool heldBack = guesser->last(e2) && e2.code == ERR_SLOW_DOWN;
     snprintf(b, sizeof b, "wrong codes: %d answered \"no session\", %d \"%s\"; the right one right after held back %d", noSess, slow, errorText(ERR_SLOW_DOWN), (int)heldBack);
     check(noSess == 10 && slow >= 3 && heldBack, "limits: wrong codes per address (live)", b);
+    {   // a friend on that address gets back into their session all the same; a rejoin there tells nothing of codes
+        MsgRejoin rj; rj.code = std::string(5, 'Q') + CODE_ALPHABET[0] == made0.code ? "ZZZZZZ" : std::string(5, 'Q') + CODE_ALPHABET[0];
+        rj.playerId = 1; rj.secret = 12345;
+        guesser->got.clear();
+        guesser->send(pack(rj), CH_RELIABLE);
+        pump([&] { return !guesser->got.empty(); }, 10);
+        MsgError e3;
+        bool noOracle = guesser->last(e3) && e3.code == ERR_REJOIN_EXPIRED;
+        RawClient* fr = add();
+        pump([&] { return fr->connected; }, 10);
+        MsgRejoin mine; mine.code = made0.code; mine.playerId = made0.playerId; mine.secret = made0.secret;
+        fr->send(pack(mine), CH_RELIABLE);   // (maker's place: its connection is taken over)
+        pump([&] { return fr->count(MSG_WELCOME) || fr->count(MSG_ERROR); }, 10);
+        MsgWelcome wb;
+        bool back = fr->last(wb) && wb.playerId == made0.playerId;
+        snprintf(b, sizeof b, "address out of tries: a rejoin to an unknown code says \"%s\"; the right rejoin gets player %u back %d",
+                 errorText(e3.code), (unsigned)wb.playerId, (int)back);
+        check(noOracle && back, "limits: rejoins on a guessing address", b);
+    }
 
     // what's sent on counts once per player it goes to: a client flooding a room of 4 with states gets cut off at its
     // send-on budget (10 KB/s here); each car hit and weather change still goes through a flood of dodges
@@ -1147,6 +1166,24 @@ static void sessionChecks() {
     snprintf(b, sizeof b, "B dropped: reconnecting %d; A sees it away after %.2fs, back after %.2fs more, id %u kept %d; then a %zu KB full snapshot "
              "(asked after %.2fs) arrived whole %d", (int)reconnecting, tAway, tBack, (unsigned)bId, (int)same, data.size() / 1024, tReq, (int)fullOk);
     check(bIn && reconnecting && tAway >= 0 && tBack >= 0 && same && fullOk, "session: reconnect keeps the player", b);
+    {   // the weather changes while B is away (the relay passes it only to those there): B gets it on coming back
+        MsgWorldSettings w0; w0.preset = 0;
+        A.setWorld(w0, nowSec());
+        pump([&] { return B.worldSet && B.world == w0; }, 5);
+        B.dropConnection();
+        pump([&] { return A.remote(bId) && A.remote(bId)->away; }, 10);
+        MsgWorldSettings w1; w1.preset = 2; w1.flags = MsgWorldSettings::F_RAIN;
+        A.setWorld(w1, nowSec());
+        B.setWorld(w0, nowSec());   // (pressed while reconnecting: goes nowhere)
+        bool stale = B.world == w0;
+        B.worldIn = false;
+        double tW = pump([&] { return B.status == Net::IN_SESSION && B.worldIn && B.world == w1; }, 15);
+        pump([&] { return false; }, 0.3);
+        snprintf(b, sizeof b, "night and rain set while B was away: B had the old ones %d, has the new ones %.2fs after dropping; A's still %d",
+                 (int)stale, tW, (int)(A.world == w1));
+        check(stale && tW >= 0 && A.world == w1 && B.world == w1, "session: weather changed while away reaches the player", b);
+        B.rejoined = false;
+    }
 
     // the host drops: B hosts as soon as the relay notices (not after the 30 s hold), and A comes back as a member
     uint8_t aId = A.myId;

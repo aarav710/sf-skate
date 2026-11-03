@@ -142,6 +142,7 @@ void Net::endSession() {
     secret_ = 0;
     justCreated = rejoined = false;
     endsIn = endsAt = -1;
+    rttMs = -1;
 }
 
 void Net::leave() {
@@ -372,6 +373,7 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
         netp::MsgError m;
         if (!netp::unpack(data, n, m)) { fail("Relay error"); return; }
         if (status == RECONNECTING && m.code == netp::ERR_NO_SESSION) { fail("The session has ended"); return; }
+        if (status == RECONNECTING && m.code == netp::ERR_SLOW_DOWN) { closeConnection(false); return; }   // (busy: the next try goes at nextTry_)
         fail(m.text.empty() ? netp::errorText(m.code) : m.text);
         return;
     }
@@ -380,6 +382,8 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
         if (status != IN_SESSION || !netp::unpack(data, n, m)) return;
         for (auto& r : remotes)
             if (r.id == m.id && r.away != m.away) { r.away = m.away; log.push_back(r.name + (m.away ? " lost connection" : " is back")); }
+        // back: the session's weather may have changed while they were away (the relay only passes it to those there)
+        if (!m.away && isHost() && worldSet) send(netp::pack(world, myId, seq_++, clock(now)), netp::CH_RELIABLE);
         return;
     }
     case netp::MSG_SESSION_ENDING: {

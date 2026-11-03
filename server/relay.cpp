@@ -263,6 +263,9 @@ void Relay::onReceive(ENetPeer* peer, const uint8_t* data, size_t n) {
         fullAnswer = it != peers_.end() && rooms.idOf(key) == r->host && to->peer != key && it->second.wantsFull && it->second.fullLeft > 0 &&
                      netp::unpack(data, n, full);
     }
+    // (a chunk nobody's waiting for, from a host whose player has gone or got one already, is dropped below: it doesn't
+    // eat into the host's allowance for what it sends next)
+    if (type == netp::MSG_FULL_SNAPSHOT && !fullAnswer) return;
     if (!fullAnswer && !pi.rl.allow(n + 28, now)) {   // + UDP/IP overhead
         pi.dropped++;
         if (now - pi.lastDropLog > 5) {
@@ -310,7 +313,11 @@ void Relay::onReceive(ENetPeer* peer, const uint8_t* data, size_t n) {
         if (re ? !netp::unpack(data, n, mr) : !netp::unpack(data, n, mj)) { sendError(peer, netp::ERR_BAD_REQUEST); return; }
         const std::string& rawCode = re ? mr.code : mj.code;
         std::string shown = netp::normalizeCode(rawCode);   // never echo raw client bytes into the log
-        if (!tries.allow(pi.ip, now)) {   // (guessing codes)
+        // (guessing codes) A rejoin goes through anyway: it carries a 64-bit secret, and a player on the same address as
+        // a guesser mustn't lose their session. With the address out of tries, a failed one only says "expired", so it
+        // can't be used to tell which codes exist.
+        bool outOfTries = !tries.allow(pi.ip, now);
+        if (outOfTries && !re) {
             logf("%s %s from %s refused: too many tries", re ? "rejoin" : "join", shown.empty() ? "(bad code)" : shown.c_str(), addrText(peer).c_str());
             sendError(peer, netp::ERR_SLOW_DOWN);
             return;
@@ -319,6 +326,7 @@ void Relay::onReceive(ENetPeer* peer, const uint8_t* data, size_t n) {
                            : rooms.join(key, mj.code, mj.version, mj.fingerprint, mj.name);
         if (jr.error) {
             if (jr.error == netp::ERR_NO_SESSION || jr.error == netp::ERR_REJOIN_EXPIRED) tries.failed(pi.ip, now);
+            if (outOfTries && jr.error == netp::ERR_NO_SESSION) jr.error = netp::ERR_REJOIN_EXPIRED;
             logf("%s %s from %s refused: %s", re ? "rejoin" : "join", shown.empty() ? "(bad code)" : shown.c_str(), addrText(peer).c_str(), netp::errorText(jr.error));
             sendError(peer, jr.error);
             return;

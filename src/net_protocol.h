@@ -490,6 +490,7 @@ struct FullAssembler {
     // true when `m` completes the snapshot: then `out` has it, and the assembler is empty again
     bool add(const MsgFullSnapshot& m, std::vector<uint8_t>& out) {
         if (m.total == 0 || m.total > MsgFullSnapshot::MAX_SIZE || m.index >= m.count ||
+            m.count != (m.total + MsgFullSnapshot::FULL_CHUNK - 1) / MsgFullSnapshot::FULL_CHUNK ||
             m.data.size() != MsgFullSnapshot::chunkSize(m.total, m.index, m.count)) return false;
         if (!active || m.snapId != snapId || m.count != count || m.total != total) {
             reset();

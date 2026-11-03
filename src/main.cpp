@@ -451,6 +451,7 @@ static void syncRemotes(double now, std::vector<std::pair<std::string, Color>>& 
             RemotePlayer* r = RM.find(ri.id);
             if (r && !r->leaving) continue;
             RemotePlayer& j = RM.join(ri.id, ri.name);
+            j.away = ri.away;   // (someone already reconnecting when we joined: shown so, no toast)
             if (wasIn) toasts.push_back({ri.name + " joined", j.look.tag});
             changed = true;
         }
@@ -599,7 +600,7 @@ static void syncTraffic(double now) {
         for (size_t k = 0; k < waiting.size();) {
             uint8_t id = waiting[k];
             auto it = std::find_if(lastFull.begin(), lastFull.end(), [&](const auto& e) { return e.first == id; });
-            if (!NET.remote(id)) { waiting.erase(waiting.begin() + k); continue; }   // (gone)
+            if (!NET.remote(id) || NET.remote(id)->away) { waiting.erase(waiting.begin() + k); continue; }   // (gone: back, they ask again)
             if (it != lastFull.end() && now - it->second < 3) { k++; continue; }     // one just went: this one after it
             waiting.erase(waiting.begin() + k);
             if (it == lastFull.end()) lastFull.push_back({id, now}); else it->second = now;
@@ -1177,6 +1178,10 @@ int main(int argc, char** argv) {
                     showMap = false;
                 }
             }
+        }
+        if (NET.status == Net::RECONNECTING && worldNow() != worldBefore) {   // (nobody to ask, or to tell: they wait)
+            setWorldVars(worldShown);
+            P.say("Reconnecting...", {255, 150, 110, 255}, "The time of day and the weather wait till you're back");
         }
         if (asking) {
             if (worldNow() != worldBefore) {

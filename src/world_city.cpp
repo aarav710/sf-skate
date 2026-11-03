@@ -143,15 +143,15 @@ void World::buildRoads(const Grid& g, int style) {
                     // double yellow center line
                     Vector2 a2 = Vector2Add(a, Vector2Scale(dir, 13)), b2 = Vector2Subtract(b, Vector2Scale(dir, 13));
                     roadStrip(*this, Vector2Add(a2, Vector2Scale(right, 0.15f)), Vector2Add(b2, Vector2Scale(right, 0.15f)),
-                              0.06f, 0.06f, 0, 0.1f, yellow, 8.f);
+                              0.06f, 0.06f, 0, 0.12f, yellow, 8.f);
                     roadStrip(*this, Vector2Subtract(a2, Vector2Scale(right, 0.15f)), Vector2Subtract(b2, Vector2Scale(right, 0.15f)),
-                              0.06f, 0.06f, 0, 0.1f, yellow, 8.f);
+                              0.06f, 0.06f, 0, 0.12f, yellow, 8.f);
                 }
                 // crosswalk where this street leaves the intersection
                 for (float l = -5.6f; l <= 5.61f; l += 1.4f) {
                     Vector2 c0 = Vector2Add(a, Vector2Add(Vector2Scale(dir, 8.5f), Vector2Scale(right, l)));
                     Vector2 c1 = Vector2Add(c0, Vector2Scale(dir, 2.6f));
-                    roadStrip(*this, c0, c1, 0.3f, 0.3f, 0, 0.11f, white, 3.f);
+                    roadStrip(*this, c0, c1, 0.3f, 0.3f, 0, 0.13f, white, 3.f);
                 }
             }
         }
@@ -163,9 +163,9 @@ void World::buildMarket() {
     Vector2 d = Vector2Normalize(Vector2Subtract(b, a)), r = {-d.y, d.x};
     Color rail = col(110, 110, 115, M_GROUND), yellow = col(225, 190, 60, M_GROUND);
     for (float l : {-3.75f, -2.25f, 2.25f, 3.75f})
-        roadStrip(*this, Vector2Add(a, Vector2Scale(r, l)), Vector2Add(b, Vector2Scale(r, l)), 0.06f, 0.06f, 0, 0.1f, rail, 8.f);
-    roadStrip(*this, Vector2Add(a, Vector2Scale(r, 0.2f)), Vector2Add(b, Vector2Scale(r, 0.2f)), 0.07f, 0.07f, 0, 0.1f, yellow, 8.f);
-    roadStrip(*this, Vector2Subtract(a, Vector2Scale(r, 0.2f)), Vector2Subtract(b, Vector2Scale(r, 0.2f)), 0.07f, 0.07f, 0, 0.1f, yellow, 8.f);
+        roadStrip(*this, Vector2Add(a, Vector2Scale(r, l)), Vector2Add(b, Vector2Scale(r, l)), 0.06f, 0.06f, 0, 0.125f, rail, 8.f);
+    roadStrip(*this, Vector2Add(a, Vector2Scale(r, 0.2f)), Vector2Add(b, Vector2Scale(r, 0.2f)), 0.07f, 0.07f, 0, 0.125f, yellow, 8.f);
+    roadStrip(*this, Vector2Subtract(a, Vector2Scale(r, 0.2f)), Vector2Subtract(b, Vector2Scale(r, 0.2f)), 0.07f, 0.07f, 0, 0.125f, yellow, 8.f);
     // lamps along both sides
     float L = Vector2Distance(a, b);
     for (float s = 15; s < L - 10; s += 30)

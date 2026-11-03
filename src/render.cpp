@@ -46,16 +46,20 @@ uniform mat4 mvp;
 uniform vec3 camPos;
 out vec3 vRel;   // position relative to the camera: precise enough for face normals right up at the lens
 out vec4 vCol;
-#if !FAR
-in vec2 vertexTexCoord;
 in vec4 vertexNormal;
+#if FAR
+out vec3 vN;    // normal (length 2 when given explicitly): no height, the contact shadow is a near-pass effect
+#else
+in vec2 vertexTexCoord;
 out vec4 vNH;   // normal (length 2 when given explicitly), height above the bare ground
 #endif
 void main() {
     vec3 wPos = chunkPos();
     vRel = wPos - camPos;
     vCol = instOn == 1 ? instCol : vertexColor;
-#if !FAR
+#if FAR
+    vN = vertexNormal.xyz * (vertexNormal.w > 0.5 ? 2.0 : 1.0);
+#else
     vNH = vec4(vertexNormal.xyz * (vertexNormal.w > 0.5 ? 2.0 : 1.0), vertexTexCoord.x);
 #endif
     gl_Position = mvp * vec4(wPos, 1.0);
@@ -64,7 +68,9 @@ void main() {
 static const char* CITY_FS = GOLDEN_FN R"(
 in vec3 vRel;
 in vec4 vCol;
-#if !FAR
+#if FAR
+in vec3 vN;
+#else
 in vec4 vNH;
 #endif
 uniform vec3 camPos;
@@ -203,6 +209,9 @@ vec3 fogColor(vec3 V) {
     return fc;
 }
 
+// night-lit windows: warm lamps, neutral and cool office light
+vec3 lampTint(float tone) { return tone < 0.55 ? vec3(1.0, 0.76, 0.48) : (tone < 0.8 ? vec3(0.95, 0.87, 0.72) : vec3(0.7, 0.84, 1.0)); }
+
 // ---- ground: asphalt cracks and patches, paving joints, grass variation (picked by the ground color)
 vec3 groundDetail(vec3 base, vec2 p, float near) {
     float lum = dot(base, vec3(0.3, 0.59, 0.11));
@@ -251,9 +260,14 @@ void main() {
     vec3 N = Ng;
     bool given = false;
     float ao = 1.0;
-#if !FAR
+    // the far pass takes the same vertex normals (a leaf or a facet a few pixels across shades from derivatives
+    // like a random normal and sparkles), so it shades like the near pass at the seam
     if (useVN == 1) {
+#if FAR
+        vec3 vn = vN;
+#else
         vec3 vn = vNH.xyz;
+#endif
         float L = length(vn);
         if (L > 0.1) {
             given = L > 1.5;
@@ -261,11 +275,12 @@ void main() {
             if (!given && dot(vn, Ng) < 0.0) vn = -vn;
             N = vn;
         }
-        // contact shadow where walls, trunks, poles and parked cars meet the ground
+#if !FAR
+        // contact shadow where walls, trunks, poles and parked cars meet the ground (gone by 190 m)
         if (!given && m != 10)
             ao = mix(1.0, 0.52 + 0.48 * smoothstep(0.0, 1.5, vNH.w), (1.0 - abs(Ng.y)) * clamp(1.6 - dist / 120.0, 0.0, 1.0));
-    }
 #endif
+    }
     vec3 base = vCol.rgb;
     vec3 emis = vec3(0.0);
     float specK = 0.0, specP = 32.0, bloom = 0.0, emisBloom = 0.8;
@@ -276,7 +291,11 @@ void main() {
         float n = vnoise(wPos.xz * 0.8) * 0.5 + vnoise(wPos.xz * 0.11) * 0.5;
         base *= mix(1.0, 0.84 + 0.32 * n, 0.35);
 #else
-        base = groundDetail(base, wPos.xz, near);
+        // the fine detail fades into the far pass's coarse tone over the last 80 m, so no ring shows at 250 m
+        float n = vnoise(wPos.xz * 0.8) * 0.5 + vnoise(wPos.xz * 0.11) * 0.5;
+        vec3 coarse = base * mix(1.0, 0.84 + 0.32 * n, 0.35);
+        float gk = 1.0 - smoothstep(170.0, 250.0, dist);
+        base = gk > 0.0 ? mix(coarse, groundDetail(base, wPos.xz, near), gk) : coarse;
 #endif
     } else if (m == 1 || m == 2 || m == 6 || (m >= 7 && m <= 9)) {   // facades with windows
         if (abs(Ng.y) < 0.45) {
@@ -289,13 +308,16 @@ void main() {
             vec2 f = vec2(fract(u / fw), fract(y / fh));
             // how big one window cell is on screen: fade the pattern out before it turns into speckle
             float px = max(fwidth(u / fw), fwidth(y / fh));
-            float detail = house ? clamp(1.6 - px * 7.0, 0.0, 1.0) : 1.0;
+            // towers have thinner mullions (0.15-0.3 m), so they fade out sooner than houses do
+            float detail = clamp(house ? 1.45 - px * 8.5 : (m == 6 ? 1.6 - px * 12.0 : 2.0 - px * 10.0), 0.0, 1.0);
             vec3 plain = base;
+            vec2 bld = floor(wPos.xz / 23.0);
+            float litP = 0.2 + 0.2 * h21(bld * 3.17 + 0.5);
             bool win;
             bool trimmed = false;
             if (house) {                                // tall sash windows, white surround, hood, sill, meeting rail
                 win = f.x > 0.31 && f.x < 0.69 && f.y > 0.27 && f.y < 0.83;
-                bool rail = win && abs(f.y - 0.55) < 0.014;
+                bool rail = win && abs(f.y - 0.55) < 0.014 && px < 0.03;   // a 4 cm bar: gone once it is under a pixel
                 trimmed = rail || (f.x > 0.25 && f.x < 0.75 && f.y > 0.2 && f.y < 0.89 && !win) || f.y < 0.035;
                 if (rail) win = false;
             } else if (m == 1) win = f.x > 0.1 && f.x < 0.9 && f.y > 0.3 && f.y < 0.92;
@@ -308,10 +330,8 @@ void main() {
                 specK = 0.7; specP = 70.0;
                 // lit at night: each building (a 23 m cell) lights 20-40% of its windows, in its own mix of warm
                 // lamps, neutral and cool office light, kept dim enough not to burn out into white
-                vec2 bld = floor(wPos.xz / 23.0);
-                if (h21(cell + bld * 7.13) < 0.2 + 0.2 * h21(bld * 3.17 + 0.5)) {
-                    float tone = h21(bld * 5.3 + vec2(cell.y * 0.37, 0.0));
-                    vec3 tint = tone < 0.55 ? vec3(1.0, 0.76, 0.48) : (tone < 0.8 ? vec3(0.95, 0.87, 0.72) : vec3(0.7, 0.84, 1.0));
+                if (h21(cell + bld * 7.13) < litP) {
+                    vec3 tint = lampTint(h21(bld * 5.3 + vec2(cell.y * 0.37, 0.0)));
                     emis = tint * (0.3 + 0.4 * h21(cell * 1.7)) * lightsOn() * (m == 6 ? 0.85 : 1.0);
                     emisBloom = 0.45;
                 }
@@ -344,6 +364,21 @@ void main() {
                 vec3 avg = plain * 0.62 + vec3(0.17, 0.2, 0.25) * 0.21 + vec3(0.94, 0.92, 0.86) * 0.17;
                 base = mix(avg, base, detail);
                 specK *= detail;
+            } else if (detail < 1.0) {
+                // the same for towers: the average of wall and glass, with the glass's share of the shine and of the
+                // lit windows (one tint per building), so the grid fades instead of crawling and sparkling
+                float wf = m == 1 ? 0.496 : 0.88;
+                float fresA = pow(1.0 - abs(dot(Ng, V)), 2.0);
+                vec3 glassA = m == 6 ? mix(plain * 0.6, skyCol, 0.3 + 0.5 * fresA)
+                                     : mix(vec3(0.14, 0.2, 0.27), skyCol, 0.25 + 0.55 * fresA);
+                vec3 wall = m == 6 ? plain * 0.9 : plain;
+                vec3 avg = mix(wall, mix(plain, glassA, 0.92), wf);
+                vec3 emA = lampTint(h21(bld * 5.3)) * 0.5 * lightsOn() * (m == 6 ? 0.85 : 1.0) * litP * wf;
+                base = mix(avg, base, detail);
+                specK = mix(0.7 * wf, specK, detail);
+                specP = mix(70.0, specP, detail);
+                emis = mix(emA, emis, detail);
+                emisBloom = mix(0.45, emisBloom, detail);
             }
         }
     } else if (m == 3 || m == 11) {      // water (11: the bay, with the seabed depth in vCol.r): see-through in the shallows, a mirror for the sky at a low angle
@@ -988,6 +1023,7 @@ void Renderer::staticNormals(bool on) {
     rlDrawRenderBatchActive();
     int v = on ? 1 : 0;
     SetShaderValue(city, locUseVN, &v, SHADER_UNIFORM_INT);
+    SetShaderValue(cityFar, GetShaderLocation(cityFar, "useVN"), &v, SHADER_UNIFORM_INT);
 }
 
 // ---------------------------------------------------------------- shadows

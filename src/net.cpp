@@ -17,9 +17,10 @@ bool netOptions(int argc, char** argv, NetConfig& cfg, std::string& err) {
     cfg.name = env("USER") ? env("USER") : "skater";
     cfg.create = false;
     cfg.joinCode.clear();
+    cfg.nameGiven = cfg.relayGiven = false;
     bool want = false;
-    if (env("SFSKATE_RELAY")) cfg.relay = env("SFSKATE_RELAY");
-    if (env("SFSKATE_NAME")) cfg.name = env("SFSKATE_NAME");
+    if (env("SFSKATE_RELAY")) cfg.relay = env("SFSKATE_RELAY"), cfg.relayGiven = true;
+    if (env("SFSKATE_NAME")) cfg.name = env("SFSKATE_NAME"), cfg.nameGiven = true;
     if (env("SFSKATE_JOIN")) { cfg.joinCode = env("SFSKATE_JOIN"); want = true; }
     if (env("SFSKATE_CREATE") && strcmp(env("SFSKATE_CREATE"), "0") != 0) { cfg.create = true; want = true; }
     for (int i = 1; i < argc; i++) {
@@ -28,11 +29,13 @@ bool netOptions(int argc, char** argv, NetConfig& cfg, std::string& err) {
         if (takes && i + 1 >= argc) { err = std::string(a) + " needs a value"; return false; }
         if (!strcmp(a, "--create")) { cfg.create = true; want = true; }
         else if (!strcmp(a, "--join")) { cfg.joinCode = argv[++i]; cfg.create = false; want = true; }
-        else if (!strcmp(a, "--name")) cfg.name = argv[++i];
-        else if (!strcmp(a, "--relay")) cfg.relay = argv[++i];
+        else if (!strcmp(a, "--name")) cfg.name = argv[++i], cfg.nameGiven = true;
+        else if (!strcmp(a, "--relay")) cfg.relay = argv[++i], cfg.relayGiven = true;
     }
     return want;
 }
+
+const char* defaultRelay() { return SFSKATE_RELAY; }
 
 bool parseHostPort(const std::string& s, std::string& host, uint16_t& port) {
     host = s;

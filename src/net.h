@@ -15,6 +15,7 @@ struct NetConfig {
     bool create = false;
     std::string joinCode;                   // used when !create
     uint32_t fingerprint = 0;
+    bool nameGiven = false, relayGiven = false;   // set by the options (else the defaults; the saved settings may win)
 };
 
 // Fires every `interval` on average at whatever frame rate it is polled: the next time is advanced by the
@@ -178,3 +179,5 @@ bool parseHostPort(const std::string& s, std::string& host, uint16_t& port);
 // command line (--create, --join CODE, --name NAME, --relay host:port), which wins. Returns true if a session was
 // asked for. Unknown arguments are left alone; a flag missing its value is reported in `err`.
 bool netOptions(int argc, char** argv, NetConfig& cfg, std::string& err);
+// The relay built in (make SFSKATE_RELAY=host:port), used when none is given.
+const char* defaultRelay();

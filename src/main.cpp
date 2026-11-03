@@ -16,6 +16,7 @@
 #include "net_game.h"
 #include "remote.h"
 #include "traffic_sync.h"
+#include "session_ui.h"
 #include <cstdio>
 #include <chrono>
 #include <thread>
@@ -370,9 +371,15 @@ static void drawNameTags(const Camera3D& cam, Vector3 camFwd, Vector3 me, int sw
     }
 }
 
+// Net's messages as players read them: the panel calls the relay "the server"
+static std::string plainError(std::string e) {
+    for (size_t i; (i = e.find("relay")) != std::string::npos;) e.replace(i, 5, "server");
+    return e;
+}
+
 // The session panel under the minimap: the code (small, to read out to friends), then everyone with their colour,
-// distance and who hosts. Returns its height.
-static int drawPlayerList(int x, int y, int w, Vector3 me) {
+// distance and who hosts. Returns its height. (showCode false: "PLAYERS" in its place, the code being on show already.)
+static int drawPlayerList(int x, int y, int w, Vector3 me, bool showCode = true) {
     const int row = 22;
     bool inSession = gFakeNet || NET.inSession();
     int n = inSession ? 1 : 0;
@@ -381,7 +388,7 @@ static int drawPlayerList(int x, int y, int w, Vector3 me) {
     DrawRectangle(x, y, w, h, {0, 0, 0, 140});
     const char* code = gFakeNet ? "TEST00" : NET.code.c_str();
     if (inSession) {
-        textShadow(TextFormat("SESSION %s", code), x + 10, y + 8, 18, {255, 210, 60, 255});
+        textShadow(showCode ? TextFormat("SESSION %s", code) : "PLAYERS", x + 10, y + 8, 18, {255, 210, 60, 255});
         if (NET.status == Net::RECONNECTING) {
             const char* rc = "reconnecting...";
             textShadow(rc, x + w - 10 - MeasureText(rc, 14), y + 11, 14, {255, 150, 110, 255});
@@ -391,7 +398,8 @@ static int drawPlayerList(int x, int y, int w, Vector3 me) {
         }
     } else {
         bool bad = NET.status == Net::FAILED;
-        const char* st = NET.statusText();
+        std::string stx = plainError(NET.statusText());
+        const char* st = stx.c_str();
         int fs = 16;
         while (fs > 10 && MeasureText(st, fs) > w - 20) fs--;
         textShadow(st, x + 10, y + 9, fs, bad ? Color{255, 110, 90, 255} : Color{200, 210, 230, 255});
@@ -535,6 +543,207 @@ static NetConfig gNetCfg;   // the relay and name from the options
 static void netCreate() { NetConfig c = gNetCfg; c.create = true; c.joinCode.clear(); NET.start(c, GetTime()); }
 static void netJoin(const std::string& code) { NetConfig c = gNetCfg; c.create = false; c.joinCode = code; NET.start(c, GetTime()); }
 static void netLeave() { NET.leave(); }
+
+// ---------------------------------------------------------------- PLAY WITH FRIENDS
+// The start screen's picker and the Tab picker are one box: landmarks and time of day in its left 660 px, this
+// column (create, join, the code, who's in) in its right 260.
+struct PickerBox { int x, y, w, h; };
+
+static PickerBox pickerBox(int sw, int sh, int nSpots) {
+    int h = std::max(120 + nSpots * 34, 500);
+    return {sw / 2 - 480, std::max(16, std::min(sh / 2 - 230, sh - h - 44)), 960, h};   // (short windows: up, so "Press ENTER" fits below)
+}
+
+struct FriendsPanel {
+    sui::TextField name{sui::TextField::NAME}, code{sui::TextField::CODE}, relay{sui::TextField::ADDRESS};
+    std::string path;        // ~/.sfskate
+    sui::Settings saved;
+    std::string note;        // our own message (a code that can't be one), shown where the session's status goes
+    double copiedAt = -100;
+    bool failSeen = false;   // a box was changed since the last try failed: its message is old news
+    bool* netPending = nullptr;   // the session the options asked for, not started yet: a click here replaces it
+    // where everything goes, from the column's top left
+    struct Layout { Rectangle name, create, code, join, relay, copy, leave; int x, y; };
+    static Layout layout(const PickerBox& b) {
+        float x = b.x + 680.f, y = (float)b.y;
+        Layout L;
+        L.x = (int)x; L.y = (int)y;
+        L.name = {x, y + 108, 260, 34};
+        L.create = {x, y + 154, 260, 40};
+        L.code = {x, y + 232, 164, 40};
+        L.join = {x + 172, y + 232, 88, 40};
+        L.relay = {x, y + 372, 260, 28};
+        L.copy = {x + 178, y + 110, 82, 36};
+        L.leave = {x, y + 446, 260, 40};
+        return L;
+    }
+    // the name and relay as typed into what the next session uses, and into ~/.sfskate if the player changed them
+    void commit() {
+        std::string nm = netp::sanitizeName(name.text);
+        if (name.text.empty() || nm != name.text) name.text = name.text.empty() ? gNetCfg.name : nm;
+        relay.text = sui::cleanRelay(relay.text);
+        gNetCfg.name = netp::sanitizeName(name.text);
+        gNetCfg.relay = relay.text.empty() ? defaultRelay() : relay.text;
+        if (!name.edited && !relay.edited) return;
+        if (name.edited) saved.name = gNetCfg.name;
+        if (relay.edited) saved.relay = relay.text;
+        name.edited = relay.edited = false;
+        if (!sui::saveSettings(path, saved)) TraceLog(LOG_WARNING, "SFSKATE: couldn't save %s", path.c_str());
+    }
+    void create() {
+        commit();
+        note.clear();
+        failSeen = false;
+        *netPending = false;
+        netCreate();
+    }
+    void join() {
+        commit();
+        std::string c = netp::normalizeCode(code.text);
+        if (c.empty()) { note = "Codes are 6 letters and digits 2-9 (no I, O, 0 or 1)"; return; }
+        note.clear();
+        failSeen = false;
+        *netPending = false;
+        netJoin(c);
+    }
+    void unfocus() { if (sui::focused()) { sui::focus(nullptr); commit(); } }
+};
+static FriendsPanel gFriends;
+
+// The panel's keys and clicks, before the game reads its own (the picker is open).
+static void friendsInput(const PickerBox& b) {
+    FriendsPanel& F = gFriends;
+    auto L = FriendsPanel::layout(b);
+    bool in = NET.inSession(), busy = NET.status == Net::CONNECTING || NET.status == Net::JOINING;
+    bool ctrl = sui::keyDown(KEY_LEFT_CONTROL) || sui::keyDown(KEY_RIGHT_CONTROL) || sui::keyDown(KEY_LEFT_SUPER) || sui::keyDown(KEY_RIGHT_SUPER);
+    if (in && sui::focused()) F.unfocus();   // (the boxes are gone)
+    const std::string was = F.name.text + '\n' + F.code.text + '\n' + F.relay.text;
+    struct Changed {   // (whatever way this returns: a box changed, the old message goes)
+        FriendsPanel& F; const std::string& was;
+        ~Changed() { if (F.name.text + '\n' + F.code.text + '\n' + F.relay.text != was) { F.failSeen = true; F.note.clear(); } }
+    } changed{F, was};
+    if (sui::TextField* f = sui::focused()) {
+        for (uint32_t c; (c = sui::charPressed());) f->type(c);
+        if (sui::keyRepeat(KEY_BACKSPACE)) f->backspace();
+        if (ctrl && sui::keyPressed(KEY_V)) f->paste(sui::clipboard());
+        if (sui::keyPressed(KEY_ENTER) || sui::keyPressed(KEY_KP_ENTER)) {
+            F.unfocus();
+            if (f == &F.code && !busy) F.join();
+        } else if (sui::keyPressed(KEY_ESCAPE)) F.unfocus();
+        else if (sui::keyPressed(KEY_TAB)) sui::focus(f == &F.name ? &F.code : f == &F.code ? &F.relay : &F.name);
+    } else if (!in) {   // the picker's own keys for the panel
+        if (sui::keyPressed(KEY_N)) sui::focus(&F.name);
+        else if (sui::keyPressed(KEY_J)) sui::focus(&F.code);
+        else if (ctrl && sui::keyPressed(KEY_V)) { sui::focus(&F.code); F.code.paste(sui::clipboard()); }
+        else if (sui::keyPressed(KEY_K) && !busy) F.create();
+    }
+    if (!sui::focused()) while (sui::charPressed()) {}   // (what was typed before a box had the keyboard goes nowhere)
+    if (!sui::mousePressed()) return;
+    Vector2 m = sui::mouse();
+    auto hit = [&](Rectangle r) { return CheckCollisionPointRec(m, r); };
+    if (in) {
+        if (hit(L.copy)) { sui::setClipboard(NET.code); F.copiedAt = GetTime(); }
+        if (hit(L.leave)) netLeave();
+        return;
+    }
+    sui::TextField* f = hit(L.name) ? &F.name : hit(L.code) ? &F.code : hit(L.relay) ? &F.relay : nullptr;
+    if (f != sui::focused()) { F.unfocus(); if (f) sui::focus(f); }
+    if (hit(L.create)) { if (busy) netLeave(); else F.create(); }
+    if (hit(L.join) && !busy) F.join();
+}
+
+static void drawButton(Rectangle r, const char* label, Color c, bool on = true, int fs = 22) {
+    Vector2 m = GetMousePosition();
+    bool over = on && CheckCollisionPointRec(m, r);
+    Color bg = on ? c : Color{40, 45, 60, 255};
+    if (over) bg = {(unsigned char)std::min(255, bg.r + 30), (unsigned char)std::min(255, bg.g + 30), (unsigned char)std::min(255, bg.b + 30), bg.a};
+    DrawRectangleRec(r, bg);
+    if (over) DrawRectangleLinesEx(r, 1, WHITE);
+    while (fs > 12 && MeasureText(label, fs) > r.width - 12) fs--;
+    DrawText(label, (int)(r.x + r.width / 2 - MeasureText(label, fs) / 2.f), (int)(r.y + r.height / 2 - fs / 2.f), fs, on ? WHITE : Color{150, 155, 170, 255});
+}
+
+static void drawField(Rectangle r, const sui::TextField& f, const char* placeholder, int fs) {
+    bool foc = sui::focused() == &f;
+    DrawRectangleRec(r, foc ? Color{30, 36, 52, 255} : Color{22, 26, 38, 255});
+    DrawRectangleLinesEx(r, foc ? 2 : 1, foc ? Color{255, 210, 60, 255} : Color{255, 255, 255, 70});
+    std::string t = f.text;   // the end of it, if it doesn't fit
+    while (t.size() > 1 && MeasureText(t.c_str(), fs) > r.width - 22) {
+        size_t cut = 1;
+        while (cut < t.size() && ((unsigned char)t[cut] & 0xC0) == 0x80) cut++;
+        t.erase(0, cut);
+    }
+    int ty = (int)(r.y + r.height / 2 - fs / 2.f);
+    if (foc && f.fresh && !t.empty()) DrawRectangle((int)r.x + 8, ty - 3, MeasureText(t.c_str(), fs) + 4, fs + 6, {60, 90, 150, 255});   // (selected: typing replaces it)
+    if (t.empty() && !foc) DrawText(placeholder, (int)r.x + 10, ty, fs, {120, 128, 145, 255});
+    else DrawText(t.c_str(), (int)r.x + 10, ty, fs, WHITE);
+    if (foc && fmodf((float)GetTime(), 1.f) < 0.6f) DrawRectangle((int)r.x + 12 + MeasureText(t.c_str(), fs), ty, 2, fs, {255, 210, 60, 255});
+}
+
+// a line of text broken at spaces to fit `w`; returns the y below it
+static int drawWrapped(const std::string& s, int x, int y, int w, int fs, Color c, int maxLines = 3) {
+    std::string line, word;
+    int lines = 0;
+    auto out = [&] { if (lines < maxLines) textShadow(line.c_str(), x, y + lines * (fs + 4), fs, c); lines++; line.clear(); };
+    for (size_t i = 0; i <= s.size(); i++) {
+        if (i < s.size() && s[i] != ' ') { word += s[i]; continue; }
+        std::string tryLine = line.empty() ? word : line + " " + word;
+        if (!line.empty() && MeasureText(tryLine.c_str(), fs) > w) { out(); line = word; }
+        else line = tryLine;
+        word.clear();
+    }
+    if (!line.empty()) out();
+    return y + std::min(lines, maxLines) * (fs + 4);
+}
+
+static void drawFriends(const PickerBox& b, Vector3 me) {
+    FriendsPanel& F = gFriends;
+    auto L = FriendsPanel::layout(b);
+    const Color HEAD = {255, 210, 60, 255}, MUTED = {170, 178, 195, 255};
+    int x = L.x, y = L.y;
+    DrawLine(x - 14, y + 60, x - 14, y + b.h - 20, {255, 255, 255, 40});
+    textShadow("PLAY WITH FRIENDS", x, y + 60, 18, HEAD);
+    bool in = NET.inSession() || gFakeNet, busy = NET.status == Net::CONNECTING || NET.status == Net::JOINING;
+    if (in) {
+        const char* code = gFakeNet ? "TEST00" : NET.code.c_str();
+        DrawText("SESSION CODE", x, y + 90, 15, MUTED);
+        textShadow(code, x, y + 108, 40, HEAD);
+        bool copied = GetTime() - F.copiedAt < 2;
+        drawButton(L.copy, copied ? "Copied" : "Copy", copied ? Color{70, 170, 110, 255} : Color{60, 90, 150, 255}, true, 20);
+        sui::place("copy", L.copy);
+        int ty = drawWrapped("Send friends the code. They open PLAY WITH FRIENDS here, paste it (Ctrl/Cmd+V) and click Join.",
+                             x, y + 158, 260, 15, {215, 220, 232, 255});
+        int lh = drawPlayerList(x, std::max(ty + 6, y + 222), 260, me, false);
+        (void)lh;
+        drawButton(L.leave, "Leave session", {190, 60, 55, 255});
+        sui::place("leave", L.leave);
+        return;
+    }
+    DrawText("YOUR NAME  (N)", x, y + 90, 15, MUTED);
+    drawField(L.name, F.name, "skater", 20);
+    sui::place("name", L.name);
+    drawButton(L.create, busy ? "Cancel" : "Create session  (K)", busy ? Color{150, 70, 60, 255} : Color{245, 95, 60, 255});
+    sui::place("create", L.create);
+    DrawText("JOIN A FRIEND  (J, or paste a code)", x, y + 212, 15, MUTED);
+    drawField(L.code, F.code, "CODE", 26);
+    sui::place("code", L.code);
+    drawButton(L.join, "Join", {60, 90, 150, 255}, !busy);
+    sui::place("join", L.join);
+    // what's happening (or what went wrong)
+    std::string st;
+    Color sc = {215, 220, 232, 255};
+    if (busy) st = NET.status == Net::CONNECTING ? "Connecting to the server..." : NET.statusText();
+    else if (!F.note.empty()) { st = F.note; sc = {255, 120, 100, 255}; }
+    else if (NET.status == Net::FAILED && !F.failSeen) { st = plainError(NET.error); sc = {255, 120, 100, 255}; }
+    else st = "Create a session and share its code, or type a friend's code and Join.";
+    if (busy) st[0] = (char)toupper((unsigned char)st[0]);
+    drawWrapped(st, x, y + 284, 260, 16, sc);
+    DrawText("SERVER", x, y + 354, 14, MUTED);
+    drawField(L.relay, F.relay, defaultRelay(), 16);
+    sui::place("relay", L.relay);
+    const char* hints[] = {"Click a box to type in it", "Tab  next box    Enter  done"};
+    for (int k = 0; k < 2; k++) DrawText(hints[k], x, y + 416 + k * 24, 17, {200, 205, 215, 255});
+}
 
 // Other players' events, and ours: car hits go to the host (TrafficSync), people dodging or knocked down by another
 // player do the same here, when that player is drawn there (RemotePlayer::DELAY behind what they sent).
@@ -914,10 +1123,20 @@ int main(int argc, char** argv) {
 
     BI.init(W);
     netCfg.fingerprint = worldFingerprint(W);
+    {   // the name and relay saved last time, unless the options gave them
+        gFriends.path = sui::settingsPath();
+        gFriends.saved = sui::loadSettings(gFriends.path);
+        if (!netCfg.nameGiven && !gFriends.saved.name.empty()) netCfg.name = gFriends.saved.name;
+        if (!netCfg.relayGiven && !gFriends.saved.relay.empty()) netCfg.relay = gFriends.saved.relay;
+        netCfg.name = netp::sanitizeName(netCfg.name);
+        gFriends.name.text = netCfg.name;
+        gFriends.relay.text = netCfg.relay == defaultRelay() ? "" : netCfg.relay;
+    }
     gNetCfg = netCfg;
     // (the session starts once the game runs smoothly: the first frames can take seconds, and the relay would give up
     // on a player that quiet right after they joined)
     bool netPending = netWanted;
+    gFriends.netPending = &netPending;
     double netWaitFrom = -1;
     int netSmooth = 0;
     gFakeNet = !netWanted && getenv("SFSKATE_NET_FAKE") && atoi(getenv("SFSKATE_NET_FAKE")) != 0;   // test hook
@@ -983,11 +1202,45 @@ int main(int argc, char** argv) {
     TraceLog(LOG_INFO, "SFSKATE: world ready. chunks=%d platforms=%d rails=%d cars=%d peds=%d",
              (int)W.chunks.size(), (int)W.plats.size(), (int)W.rails.size(), (int)T.cars.size(), (int)T.peds.size());
 
+    // test hook (SFSKATE_UI_SCRIPT="steps" or "@file"): drive the menus like a player (session_ui.h has the steps).
+    // `until` takes: in (in a session), players N (that many in it, us too, all seen), solo (in one, nobody else),
+    // failed, off, picker, playing
+    if (const char* us = getenv("SFSKATE_UI_SCRIPT")) {
+        std::string text = us;
+        if (us[0] == '@') {
+            text.clear();
+            if (FILE* f = fopen(us + 1, "rb")) { char b[4096]; size_t k; while ((k = fread(b, 1, sizeof b, f)) > 0) text.append(b, k); fclose(f); }
+        }
+        sui::startScript(text, [&](const std::string& cmd, const std::string& arg) {
+            if (cmd == "do" && arg == "log") {
+                TraceLog(LOG_INFO, "SFSKATE: ui: status %s code %s name \"%s\" relay \"%s\" players %d preset %d map %d picker %d title %d error \"%s\"",
+                         NET.statusText(), NET.code.c_str(), gNetCfg.name.c_str(), gNetCfg.relay.c_str(), (int)NET.remotes.size() + NET.inSession(),
+                         preset, (int)showMap, (int)picker, (int)title, NET.error.c_str());
+                return true;
+            }
+            if (cmd != "until") return false;
+            if (arg == "in") return NET.status == Net::IN_SESSION;
+            if (arg == "failed") return NET.status == Net::FAILED;
+            if (arg == "off") return NET.status == Net::OFF;
+            if (arg == "picker") return picker;
+            if (arg == "playing") return !picker && !title;
+            if (arg == "solo") return NET.inSession() && NET.remotes.empty();
+            if (!arg.compare(0, 8, "players ")) {
+                int n = NET.inSession() ? 1 : 0;
+                for (auto& r : RM.list) n += !r.leaving && r.hasPose;
+                return n >= atoi(arg.c_str() + 8);
+            }
+            return false;
+        });
+    }
+
     while (!WindowShouldClose()) {
         float dt = std::min(GetFrameTime(), 1.f / 30.f);
         float now = (float)GetTime();
         gTrafficRan = false;
         int sw = GetScreenWidth(), sh2 = GetScreenHeight();
+        sui::beginFrame();
+        if (sui::scriptQuit()) break;
 
         if (autotest && getenv("SFSKATE_RIDE")) { // test hook: ride the train south and take a few shots
             static int rf = 0;
@@ -1100,75 +1353,79 @@ int main(int argc, char** argv) {
             paused = false;
         };
         if (title) titleT += dt;
+        const PickerBox box = pickerBox(sw, sh2, (int)W.spots.size());
+        if (picker && !autotest) friendsInput(box);
+        else gFriends.unfocus();
+        SetExitKey(sui::focused() ? KEY_NULL : KEY_ESCAPE);   // (Esc in a text box leaves the box, not the game)
         if (picker && !autotest) {
             int n = (int)W.spots.size();
-            if (IsKeyPressed(KEY_DOWN) || IsKeyPressed(KEY_S)) pickIdx = (pickIdx + 1) % n;
-            if (IsKeyPressed(KEY_UP) || IsKeyPressed(KEY_W)) pickIdx = (pickIdx + n - 1) % n;
-            if (IsKeyPressed(KEY_RIGHT) || IsKeyPressed(KEY_D)) preset = (preset + 1) % 3;
-            if (IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_A)) preset = (preset + 2) % 3;
+            if (sui::gameKeyPressed(KEY_DOWN) || sui::gameKeyPressed(KEY_S)) pickIdx = (pickIdx + 1) % n;
+            if (sui::gameKeyPressed(KEY_UP) || sui::gameKeyPressed(KEY_W)) pickIdx = (pickIdx + n - 1) % n;
+            if (sui::gameKeyPressed(KEY_RIGHT) || sui::gameKeyPressed(KEY_D)) preset = (preset + 1) % 3;
+            if (sui::gameKeyPressed(KEY_LEFT) || sui::gameKeyPressed(KEY_A)) preset = (preset + 2) % 3;
             for (int k = 0; k < 10 && k < n; k++)
-                if (IsKeyPressed(k == 9 ? KEY_ZERO : KEY_ONE + k)) pickIdx = k;
-            if (IsKeyPressed(KEY_B)) setCops(!CH.on);
+                if (sui::gameKeyPressed(k == 9 ? KEY_ZERO : KEY_ONE + k)) pickIdx = k;
+            if (sui::gameKeyPressed(KEY_B)) setCops(!CH.on);
             // mouse: click a landmark row, or a time-of-day button
-            Vector2 m = GetMousePosition();
-            int px = sw / 2 - 330, py = sh2 / 2 - 230;
+            Vector2 m = sui::mouse();
+            int px = box.x, py = box.y;
             for (int i = 0; i < n; i++) {
                 Rectangle r = {(float)px + 20, (float)py + 90 + i * 34, 380, 30};
-                if (CheckCollisionPointRec(m, r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+                if (CheckCollisionPointRec(m, r) && sui::mousePressed()) {
                     if (pickIdx == i) { title = false; picker = false; startAt(i); }
                     pickIdx = i;
                 }
             }
             for (int t = 0; t < 3; t++) {
                 Rectangle r = {(float)px + 430, (float)py + 120 + t * 50, 210, 40};
-                if (CheckCollisionPointRec(m, r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) preset = t;
+                if (CheckCollisionPointRec(m, r) && sui::mousePressed()) preset = t;
             }
             for (int md = 0; md < 2; md++) { // game mode: 0 free roam, 1 cop chase
                 Rectangle r = {(float)px + 430, (float)py + 316 + md * 44, 210, 40};
-                if (CheckCollisionPointRec(m, r) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) setCops(md == 1);
+                if (CheckCollisionPointRec(m, r) && sui::mousePressed()) setCops(md == 1);
             }
-            if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_SPACE)) { title = false; picker = false; startAt(pickIdx); }
-            else if (!title && IsKeyPressed(KEY_TAB)) picker = false;
+            if (sui::gameKeyPressed(KEY_ENTER) || sui::gameKeyPressed(KEY_SPACE)) { title = false; picker = false; startAt(pickIdx); }
+            else if (!title && sui::gameKeyPressed(KEY_TAB)) picker = false;
         } else if (!title) {
-            if (IsKeyPressed(KEY_TAB)) { picker = true; showMap = false; }
-            if (IsKeyPressed(KEY_H)) showHelp = !showHelp;
-            if (IsKeyPressed(KEY_N)) {
+            if (sui::gameKeyPressed(KEY_TAB)) { picker = true; showMap = false; }
+            if (sui::gameKeyPressed(KEY_H)) showHelp = !showHelp;
+            if (sui::gameKeyPressed(KEY_N)) {
                 CH.difficulty = (CH.difficulty + 1) % 3;
                 P.say(TextFormat("Police: %s", Chase::DIFF_NAMES[CH.difficulty]), C_COP, CH.difficulty == 0 ? "Slower cops, a weaker grip" : CH.difficulty == 2 ? "Faster cops, heat builds quickly" : "The default chase");
             }
-            if (IsKeyPressed(KEY_B)) { setCops(!CH.on); P.say(CH.on ? "COP CHASE MODE" : "FREE ROAM MODE", CH.on ? C_COP : WHITE, CH.on ? "Police on patrol" : "No police, just skate"); }
-            if (IsKeyPressed(KEY_M)) showMap = !showMap;
-            if (IsKeyPressed(KEY_P)) paused = !paused;
+            if (sui::gameKeyPressed(KEY_B)) { setCops(!CH.on); P.say(CH.on ? "COP CHASE MODE" : "FREE ROAM MODE", CH.on ? C_COP : WHITE, CH.on ? "Police on patrol" : "No police, just skate"); }
+            if (sui::gameKeyPressed(KEY_M)) showMap = !showMap;
+            if (sui::gameKeyPressed(KEY_P)) paused = !paused;
         }
-        if (IsKeyPressed(KEY_T)) {
+        if (sui::gameKeyPressed(KEY_T)) {
             preset = (preset + 1) % 3;
             if (!title && !picker) P.say(PRESET_NAMES[preset], {255, 225, 160, 255}, "Time of day");
         }
         if (!title && !picker) {
-            if (IsKeyPressed(KEY_F1)) { preset = 0; P.say(PRESET_NAMES[0], {255, 225, 160, 255}, "Time of day"); }
-            if (IsKeyPressed(KEY_F2)) { preset = 1; P.say(PRESET_NAMES[1], {255, 225, 160, 255}, "Time of day"); }
-            if (IsKeyPressed(KEY_F3)) { preset = 2; P.say(PRESET_NAMES[2], {255, 225, 160, 255}, "Time of day"); }
+            if (sui::gameKeyPressed(KEY_F1)) { preset = 0; P.say(PRESET_NAMES[0], {255, 225, 160, 255}, "Time of day"); }
+            if (sui::gameKeyPressed(KEY_F2)) { preset = 1; P.say(PRESET_NAMES[1], {255, 225, 160, 255}, "Time of day"); }
+            if (sui::gameKeyPressed(KEY_F3)) { preset = 2; P.say(PRESET_NAMES[2], {255, 225, 160, 255}, "Time of day"); }
         }
-        if (IsKeyPressed(KEY_F)) heavyFog = !heavyFog;
-        if (IsKeyPressed(KEY_G) && !title) {
+        if (sui::gameKeyPressed(KEY_F)) heavyFog = !heavyFog;
+        if (sui::gameKeyPressed(KEY_G) && !title) {
             WX.raining = !WX.raining;
             P.say(WX.raining ? "Rain" : "Clearing up", {190, 210, 235, 255}, WX.raining ? "Streets get wet and shiny (G)" : "The streets will dry out");
         }
-        if (IsKeyPressed(KEY_V) && !title) {
+        if (sui::gameKeyPressed(KEY_V) && !title) {
             R.setQuality((R.quality + 2) % 3);
             P.say(TextFormat("Graphics: %s", Renderer::QUALITY_NAMES[R.quality]), WHITE,
                   R.quality == 2 ? "Sharp + distant shadows, soft occlusion, HDR, bloom" : R.quality == 1 ? "Softer + distant shadows, bloom" : "No sun shadows or bloom (fastest)");
         }
-        if (IsKeyPressed(KEY_Y) && !title) {
+        if (sui::gameKeyPressed(KEY_Y) && !title) {
             gCap60 = !gCap60;
             updateFramePeriod();
             P.say(gCap60 ? "Frame rate: 60" : "Frame rate: Max", WHITE, gCap60 ? "Capped at 60 fps" : "Matches the display's refresh rate");
         }
-        if (IsKeyPressed(KEY_C)) camMode = (camMode + 1) % 3;
+        if (sui::gameKeyPressed(KEY_C)) camMode = (camMode + 1) % 3;
         for (int k = 0; k < 10 && !title && !picker; k++) {
-            if (IsKeyPressed(KEY_ONE + k) || (k == 9 && IsKeyPressed(KEY_ZERO))) {
+            if (sui::gameKeyPressed(KEY_ONE + k) || (k == 9 && sui::gameKeyPressed(KEY_ZERO))) {
                 int idx = k;
-                if (k == 9 && !IsKeyPressed(KEY_ZERO)) continue;
+                if (k == 9 && !sui::gameKeyPressed(KEY_ZERO)) continue;
                 if (idx < (int)W.spots.size()) {
                     leaveVehicles();
                     P.spawn(W.spots[idx].pos, W.spots[idx].yaw);
@@ -1192,27 +1449,27 @@ int main(int argc, char** argv) {
             }
             setWorldVars(worldShown);
         }
-        if (!title && !picker && IsKeyPressed(KEY_R)) { if (JS.riding) { JS.skis[JS.cur].pos = P.pos; JS.riding = false; JS.cur = -1; } if (SP.riding) { SP.riding = false; SP.cur = -1; } P.respawnSafe(W); P.say("Reset", WHITE); }
+        if (!title && !picker && sui::gameKeyPressed(KEY_R)) { if (JS.riding) { JS.skis[JS.cur].pos = P.pos; JS.riding = false; JS.cur = -1; } if (SP.riding) { SP.riding = false; SP.cur = -1; } P.respawnSafe(W); P.say("Reset", WHITE); }
 
         Input in;
-        in.steer = (IsKeyDown(KEY_D) || IsKeyDown(KEY_RIGHT) ? 1.f : 0.f) - (IsKeyDown(KEY_A) || IsKeyDown(KEY_LEFT) ? 1.f : 0.f);
-        in.push = IsKeyDown(KEY_W) || IsKeyDown(KEY_UP);
-        in.brake = IsKeyDown(KEY_S) || IsKeyDown(KEY_DOWN);
-        in.tuck = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+        in.steer = (sui::gameKeyDown(KEY_D) || sui::gameKeyDown(KEY_RIGHT) ? 1.f : 0.f) - (sui::gameKeyDown(KEY_A) || sui::gameKeyDown(KEY_LEFT) ? 1.f : 0.f);
+        in.push = sui::gameKeyDown(KEY_W) || sui::gameKeyDown(KEY_UP);
+        in.brake = sui::gameKeyDown(KEY_S) || sui::gameKeyDown(KEY_DOWN);
+        in.tuck = sui::gameKeyDown(KEY_LEFT_SHIFT) || sui::gameKeyDown(KEY_RIGHT_SHIFT);
         if (autotest && getenv("SFSKATE_PUSH")) in.push = true;   // test hook: keep pushing (e.g. up a steep hill)
         if (autotest && getenv("SFSKATE_SKIRIDE")) { in.push = true; in.steer = (atFrame % 200) > 120 ? 0.6f : 0.f; in.tuck = atFrame > 160; }
-        in.ollie = IsKeyPressed(KEY_SPACE) && !justStarted;
-        in.ollieHeld = IsKeyDown(KEY_SPACE);
-        in.kickflip = IsKeyPressed(KEY_J);
-        in.heelflip = IsKeyPressed(KEY_K);
-        in.shove = IsKeyPressed(KEY_L);
-        in.grab = IsKeyDown(KEY_I);
+        in.ollie = sui::gameKeyPressed(KEY_SPACE) && !justStarted;
+        in.ollieHeld = sui::gameKeyDown(KEY_SPACE);
+        in.kickflip = sui::gameKeyPressed(KEY_J);
+        in.heelflip = sui::gameKeyPressed(KEY_K);
+        in.shove = sui::gameKeyPressed(KEY_L);
+        in.grab = sui::gameKeyDown(KEY_I);
         if (CH.scuffle && !title && !paused) {
             // caught: no riding, just struggling. Mash for strength, or swing the board for a big shove.
             float s = 0;
-            if (IsKeyPressed(KEY_SPACE)) s += 0.10f;
-            if (IsKeyPressed(KEY_A) || IsKeyPressed(KEY_D) || IsKeyPressed(KEY_LEFT) || IsKeyPressed(KEY_RIGHT)) s += 0.07f;
-            if ((IsKeyPressed(KEY_J) || IsKeyPressed(KEY_K) || IsKeyPressed(KEY_L)) && CH.hitCD <= 0) { s += 0.17f; CH.hitCD = 0.22f; swingT = 0.22f; S.play(S.pop, 0.9f, 0.7f); }
+            if (sui::gameKeyPressed(KEY_SPACE)) s += 0.10f;
+            if (sui::gameKeyPressed(KEY_A) || sui::gameKeyPressed(KEY_D) || sui::gameKeyPressed(KEY_LEFT) || sui::gameKeyPressed(KEY_RIGHT)) s += 0.07f;
+            if ((sui::gameKeyPressed(KEY_J) || sui::gameKeyPressed(KEY_K) || sui::gameKeyPressed(KEY_L)) && CH.hitCD <= 0) { s += 0.17f; CH.hitCD = 0.22f; swingT = 0.22f; S.play(S.pop, 0.9f, 0.7f); }
             CH.strike += s;
             in = Input{};
         }
@@ -1246,7 +1503,7 @@ int main(int argc, char** argv) {
             for (int i = 0; i < (int)W.stations.size(); i++)
                 if (d < 14 && fabsf(s - W.stations[i].s) < 80) nearStation = i;
         }
-        if (nearStation >= 0 && IsKeyPressed(KEY_E)) {
+        if (nearStation >= 0 && sui::gameKeyPressed(KEY_E)) {
             ride.on = true;
             ride.dest = nearStation == menloStation ? 0 : menloStation;
             ride.s = W.stations[nearStation].s;
@@ -1260,7 +1517,7 @@ int main(int argc, char** argv) {
         int nearSki = -1;
         bool justMounted = false;
         if (running && P.state != Player::BAIL) nearSki = JS.nearest(P.pos, 10.f);
-        if (nearSki >= 0 && IsKeyPressed(KEY_E)) {
+        if (nearSki >= 0 && sui::gameKeyPressed(KEY_E)) {
             justMounted = true; // the same E press must not also hop straight back off
             JS.mount(nearSki, P);
             CH.reset(8);
@@ -1269,7 +1526,7 @@ int main(int argc, char** argv) {
             running = false;
         }
         if (JS.riding && !paused && !picker && !showMap && !title) {
-            if (IsKeyPressed(KEY_E) && !justMounted) {
+            if (sui::gameKeyPressed(KEY_E) && !justMounted) {
                 if (JS.dismount(P, W)) { camYaw = P.yaw; P.say("Back on land", WHITE); }
                 else P.say("Get closer to the shore to hop off", WHITE);
             }
@@ -1281,7 +1538,7 @@ int main(int argc, char** argv) {
         // seaplanes: climb into a moored one with E; taxi, fly, land on the water, and E near the shore to climb out
         int nearPlane = -1;
         if (running && P.state != Player::BAIL && nearSki < 0) nearPlane = SP.nearest(P.pos, 16.f);
-        if (nearPlane >= 0 && IsKeyPressed(KEY_E) && !justMounted) {
+        if (nearPlane >= 0 && sui::gameKeyPressed(KEY_E) && !justMounted) {
             justMounted = true;
             SP.mount(nearPlane, P);
             CH.reset(8);
@@ -1290,12 +1547,12 @@ int main(int argc, char** argv) {
             running = false;
         }
         if (SP.riding && !paused && !picker && !showMap && !title) {
-            if (IsKeyPressed(KEY_E) && !justMounted) {
+            if (sui::gameKeyPressed(KEY_E) && !justMounted) {
                 if (SP.dismount(P, W)) { camYaw = P.yaw; P.say("Back on land", WHITE); }
                 else P.say(SP.refusalMsg(), WHITE);
             }
             if (SP.riding) {
-                bool climb = IsKeyDown(KEY_SPACE), dive = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+                bool climb = sui::gameKeyDown(KEY_SPACE), dive = sui::gameKeyDown(KEY_LEFT_SHIFT) || sui::gameKeyDown(KEY_RIGHT_SHIFT);
                 if (autotest && getenv("SFSKATE_FLY")) { // test hook: full throttle, lift off, climb to ~80 m, then bank
                     bool land = getenv("SFSKATE_FLY")[0] == '2' && atFrame > 420;   // "2": then throttle back and glide down onto the water
                     in.push = !land; in.brake = land;
@@ -1319,7 +1576,7 @@ int main(int argc, char** argv) {
             ride.v = std::max(ride.v, remain > 1 ? 2.f : 0.f);
             ride.s += ride.dir * ride.v * dt;
             advanceTraffic(dt);
-            if (remain < 0.5f || IsKeyPressed(KEY_SPACE)) {
+            if (remain < 0.5f || sui::gameKeyPressed(KEY_SPACE)) {
                 float yaw;
                 Vector3 p = W.caltrainDropoff(ride.dest, &yaw);
                 P.spawn(p, yaw);
@@ -1855,7 +2112,9 @@ int main(int argc, char** argv) {
             if (NET.status != lastSt) {
                 if (NET.status == Net::RECONNECTING) P.say("Connection lost", {255, 150, 110, 255}, "Reconnecting...");
                 else if (NET.status == Net::IN_SESSION && lastSt == Net::RECONNECTING) P.say("Reconnected", {255, 210, 60, 255}, "Multiplayer");
-                else if (NET.status == Net::FAILED) P.say("Multiplayer", {255, 110, 90, 255}, NET.error);
+                else if (NET.status == Net::FAILED && (lastSt == Net::IN_SESSION || lastSt == Net::RECONNECTING))
+                    P.say("Session over", {255, 110, 90, 255}, plainError(NET.error) + " - skating on your own");
+                else if (NET.status == Net::FAILED) P.say("Couldn't connect", {255, 110, 90, 255}, plainError(NET.error));
                 else if (NET.status == Net::OFF && (lastSt == Net::IN_SESSION || lastSt == Net::RECONNECTING)) P.say("Left the session", WHITE, "Skating on your own");
                 lastSt = NET.status;
             }
@@ -2099,9 +2358,9 @@ int main(int argc, char** argv) {
         if (title) textCenter("SF SKATE", sw / 2, 30, 80, {245, 95, 60, 255});
         if (picker) {
             int n = (int)W.spots.size();
-            int px = sw / 2 - 330, py = sh2 / 2 - 230;
-            DrawRectangle(px, py, 660, 120 + n * 34, {10, 14, 22, 215});
-            DrawRectangleLines(px, py, 660, 120 + n * 34, {255, 255, 255, 60});
+            int px = box.x, py = box.y;
+            DrawRectangle(px, py, box.w, box.h, {10, 14, 22, 215});
+            DrawRectangleLines(px, py, box.w, box.h, {255, 255, 255, 60});
             textShadow(title ? "WHERE DO YOU WANT TO START?" : "CHANGE LOCATION / TIME", px + 20, py + 18, 28, WHITE);
             textShadow("LANDMARK", px + 20, py + 60, 18, {255, 210, 60, 255});
             textShadow("TIME OF DAY", px + 430, py + 60, 18, {255, 210, 60, 255});
@@ -2134,14 +2393,15 @@ int main(int argc, char** argv) {
                                    "Click twice or ENTER  to go", title ? "Esc  quit" : "Tab  back to skating"};
             for (int k = 0; k < 5; k++) DrawText(hints[k], px + 430, py + 416 + k * 24, 17, {200, 205, 215, 255});
             float a = 0.6f + 0.4f * sinf((float)GetTime() * 4);
-            textCenter(title ? "Press ENTER to drop in" : "Press ENTER to go there", sw / 2, py + 130 + n * 34, 28,
+            textCenter(title ? "Press ENTER to drop in" : "Press ENTER to go there", sw / 2, py + box.h + 10, 28,
                        {255, 230, 120, (unsigned char)(255 * a)});
+            drawFriends(box, netMe);
         }
         bool showList = NET.active() || gFakeNet;   // the session's player list, under the minimap
         int listY = title ? 20 : ride.on ? 106 : 262, listH = 0;
         std::vector<Rectangle> hud;   // panels name tags stay off
         if (!title) {
-            if (!ride.on) { // regular HUD (hidden while riding Caltrain)
+            if (!ride.on && !picker) { // regular HUD (hidden while riding Caltrain, and behind the picker)
             // score panel
             DrawRectangle(16, 16, 300, 108, {0, 0, 0, 120});
             textShadow(TextFormat("SCORE  %lld", P.score), 28, 26, 30, WHITE);
@@ -2245,7 +2505,7 @@ int main(int argc, char** argv) {
                 const char* skateLines[] = {"CONTROLS", "W / Up      push", "S / Down    brake", "A D         steer / spin in air",
                                        "Shift       tuck (go faster)", "Space       ollie / jump off rail", "J  K  L     kickflip, heelflip, shove-it",
                                        "I (hold)    grab", "Land on rails & ledges to grind", "B  free roam / cop chase   N  difficulty", "Right mouse  look around", "Wheel       zoom    C  camera",
-                                       "Tab  choose landmark / time", "M  map  1-0  teleport  E  train/jetski", "T or F1-F3  time of day",
+                                       "Tab  landmark / time / friends", "M  map  1-0  teleport  E  train/jetski", "T or F1-F3  time of day",
                                        "F fog  G rain  R reset  P pause", TextFormat("V  graphics: %s", Renderer::QUALITY_NAMES[R.quality]),
                                        TextFormat("Y  frame rate: %s", gCap60 ? "60" : "Max"), "Caught: mash SPACE A D / J K L", "H  hide this help"};
                 // on a jet ski or seaplane the panel shows its controls instead, with its name as a small title
@@ -2355,7 +2615,7 @@ int main(int argc, char** argv) {
             if (showMap) drawBigMap();
             DrawFPS(sw - 100, sh2 - 30);
         }
-        if (showList && title) drawPlayerList(sw - 250, listY, 230, netMe);
+        if (showList && title && !picker) drawPlayerList(sw - 250, listY, 230, netMe);
         EndDrawing();
         waitForFrameSlot();
         static bool firstFrame = true;

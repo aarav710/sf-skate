@@ -615,24 +615,31 @@ int Traffic::takeSteps(float frameDt) {
 }
 
 int Traffic::advance(float frameDt, World& w, Player& pl) {
+    return advance(frameDt, w, pl, std::vector<TrafficActor>{TrafficActor::of(pl)});
+}
+
+int Traffic::advance(float frameDt, World& w, Player& pl, const std::vector<TrafficActor>& actors) {
     beginFrame();   // (the roofs the skater stood on this frame: as published at the end of the last one)
     int n = takeSteps(frameDt);
-    std::vector<TrafficActor> actors{TrafficActor::of(pl)};
     bool honk = false;
     for (int k = 0; k < n; k++) { update(STEP, w, actors); honk |= evHonk; }
     evHonk = honk;
+    endFrame((float)(acc / STEP), frameDt, w, pl);
+    return n;
+}
+
+void Traffic::endFrame(float alpha, float frameDt, World& w, Player& pl) {
     // drawn between the last two steps, so they move smoothly every frame however many steps the frame ran (none,
     // at 144 Hz, most frames); the roofs, the roof ride and the collisions all go by the same drawn places
-    interpolate((float)(acc / STEP));
+    interpolate(alpha);
     carryRider(pl, frameDt);
     publishRoofs(w, pl.pos);
-    return n;
 }
 
 void Traffic::update(float dt, World& w, const std::vector<TrafficActor>& actors) {
     evHonk = false;
-    clock += dt;
     simTime += dt;
+    clock = (float)simTime;
     for (auto& c : cars) { c.prevPos = c.pos; c.prevYaw = c.yaw; c.prevPitch = c.pitch; c.prevPlaced = c.placed; }
     for (auto& t : trains) t.prevS = t.s;
     // the actor nearest a spot (on the ground plan), or null if there's nobody
@@ -2045,7 +2052,15 @@ static bool onPath(const Car& c, float s) {
     return c.path >= 0 && c.path < (int)v.size() && std::isfinite(s) && s >= 0 && s <= v[c.path].len;
 }
 
-bool Traffic::applyCars(const uint8_t* data, size_t size, bool snapPos) {
+// a grid car's block and turns are streets of its grid: d leaves (i, j) along one, pd came into (i, j) along one (or is
+// d: just placed), nd leaves the next node along one. Anything else would have it drive down a street that isn't there.
+static bool gridRouteOk(const Grid& g, int i, int j, int d, int pd, int nd) {
+    if (!g.in(i, j) || d < 0 || d > 3 || pd < -1 || pd > 3 || nd < -1 || nd > 3 || !g.edge(i, j, d)) return false;
+    if (pd >= 0 && pd != d && !g.edge(i, j, pd ^ 1)) return false;
+    return nd < 0 || g.edge(i + DI[d], j + DJ[d], nd);
+}
+
+bool Traffic::applyCars(const uint8_t* data, size_t size, bool snapPos, bool keepClose) {
     // read and check the whole message first, so a bad one changes nothing
     struct Rec { int k, i, j, d, pd, nd; float x, y, z, yaw, speed, t, s, extra; uint8_t st, fl; uint16_t hops; };
     ByteReader b(data, size);
@@ -2069,7 +2084,7 @@ bool Traffic::applyCars(const uint8_t* data, size_t size, bool snapPos) {
             r.t = b.u16() / 65536.f;
             r.hops = b.u16();
             r.d = dirs & 3; r.pd = r.fl & CF_PD ? dirs >> 2 & 3 : -1; r.nd = r.fl & CF_ND ? dirs >> 4 & 3 : -1;
-            if (!c.g->in(r.i, r.j)) return false;
+            if (!gridRouteOk(*c.g, r.i, r.j, r.d, r.pd, r.nd)) return false;
         } else {
             r.s = b.f32();
             uint16_t e = b.u16();
@@ -2080,6 +2095,11 @@ bool Traffic::applyCars(const uint8_t* data, size_t size, bool snapPos) {
     }
     for (const Rec& r : recs) {
         Car& c = cars[r.k];
+        if (keepClose && c.placed && (r.fl & CF_PLACED) && (c.pdir > 0) == ((r.fl & CF_FWD) != 0) && fabsf(c.speed - r.speed) < 0.05f &&
+            (c.mode == 0 ? c.i == r.i && c.j == r.j && c.d == r.d && c.pd == r.pd && c.nd == r.nd && c.hops == r.hops &&
+                           fabsf(c.t - r.t) * c.g->sp < 0.03f
+                         : fabsf(c.s - r.s) < 0.03f && (c.mode == 1 ? (c.uturn >= 0) == (r.extra >= 0) : true)))
+            continue;   // (already where the host has it, to the snapshot's rounding)
         if (c.mode == 0) {
             // on another block, or turning another way: its turn at the intersections it had is gone
             if (r.i != c.i || r.j != c.j || r.d != c.d || r.nd != c.nd) unbox(r.k);
@@ -2165,7 +2185,7 @@ bool Traffic::applyFull(const uint8_t* data, size_t size) {
         if (b.bad || (c.pdir != 1 && c.pdir != -1)) return false;
         if (c.mode == 0) {
             int nodes = c.g->ni * c.g->nj;
-            if (!c.g->in(c.i, c.j) || c.d < 0 || c.d > 3 || c.pd < -1 || c.pd > 3 || c.nd < -1 || c.nd > 3 ||
+            if (!gridRouteOk(*c.g, c.i, c.j, c.d, c.pd, c.nd) ||
                 c.box < -1 || c.box >= nodes || c.wantBox < -1 || c.wantBox >= nodes || c.t < 0 || c.t > 1)
                 return false;
         } else if (path != c.path || !onPath(c, c.s)) return false;
@@ -2191,4 +2211,48 @@ bool Traffic::applyFull(const uint8_t* data, size_t size) {
     clock = clk; simTime = st; farTurn = ft % 16;
     rebuildBoxUsers();
     return true;
+}
+
+bool Traffic::peekFull(const uint8_t* data, size_t size, uint32_t* sd, double* st) {
+    ByteReader b(data, size);
+    if (b.u32() != FULL_MAGIC) return false;
+    *sd = b.u32();
+    b.f32();
+    *st = b.f64();
+    return !b.bad && std::isfinite(*st);
+}
+
+void Traffic::serializeTrains(std::vector<uint8_t>& out) const {
+    ByteWriter b(out);
+    b.u8((uint8_t)trains.size());
+    for (const Train& t : trains) { b.f32(t.s); b.u8((uint8_t)t.dir); b.f32(t.v); b.f32(t.dwell); }
+}
+
+bool Traffic::applyTrains(const uint8_t* data, size_t size) {
+    ByteReader b(data, size);
+    size_t n = b.u8();
+    if (b.bad || n != trains.size() || b.left() != n * 13) return false;
+    float len = gTrainWorld && !gTrainWorld->stations.empty() ? gTrainWorld->railLen() : 1e6f;
+    std::vector<Train> tr = trains;
+    for (Train& t : tr) {
+        t.s = b.f32(); t.dir = (int8_t)b.u8(); t.v = b.f32(); t.dwell = b.f32();
+        if (!std::isfinite(t.s) || !std::isfinite(t.v) || !std::isfinite(t.dwell) || (t.dir != 1 && t.dir != -1) ||
+            t.s < -100 || t.s > len + 100 || fabsf(t.v) > 200 || t.dwell < -1 || t.dwell > 600)
+            return false;
+    }
+    // (prevS stays: a train the prediction had a little off slides over in the frame drawn next)
+    for (size_t k = 0; k < n; k++) { trains[k].s = tr[k].s; trains[k].dir = tr[k].dir; trains[k].v = tr[k].v; trains[k].dwell = tr[k].dwell; }
+    return true;
+}
+
+void Traffic::catchUpPeds(long long steps, World& w) {
+    if (steps <= 0) return;
+    for (size_t pi = 0; pi < peds.size(); pi++) {
+        Ped& p = peds[pi];
+        if (p.mode == 3) continue;   // sitting: never moves
+        // one person at a time, all their steps (the same calls the steps make for someone nobody's near)
+        for (long long k = 0; k < steps; k++) pedRoute(p, (int)pi, STEP, false);
+        p.lag = 0;
+        pedPlaceFar(p, 0, w);
+    }
 }

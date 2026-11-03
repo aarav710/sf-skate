@@ -117,8 +117,9 @@ struct Traffic {
     std::vector<Cat> cats;
     std::vector<Train> trains; // Caltrain
     bool evHonk = false, evCrash = false;
-    float clock = 0;            // drives the traffic signals
-    double simTime = 0;         // time simulated (fixed steps of STEP, see advance)
+    float clock = 0;            // drives the traffic signals: simTime, as a float (never accumulated on its own, so it
+                                // can't drift from simTime however long a session runs)
+    double simTime = 0;         // time simulated (fixed steps of STEP, see advance); in a session, the session clock
     double acc = 0;             // frame time not simulated yet
     static constexpr float STEP = 1.f / 60;
     static constexpr int MAX_STEPS = 8;   // a frame runs at most this many steps; any backlog past that is dropped
@@ -145,6 +146,11 @@ struct Traffic {
     // a frame of the game: as many fixed steps as frameDt adds up to (0 or more), then the skater's roof ride and the
     // roofs. Returns the steps run.
     int advance(float frameDt, World& w, Player& p);
+    // the same for everyone in `actors` (the skater among them; in a session, every player)
+    int advance(float frameDt, World& w, Player& p, const std::vector<TrafficActor>& actors);
+    // the end of a frame of steps: drawn alpha of the way into the next step (see interpolate), the skater's roof ride
+    // over frameDt, and the roofs published around them
+    void endFrame(float alpha, float frameDt, World& w, Player& p);
     int takeSteps(float frameDt);      // the accumulator: steps owed for a frame of frameDt
     void beginFrame();                 // remember where the roofs are (as published), for carryRider after the steps
     // place everything where it's drawn: alpha of the way from the start of the latest step to its end (1: at the end)
@@ -169,9 +175,21 @@ struct Traffic {
     // to it on its own as it drives, see update). serializeFull: everything that drives the cars and trains from
     // here on, so init + applyFull on another machine carries on exactly as this one does. People aren't included.
     void serializeCars(const std::vector<int>& idx, std::vector<uint8_t>& out) const;
-    bool applyCars(const uint8_t* data, size_t n, bool snapPos = true);
+    // keepClose: a car already on the same route within a few cm and at the speed sent keeps its own state, so a
+    // machine whose prediction was right stays bit-identical to the host instead of taking the rounding
+    bool applyCars(const uint8_t* data, size_t n, bool snapPos = true, bool keepClose = false);
     void serializeFull(std::vector<uint8_t>& out) const;
     bool applyFull(const uint8_t* data, size_t n);
+    // the seed and the time a full snapshot was taken at, without applying it (false if it isn't one)
+    static bool peekFull(const uint8_t* data, size_t n, uint32_t* seed, double* simTime);
+    uint32_t seedOf() const { return seed; }
+    // the Caltrain trains alone (13 B each), for every car snapshot; applyTrains turns down a bad one whole
+    void serializeTrains(std::vector<uint8_t>& out) const;
+    bool applyTrains(const uint8_t* data, size_t n);
+    // People walk their routes `steps` steps on, as the fixed steps would have taken them with nobody about (each
+    // one's route is their own, see pedRoute), and are placed there. For a machine that joins a session: right after
+    // init, with the steps the session has run, its people are where the host's are (bar any the skaters disturbed).
+    void catchUpPeds(long long steps, World& w);
 
 private:
     RNG rng{20240};                    // init's draws only: nothing in update takes from a shared stream

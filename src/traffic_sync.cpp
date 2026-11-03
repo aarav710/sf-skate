@@ -163,8 +163,13 @@ int TrafficSync::step(Traffic& T, World& w, const std::vector<TrafficActor>& act
 }
 
 int TrafficSync::hostStep(Traffic& T, World& w, const std::vector<TrafficActor>& actors, double now, float* alpha) {
-    if (!anchored_ || (now + anchor_ - T.simTime) > RESYNC) { anchor_ = T.simTime - now; anchored_ = true; }
-    return runTo(T, w, actors, now + anchor_, alpha);
+    if (!anchored_) { anchor_ = T.simTime - now; anchored_ = true; }
+    double target = now + anchor_;
+    if (target - T.simTime > RESYNC) {   // the backlog goes, never the clock
+        T.skipTo((double)(long long)floor(target / (double)Traffic::STEP) * (double)Traffic::STEP);
+        skipped++;
+    }
+    return runTo(T, w, actors, target, alpha);
 }
 
 int TrafficSync::runTo(Traffic& T, World& w, const std::vector<TrafficActor>& actors, double target, float* alpha) {
@@ -237,10 +242,12 @@ bool TrafficSync::applyCarHit(Traffic& T, const netp::MsgEvent& e) {
     r.u8();
     int n = r.u16(), k = r.u16();
     float x = r.f32(), z = r.f32();
-    if (!r.bad && n == 1 && k == (int)e.idx && std::isfinite(x) && std::isfinite(z) && sq(x - c.pos.x) + sq(z - c.pos.z) < HIT_SNAP * HIT_SNAP)
-        T.applyCars(e.car.data(), e.car.size(), true, false);
-    // stopped for the rest of the 3 s the hitter's machine gave it (Traffic::interact): the same as theirs from here on
-    if (c.stopT < 1e8f) c.stopT = std::max(c.stopT, (float)(3.0 - age));
+    float own = c.stopT;
+    if (!r.bad && n == 1 && k == (int)e.idx && std::isfinite(x) && std::isfinite(z) && sq(x - c.pos.x) + sq(z - c.pos.z) < HIT_SNAP * HIT_SNAP &&
+        T.applyCars(e.car.data(), e.car.size(), true, false)) {
+        // its stop as the hitter had it then (Traffic::interact's 3 s), less what's gone by since: it ends when theirs does
+        if (c.stopT < 1e8f) c.stopT = std::max(0.f, c.stopT - (float)age);
+    } else if (c.stopT < 1e8f) c.stopT = std::max(own, (float)(3.0 - age));
     c.speed = 0;
     return true;
 }

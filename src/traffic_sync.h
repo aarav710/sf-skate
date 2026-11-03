@@ -49,9 +49,12 @@ public:
     static constexpr double INTERVAL = 0.1;       // 10 a second
     static constexpr double RESYNC = 5.0;         // further off the session clock than this: ask for a full snapshot
     static constexpr double ASK_EVERY = 10.0;     // asking again while one doesn't come
-    static constexpr long long CATCHUP_MAX = 20 * 60 * 60;   // people catch up on at most 20 min of steps
-    static constexpr long long CATCHUP_WORK = 3000000;       // person-steps of catching up a frame (~10 ms): 5 min of
-                                                             // session in ~0.3 s of frames, 20 min in ~1.5 s
+    // People catch up on the whole session (it lasts at most SESSION_MAX), CATCHUP_WORK person-steps a frame (~10 ms):
+    // 5 min of session in ~0.3 s of frames, 20 min in ~1.5 s, the full 6 h in ~25 s (about two people a frame). Until
+    // a person's turn comes they walk on from where everyone started.
+    static constexpr long long CATCHUP_MAX = (long long)(netp::SESSION_MAX * 60);
+    static constexpr long long CATCHUP_WORK = 3000000;
+    static constexpr double LAG_SEND = 0.5;       // host: its traffic further behind its clock than this sends no car snapshots
 
     // --- host
     // the cars within R_SYNC of any of `others`, nearest one first, at most MAX_CARS
@@ -77,9 +80,17 @@ public:
     int step(Traffic& T, World& w, const std::vector<TrafficActor>& actors, double now, float* alpha);
     // A frame on the host: its traffic time is the session clock, and it runs at the rate of our clock `now` (not
     // the game's frame time, which is capped for slow frames), at most MAX_STEPS a frame, so a slow or hitching host
-    // catches up instead of slowing everyone's clock down. More than RESYNC behind (a long stall), it gives up on
-    // the backlog: the clock steps back and the others take a full snapshot again.
+    // catches up instead of slowing everyone's clock down. More than RESYNC behind (a long stall, a machine too slow to
+    // keep up, or it was that far behind when it took over), it skips the backlog: its traffic jumps to the clock (the
+    // cars stay where they were) and the clock itself never goes back, for anyone.
+    // A host under ~7.5 fps (MAX_STEPS a frame) can't keep up at all: it sends no car snapshots while behind
+    // (hostLagging), so everyone else's traffic runs on its own on the steady session clock, and skips every RESYNC s.
     int hostStep(Traffic& T, World& w, const std::vector<TrafficActor>& actors, double now, float* alpha);
+    // (host) whether its traffic is too far behind its clock to send car snapshots: they would carry an old time
+    bool hostLagging(const Traffic& T, double now) const { return anchored_ && now + anchor_ - T.simTime > LAG_SEND; }
+    int skipped = 0;            // (host) backlogs skipped
+    // (not the host) after getting back into the session: everything may have moved on, so a full snapshot again
+    void resync() { wantFull = true; askedAt = -1e18; pending_.clear(); held_.clear(); }
     long long pedsOwed() const { return pedNext_ < pedEnd_ ? pedSteps_ : 0; }
     // someone else hosts now: the old host's snapshots go, and the clock carries on toward the new one's
     void hostChanged();
@@ -102,7 +113,8 @@ public:
     static constexpr float HIT_SNAP = 15;         // m: further from the host's car than this, the hitter's isn't used
     // (not the host) we just ran into car k (Traffic::hitCar): the event to send
     netp::MsgEvent carHit(Traffic& T, int k);
-    // (host) another player's CAR_HIT. False if it doesn't fit our traffic.
+    // (host) another player's CAR_HIT: stopped where the hitter had it, until the hitter's stop ends. False if it
+    // doesn't fit our traffic.
     static bool applyCarHit(Traffic& T, const netp::MsgEvent& e);
     // every CAR_HIT seen (sent or received), so whoever hosts next can apply the ones the old host may have missed
     void noteHit(const netp::MsgEvent& e, const Traffic& T);

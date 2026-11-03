@@ -1112,6 +1112,10 @@ void Traffic::update(float dt, World& w, const std::vector<TrafficActor>& actors
     // first. (Which of them that is changes nothing about where anyone goes.)
     const float PED_NEAR = 300.f;
     const int FAR_SLICES = 16;
+    // this machine's own skater: the dodges are theirs to start (another player's come in as their PedEvents), even
+    // with someone else nearer the person (a friend standing beside them)
+    const TrafficActor* mine = nullptr;
+    for (auto& a : actors) if (a.local) { mine = &a; break; }
     farTurn = (farTurn + 1) % FAR_SLICES;
     for (size_t pi = 0; pi < peds.size(); pi++) {
         Ped& p = peds[pi];
@@ -1135,7 +1139,6 @@ void Traffic::update(float dt, World& w, const std::vector<TrafficActor>& actors
         Vector3 pp = pl.pos;
         // their velocity on the ground, for deciding whether to get out of the way
         float skSp = Vector2Length(pl.vel);
-        Vector2 skDir = skSp > 0.1f ? Vector2Scale(pl.vel, 1.f / skSp) : Vector2{1, 0};
 
         // ---- getting out of the skater's way
         // how soon they notice: someone heads-down in a phone or laptop spots the skater late, others at varying distances
@@ -1143,7 +1146,14 @@ void Traffic::update(float dt, World& w, const std::vector<TrafficActor>& actors
         float u01 = (ph % 1000) / 1000.f;
         bool distracted = p.carry == CARRY_PHONE || p.carry == CARRY_LAPTOP;
         float notice = distracted ? lerpf(3.5f, 7.f, u01) : lerpf(6.f, 14.f, u01);
-        if (p.evade == EV_NONE && pl.local && dP2 < notice * notice && skSp > 3.f && pl.state != Player::BAIL) {
+        float dM2 = mine ? sq(p.pos.x - mine->pos.x) + sq(p.pos.z - mine->pos.z) : 1e30f;
+        float mSp = mine ? Vector2Length(mine->vel) : 0;
+        if (p.evade == EV_NONE && mine && dM2 < notice * notice && mSp > 3.f && mine->state != Player::BAIL) {
+            // (in here, the skater is this machine's own, whoever is nearest)
+            const TrafficActor& pl = *mine;
+            Vector3 pp = pl.pos;
+            float skSp = mSp;
+            Vector2 skDir = Vector2Scale(pl.vel, 1.f / skSp);
             Vector2 rel = {p.pos.x - pp.x, p.pos.z - pp.z};
             Vector2 perp = {-skDir.y, skDir.x};
             float along = Vector2DotProduct(rel, skDir), lat = Vector2DotProduct(rel, perp);

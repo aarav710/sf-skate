@@ -170,6 +170,9 @@ struct Traffic {
     void endFrame(float alpha, float frameDt, World& w, Player& p);
     int takeSteps(float frameDt);      // the accumulator: steps owed for a frame of frameDt
     void beginFrame();                 // remember where the roofs are (as published), for carryRider after the steps
+    // the traffic time jumps to t without running the steps in between (a host skipping a backlog it can't catch up
+    // on): everything stays where it is, the signals go by the new time
+    void skipTo(double t) { simTime = t; clock = (float)t; acc = 0; }
     // place everything where it's drawn: alpha of the way from the start of the latest step to its end (1: at the end)
     void interpolate(float alpha);
     int rideCar = -1;                  // the car (index) the skater was last carried on, -1 if none

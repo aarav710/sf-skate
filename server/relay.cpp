@@ -107,6 +107,11 @@ void Relay::onGone(ENetPeer* peer, const char* why) {
         for (PeerKey k : lr.notify) send(peerOf(k), bytes, netp::CH_RELIABLE);
         if (lr.newHost) {
             logf("room %s: player %u is host now", lr.code.c_str(), (unsigned)lr.newHost);
+            // asks the old host never answered: whoever made them asks the new one (straight away)
+            for (PeerKey k : lr.notify) {
+                auto it = peers_.find(peerOf(k));
+                if (it != peers_.end()) { it->second.wantsFull = false; it->second.askedAt = -1e9; }
+            }
             netp::MsgHostChanged hc; hc.id = lr.newHost;
             auto hb = netp::pack(hc, netp::FROM_RELAY);
             for (PeerKey k : lr.notify) send(peerOf(k), hb, netp::CH_RELIABLE);
@@ -210,8 +215,11 @@ void Relay::onReceive(ENetPeer* peer, const uint8_t* data, size_t n) {
         netp::MsgFullRequest m;
         if (!r || rooms.idOf(key) == r->host || !netp::unpack(data, n, m)) return;
         const Member* h = r->find(r->host);
-        if (!h) return;
+        // one at a time, and not too often: each one is ~220 KB of the host's upload
+        // (an ask the host hasn't answered in 30 s is given up on)
+        if (!h || now - pi.askedAt < (pi.wantsFull ? 30.0 : FULL_ASK_EVERY)) return;
         pi.wantsFull = true;
+        pi.askedAt = now;
         send(peerOf(h->peer), netp::pack(m, rooms.idOf(key)), netp::CH_RELIABLE);
         return;
     }

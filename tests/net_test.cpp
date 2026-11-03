@@ -519,6 +519,9 @@ static void liveChecks() {
         A.sendFull(B.myId, data, nowSec());   // a second one, not asked for again: dropped
         pump([&] { return false; }, 0.5);
         bool once = B.fullInbox.empty();
+        B.requestFull(nowSec());   // asking again straight away: the relay holds it back (one ask in FULL_ASK_EVERY)
+        pump([&] { return false; }, 0.5);
+        bool throttled = A.fullRequests.empty();
         // car snapshots: a second bare client's (a non-host) never gets to anyone; the host's reaches both others
         auto rc2p = std::make_unique<RawClient>();
         RawClient& rc2 = *rc2p;
@@ -543,10 +546,10 @@ static void liveChecks() {
         double tCar = pump([&] { return !B.carInbox.empty() && heard(MSG_CAR_SNAPSHOT); }, 10);
         bool car = tCar >= 0 && B.carInbox.size() == 1 && B.carInbox[0].m.simTime == 99.25 && B.carInbox[0].m.cars == cs.cars &&
                    B.carInbox[0].m.trains == cs.trains && B.carInbox[0].recvAt > 0;
-        snprintf(b, sizeof b, "unasked full dropped %d; asked after %.2fs, %zu KB full arrived intact after %.2fs, a second one dropped %d; "
+        snprintf(b, sizeof b, "unasked full dropped %d; asked after %.2fs, %zu KB full arrived intact after %.2fs, a second one dropped %d, asking again at once held back %d; "
                  "non-host car/full snapshots dropped %d; host's car snapshot to both after %.2fs",
-                 (int)unasked, tReq, data.size() / 1024, tFull, (int)once, (int)nonHost, tCar);
-        check(joined && unasked && asked && full && once && nonHost && car, "live: car and full snapshots", b);
+                 (int)unasked, tReq, data.size() / 1024, tFull, (int)once, (int)throttled, (int)nonHost, tCar);
+        check(joined && unasked && asked && full && once && throttled && nonHost && car, "live: car and full snapshots", b);
         B.carInbox.clear();
         raw = nullptr;
         rcp.reset();

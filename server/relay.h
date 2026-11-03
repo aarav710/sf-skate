@@ -13,7 +13,8 @@ constexpr size_t MAX_PACKET = netp::MsgFullSnapshot::MAX_SIZE + 1024;
 // bytes ENet may hold per peer for packets not yet handed to us. ENet checks it before taking a packet, so one full
 // snapshot (allocated whole at its first fragment) always gets in.
 constexpr size_t MAX_WAITING_DATA = 256 * 1024;
-constexpr size_t MAX_PEERS_PER_IP = 16;            // a household or a NAT'd office, not one script with 1600 peers
+constexpr size_t MAX_PEERS_PER_IP = 16;
+constexpr double FULL_ASK_EVERY = 8.0;             // s between one player's asks for a full snapshot (the game asks every 10)            // a household or a NAT'd office, not one script with 1600 peers
 
 class Relay {
 public:
@@ -35,6 +36,7 @@ private:
         double lastDropLog = -1e9;
         uint64_t dropped = 0;
         bool wantsFull = false;   // asked the host for a full snapshot, and hasn't had it yet
+        double askedAt = -1e9;    // when it last asked (one ask in FULL_ASK_EVERY, so nobody can keep the host sending them)
     };
     ENetHost* host_ = nullptr;
     bool enetInit_ = false;

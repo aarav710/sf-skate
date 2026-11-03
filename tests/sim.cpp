@@ -17,6 +17,7 @@
 #include <string>
 #include <algorithm>
 #include <unordered_set>
+#include "../src/skybasis.h"
 
 static World W;
 static int fails = 0;
@@ -3034,6 +3035,34 @@ int main() {
         snprintf(det, sizeof det, "%d bay boxes; %d/%d rides stop at the face (worst %.2f m off), %d/%d rides along pass", nb, stoppedOk, stopped, worstOff, passOk, passTried);
         check(nb > 100 && stopped >= 5 && stoppedOk == stopped, "bay windows stop a skater", det);
         check(passTried >= 5 && passOk == passTried, "ride past bay windows not blocked", det);
+    }
+    // the sky basis follows the camera's own up: a rolled or inverted seaplane camera turns the sky with the world,
+    // and a nose-straight-up camera (or a zero up) still gives an orthonormal basis
+    {
+        char det[200] = "";
+        bool ok = true; float worst = 0;
+        auto test = [&](Vector3 f, Vector3 u, bool expectUp) {
+            f = Vector3Normalize(f);
+            Vector3 r, up; skyBasis(f, u, r, up);
+            float o = fabsf(Vector3Length(r) - 1) + fabsf(Vector3Length(up) - 1) + fabsf(Vector3DotProduct(r, f)) + fabsf(Vector3DotProduct(up, f)) + fabsf(Vector3DotProduct(r, up));
+            if (!(o < 1e-3f)) ok = false;
+            if (expectUp) {
+                Vector3 want = Vector3Subtract(u, Vector3Scale(f, Vector3DotProduct(u, f)));
+                worst = std::max(worst, Vector3Length(Vector3Subtract(up, Vector3Normalize(want))));
+            }
+        };
+        Vector3 f{0.6f, 0.2f, 0.77f};
+        for (int deg = 0; deg < 360; deg += 15) {   // roll the camera about its view direction through a full turn
+            Vector3 r0 = Vector3Normalize(Vector3CrossProduct(f, {0, 1, 0}));
+            Vector3 u0 = Vector3CrossProduct(r0, f);
+            test(f, Vector3RotateByAxisAngle(u0, Vector3Normalize(f), deg * DEG2RAD), true);
+        }
+        test({0, 1, 0}, {0, 1, 0}, false); test({0, -1, 0}, {0, 1, 0}, false); test({0, 1, 0}, {0, 0, 0}, false);   // exactly vertical
+        test({0, 1, 0}, {1, 0, 0}, true);
+        Vector3 r, up; skyBasis(Vector3Normalize({1, 0, 0}), {0, -1, 0}, r, up);   // inverted flight: sky-up points at the ground
+        bool inv = up.y < -0.99f;
+        snprintf(det, sizeof det, "orthonormal %d, matches cam.up within %.4f, inverted up.y %.2f", ok, worst, up.y);
+        check(ok && worst < 1e-3f && inv, "sky basis follows the rolled camera up", det);
     }
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;

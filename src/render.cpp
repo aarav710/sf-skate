@@ -212,6 +212,12 @@ vec3 fogColor(vec3 V) {
 // night-lit windows: warm lamps, neutral and cool office light
 vec3 lampTint(float tone) { return tone < 0.55 ? vec3(1.0, 0.76, 0.48) : (tone < 0.8 ? vec3(0.95, 0.87, 0.72) : vec3(0.7, 0.84, 1.0)); }
 
+// emission of one window cell: lit in 20-40% of a building's cells, in the building's own mix of lamp tints
+vec3 litCell(vec2 cl, vec2 bld, float litP) {
+    if (h21(cl + bld * 7.13) >= litP) return vec3(0.0);
+    return lampTint(h21(bld * 5.3 + vec2(cl.y * 0.37, 0.0))) * (0.3 + 0.4 * h21(cl * 1.7));
+}
+
 // ---- ground: asphalt cracks and patches, paving joints, grass variation (picked by the ground color)
 vec3 groundDetail(vec3 base, vec2 p, float near) {
     float lum = dot(base, vec3(0.3, 0.59, 0.11));
@@ -309,7 +315,7 @@ void main() {
             // how big one window cell is on screen: fade the pattern out before it turns into speckle
             float px = max(fwidth(u / fw), fwidth(y / fh));
             // towers have thinner mullions (0.15-0.3 m), so they fade out sooner than houses do
-            float detail = clamp(house ? 1.45 - px * 8.5 : (m == 6 ? 1.6 - px * 12.0 : 2.0 - px * 10.0), 0.0, 1.0);
+            float detail = clamp(m == 2 ? 1.6 - px * 7.0 : (house ? 1.45 - px * 8.5 : (m == 6 ? 1.5 - px * 7.0 : 2.0 - px * 10.0)), 0.0, 1.0);
             vec3 plain = base;
             vec2 bld = floor(wPos.xz / 23.0);
             float litP = 0.2 + 0.2 * h21(bld * 3.17 + 0.5);
@@ -330,11 +336,8 @@ void main() {
                 specK = 0.7; specP = 70.0;
                 // lit at night: each building (a 23 m cell) lights 20-40% of its windows, in its own mix of warm
                 // lamps, neutral and cool office light, kept dim enough not to burn out into white
-                if (h21(cell + bld * 7.13) < litP) {
-                    vec3 tint = lampTint(h21(bld * 5.3 + vec2(cell.y * 0.37, 0.0)));
-                    emis = tint * (0.3 + 0.4 * h21(cell * 1.7)) * lightsOn() * (m == 6 ? 0.85 : 1.0);
-                    emisBloom = 0.45;
-                }
+                emis = litCell(cell, bld, litP) * lightsOn() * (m == 6 ? 0.85 : 1.0);
+                emisBloom = 0.45;
             } else if (trimmed) {
                 base = mix(base, vec3(0.94, 0.92, 0.86), 0.88);
             } else if (m == 6) {
@@ -365,20 +368,26 @@ void main() {
                 base = mix(avg, base, detail);
                 specK *= detail;
             } else if (detail < 1.0) {
-                // the same for towers: the average of wall and glass, with the glass's share of the shine and of the
-                // lit windows (one tint per building), so the grid fades instead of crawling and sparkling
+                // the same for towers: the average of wall and glass, with the glass share of the shine (the lit windows
+                // fade separately, below)
                 float wf = m == 1 ? 0.496 : 0.88;
                 float fresA = pow(1.0 - abs(dot(Ng, V)), 2.0);
                 vec3 glassA = m == 6 ? mix(plain * 0.6, skyCol, 0.3 + 0.5 * fresA)
                                      : mix(vec3(0.14, 0.2, 0.27), skyCol, 0.25 + 0.55 * fresA);
                 vec3 wall = m == 6 ? plain * 0.9 : plain;
                 vec3 avg = mix(wall, mix(plain, glassA, 0.92), wf);
-                vec3 emA = lampTint(h21(bld * 5.3)) * 0.5 * lightsOn() * (m == 6 ? 0.85 : 1.0) * litP * wf;
                 base = mix(avg, base, detail);
                 specK = mix(0.7 * wf, specK, detail);
                 specP = mix(70.0, specP, detail);
-                emis = mix(emA, emis, detail);
-                emisBloom = mix(0.45, emisBloom, detail);
+            }
+            if (!house && px > 0.08) {
+                // lit windows too small to tell apart become lit blocks of 2x2, 4x4... cells (hashed the same way,
+                // same share lit, blended between sizes): the skyline keeps its glitter without crawling
+                float wf = m == 1 ? 0.496 : 0.88, l = log2(max(px / 0.2, 1.0)), s0 = exp2(floor(l));
+                vec3 blk = mix(litCell(floor(cell / s0), bld, litP), litCell(floor(cell / (2.0 * s0)), bld, litP), fract(l));
+                blk *= wf * lightsOn() * (m == 6 ? 0.85 : 1.0);
+                emis = mix(blk, emis, 1.0 - smoothstep(0.08, 0.14, px));
+                emisBloom = 0.45;
             }
         }
     } else if (m == 3 || m == 11) {      // water (11: the bay, with the seabed depth in vCol.r): see-through in the shallows, a mirror for the sky at a low angle
@@ -1022,8 +1031,8 @@ void Renderer::setLamps(const Vector4* l, int n) {
 void Renderer::staticNormals(bool on) {
     rlDrawRenderBatchActive();
     int v = on ? 1 : 0;
-    SetShaderValue(city, locUseVN, &v, SHADER_UNIFORM_INT);
     SetShaderValue(cityFar, GetShaderLocation(cityFar, "useVN"), &v, SHADER_UNIFORM_INT);
+    SetShaderValue(city, locUseVN, &v, SHADER_UNIFORM_INT);
 }
 
 // ---------------------------------------------------------------- shadows

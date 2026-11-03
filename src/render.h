@@ -64,7 +64,7 @@ struct Renderer {
     // ambient occlusion (High): the near pass's depth resolved, AO at half size (r = AO, g = view depth) and blurred
     unsigned dsFbo = 0, dsTex = 0;
     RenderTexture2D aoA{}, aoB{};
-    float viewFovy = 60, viewNear = 0.15f, viewFar = 270;
+    float viewFovy = 60, viewNear = 0.3f, viewFar = 270;
     float outScale = 1;        // the scene is drawn at this and scaled back in post (headroom in 8 bits, see setLook)
 
     void init();

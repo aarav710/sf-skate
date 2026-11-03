@@ -1,5 +1,8 @@
 CXX      ?= clang++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers -Wno-unused-parameter
+# no fused multiply-add: clang fuses a*b+c by default on Apple Silicon but not on Intel, and the world and
+# traffic must come out bit-identical on both for multiplayer
+CXXFLAGS += -ffp-contract=off
 CXXFLAGS += $(shell pkg-config --cflags raylib)
 LDFLAGS  += $(shell pkg-config --libs raylib) -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo
 
@@ -12,6 +15,10 @@ LDFLAGS  += $(ENET_LIBS)
 ifdef SFSKATE_RELAY
 CXXFLAGS += -DSFSKATE_RELAY='"$(SFSKATE_RELAY)"'
 endif
+# net.o is rebuilt when the compiled-in relay changes (the stamp file is only rewritten when it differs)
+RELAY_STAMP := build/relay-address.txt
+$(shell mkdir -p build && (echo '$(SFSKATE_RELAY)' | cmp -s - $(RELAY_STAMP) || echo '$(SFSKATE_RELAY)' > $(RELAY_STAMP)))
+build/net.o: $(RELAY_STAMP)
 
 SRC := $(wildcard src/*.cpp)
 OBJ := $(SRC:src/%.cpp=build/%.o)
@@ -44,7 +51,7 @@ test: build/sim
 .PHONY: test
 
 # multiplayer relay server (no raylib): ./build/relay --port 7777
-NET_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Isrc -Iserver $(ENET_CFLAGS)
+NET_CXXFLAGS := -std=c++17 -O2 -ffp-contract=off -Wall -Wextra -Isrc -Iserver $(ENET_CFLAGS)
 RELAY_SRC := server/rooms.cpp server/relay.cpp
 relay: build/relay
 build/relay: $(RELAY_SRC) server/relay_main.cpp $(wildcard server/*.h) src/net_protocol.h src/bytes.h | build

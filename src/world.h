@@ -261,6 +261,15 @@ struct World {
     std::unordered_multimap<int, Stoop> stoops;     // same coarse grid, in every cell within STOOP_REACH of the box
     std::vector<Platform> plats;
     std::vector<std::vector<int>> pgrid; int pgW = 0, pgH = 0;
+    // Aerial obstacles: thin or open things only an aircraft can hit (bridge cables and suspenders, radio and lattice
+    // towers, tall poles). Capsules, a segment a-b swollen by r. Not platforms, so a skater never meets them (a
+    // suspender runs down to the deck, a pole's plat is a box).
+    struct Aerial { Vector3 a, b; float r; };
+    std::vector<Aerial> aerials;
+    std::unordered_map<int, std::vector<int>> aerialGrid;   // 48 m cells (x, z) -> indices into aerials
+    void addAerial(Vector3 a, Vector3 b, float r);
+    // does a ball of radius pr swept from p0 to p1 touch any aerial obstacle?
+    bool aerialHit(Vector3 p0, Vector3 p1, float pr) const;
     std::vector<Rail> rails;
     std::vector<VehicleTop> vehicleTops;   // the traffic near the skater, as of the last Traffic::update
     std::vector<Pond> ponds;

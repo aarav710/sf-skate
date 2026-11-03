@@ -2600,6 +2600,54 @@ int main() {
         snprintf(b, sizeof b, "%d out-of-play shores (%d fast), %d slow-down, %d wrong", oob, oobFast, slowDown, wrong);
         check(oob > 20 && oobFast == oob && slowDown == 0 && wrong == 0, "seaplane: no shore leave outside play", b);
     }
+    {   // seaplane vs the things you can fly through: Alcatraz's towers, the Golden Gate's main cables and suspenders. The
+        // whole plane counts (a wingtip clipping a cable), and a fast plane can't skip a 0.9 m cable between frames
+        Seaplanes SP;
+        SP.place(W);
+        // flies level at the given speed from (x, y, z) heading yaw; true if the ride ended in a crash within `secs`
+        auto flies = [&](float x, float y, float z, float yaw, float spd, float secs, float dt) {
+            Seaplanes t = SP;
+            Player q;
+            t.mount(0, q);
+            t.pos = {x, y, z}; t.yaw = yaw; t.speed = spd; t.onWater = false; t.pitch = t.roll = 0;
+            t.throttle = 0.0036f * spd * spd / 15.f;   // holds the speed
+            Input in;
+            for (float tm = 0; tm < secs && t.riding; tm += dt) t.update(dt, in, false, false, q, W);
+            return !t.riding;
+        };
+        const float GX = -1100;
+        auto ggCableY = [&](float z) { float u = (-1250 - z) / 880.f; return 150 - 440 * u * (1 - u); };   // the main span's cable
+        // Alcatraz: the lighthouse (366, -1884) from the east at 10 m over the rock's top; and the guard tower out in the
+        // water by the pier (449.5, -1897.5), which has no collision of its own, at 6 m from the north
+        bool lh = flies(410, AZ_TOP + 10, -1884, PI, 40, 3, 1.f / 60);
+        snprintf(b, sizeof b, "crashed=%d", lh);
+        check(lh, "seaplane crashes into Alcatraz's lighthouse", b);
+        bool gt = flies(449.5f, 6, -1830, -PI / 2, 40, 3, 1.f / 60);
+        snprintf(b, sizeof b, "crashed=%d", gt);
+        check(gt, "seaplane crashes into Alcatraz's water guard tower", b);
+        // Golden Gate: through the main cable at mid-span (x = GX+15, y ~40), at 40 m/s and 60 fps, and at 10 fps (4 m a frame)
+        float cy = ggCableY(-1700);
+        bool c60 = flies(GX, cy - 2.9f, -1700, 0, 40, 3, 1.f / 60), c10 = flies(GX, cy - 2.9f, -1700, 0, 40, 3, 0.1f);
+        snprintf(b, sizeof b, "cable y=%.1f 60fps=%d 10fps=%d", cy, c60, c10);
+        check(c60 && c10, "seaplane crashes into a Golden Gate main cable", b);
+        // suspenders: the 20th one up the main span, between the deck (34.5) and the cable (50.6), flown through at 40 m
+        float sz = -1250 - 20 * 880.f / 58, sy = 150 - 440 * (20 / 58.f) * (1 - 20 / 58.f);
+        bool sus = flies(GX, 40, sz, 0, 40, 3, 1.f / 60), between = flies(GX, 40, sz - 7.6f, 0, 40, 3, 1.f / 60);
+        snprintf(b, sizeof b, "suspender (cable at %.1f) hit=%d, between two hit=%d", sy, sus, between);
+        check(sus && !between, "seaplane crashes into Golden Gate suspenders", b);
+        // a wingtip alone: flying -z beside the cable, 5.4 m off, only the right wingtip (5.75 m out) reaches it
+        bool tip = flies(GX + 15 - 5.4f, cy - 2.9f, -1700, -PI / 2, 40, 1.5f, 1.f / 60);
+        bool clear = flies(GX + 15 - 8.f, cy - 2.9f, -1700, -PI / 2, 40, 1.5f, 1.f / 60);
+        snprintf(b, sizeof b, "wingtip in cable=%d, 2.25 m clear=%d", tip, clear);
+        check(tip && !clear, "seaplane wingtip clipping a cable crashes", b);
+        // under the deck through the middle of the span: no crash, and nor does flying along the cable's side clear of it
+        bool under = flies(GX - 100, 6, -1700, 0, 40, 5, 1.f / 60);
+        snprintf(b, sizeof b, "crashed=%d", under);
+        check(!under, "seaplane flies under the Golden Gate deck", b);
+        // the skater never meets the cables: no platform stands at a cable or suspender
+        check(W.aerials.size() > 500 && !W.solidAt({GX + 15, cy, -1700}) && !W.solidAt({GX + 15, 45, sz}), "aerial obstacles are not platforms",
+              "");
+    }
     {   // Telegraph Hill: the asphalt lies on the ground mesh all over (no grass breaking up through it on the steep
         // climb), and no street runs into Coit Tower's base
         int tris = 0, under = 0;

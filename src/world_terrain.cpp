@@ -733,6 +733,59 @@ bool World::collideSwept(Vector3 from, Vector3& p, float r, float feetY, float h
     return hit;
 }
 
+static int aerialKey(int i, int j) { return (i + 4096) * 8192 + (j + 4096); }
+static constexpr float AERIAL_CELL = 48.f;
+
+void World::addAerial(Vector3 a, Vector3 b, float r) {
+    int idx = (int)aerials.size();
+    aerials.push_back({a, b, r});
+    int i0 = (int)floorf((std::min(a.x, b.x) - r) / AERIAL_CELL), i1 = (int)floorf((std::max(a.x, b.x) + r) / AERIAL_CELL);
+    int j0 = (int)floorf((std::min(a.z, b.z) - r) / AERIAL_CELL), j1 = (int)floorf((std::max(a.z, b.z) + r) / AERIAL_CELL);
+    for (int j = j0; j <= j1; j++)
+        for (int i = i0; i <= i1; i++) aerialGrid[aerialKey(i, j)].push_back(idx);
+}
+
+// squared distance between segments p1-q1 and p2-q2 (Ericson, Real-Time Collision Detection 5.1.9)
+static float segSegDist2(Vector3 p1, Vector3 q1, Vector3 p2, Vector3 q2) {
+    Vector3 d1 = Vector3Subtract(q1, p1), d2 = Vector3Subtract(q2, p2), r = Vector3Subtract(p1, p2);
+    float a = Vector3DotProduct(d1, d1), e = Vector3DotProduct(d2, d2), f = Vector3DotProduct(d2, r);
+    float s, t;
+    if (a <= 1e-9f && e <= 1e-9f) return Vector3DotProduct(r, r);
+    if (a <= 1e-9f) { s = 0; t = clampf(f / e, 0, 1); }
+    else {
+        float c = Vector3DotProduct(d1, r);
+        if (e <= 1e-9f) { t = 0; s = clampf(-c / a, 0, 1); }
+        else {
+            float b = Vector3DotProduct(d1, d2), den = a * e - b * b;
+            s = den > 1e-9f ? clampf((b * f - c * e) / den, 0, 1) : 0;
+            t = (b * s + f) / e;
+            if (t < 0) { t = 0; s = clampf(-c / a, 0, 1); }
+            else if (t > 1) { t = 1; s = clampf((b - c) / a, 0, 1); }
+        }
+    }
+    Vector3 c1 = Vector3Add(p1, Vector3Scale(d1, s)), c2 = Vector3Add(p2, Vector3Scale(d2, t));
+    Vector3 d = Vector3Subtract(c1, c2);
+    return Vector3DotProduct(d, d);
+}
+
+bool World::aerialHit(Vector3 p0, Vector3 p1, float pr) const {
+    if (aerials.empty()) return false;
+    int i0 = (int)floorf((std::min(p0.x, p1.x) - pr) / AERIAL_CELL), i1 = (int)floorf((std::max(p0.x, p1.x) + pr) / AERIAL_CELL);
+    int j0 = (int)floorf((std::min(p0.z, p1.z) - pr) / AERIAL_CELL), j1 = (int)floorf((std::max(p0.z, p1.z) + pr) / AERIAL_CELL);
+    for (int j = j0; j <= j1; j++)
+        for (int i = i0; i <= i1; i++) {
+            auto it = aerialGrid.find(aerialKey(i, j));
+            if (it == aerialGrid.end()) continue;
+            for (int idx : it->second) {
+                const Aerial& o = aerials[idx];
+                float R = o.r + pr;
+                if (std::min(p0.y, p1.y) - R > std::max(o.a.y, o.b.y) || std::max(p0.y, p1.y) + R < std::min(o.a.y, o.b.y)) continue;
+                if (segSegDist2(p0, p1, o.a, o.b) < R * R) return true;
+            }
+        }
+    return false;
+}
+
 bool World::solidAt(Vector3 p, bool bigProps, bool piers) const {
     if (terrain(p.x, p.z) > p.y - 0.25f) return true;
     int i = (int)floorf((p.x - PG_X0) / PG_CELL), j = (int)floorf((p.z - PG_Z0) / PG_CELL);

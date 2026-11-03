@@ -120,10 +120,11 @@ JoinResult Rooms::rejoin(PeerKey peer, const std::string& rawCode, uint16_t vers
     auto it = code.empty() ? rooms_.end() : rooms_.find(code);
     if (it == rooms_.end()) { res.error = netp::ERR_NO_SESSION; return res; }
     Room& r = it->second;
-    if (r.fingerprint != fingerprint) { res.error = netp::ERR_FINGERPRINT; return res; }
     Member* m = r.find(id);
-    // (a wrong secret reads as an expired place: it tells a guesser nothing)
+    // (a wrong id or secret reads as an expired place, and it's checked before anything else about the room: nobody
+    // without the secret learns more than that)
     if (!m || m->secret != secret || (m->away() && now > m->awayUntil)) { res.error = netp::ERR_REJOIN_EXPIRED; return res; }
+    if (r.fingerprint != fingerprint) { res.error = netp::ERR_FINGERPRINT; return res; }
     if (!m->away()) { res.replaced = m->peer; where_.erase(m->peer); }   // (the old connection, not noticed dropping yet)
     m->peer = peer;
     m->awayUntil = 0;

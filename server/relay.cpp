@@ -314,8 +314,8 @@ void Relay::onReceive(ENetPeer* peer, const uint8_t* data, size_t n) {
         const std::string& rawCode = re ? mr.code : mj.code;
         std::string shown = netp::normalizeCode(rawCode);   // never echo raw client bytes into the log
         // (guessing codes) A rejoin goes through anyway: it carries a 64-bit secret, and a player on the same address as
-        // a guesser mustn't lose their session. With the address out of tries, a failed one only says "expired", so it
-        // can't be used to tell which codes exist.
+        // a guesser mustn't lose their session. Its failures count against the address like wrong codes, and with the
+        // address out of tries every failed one says just "expired", so it can't be used to tell which codes exist.
         bool outOfTries = !tries.allow(pi.ip, now);
         if (outOfTries && !re) {
             logf("%s %s from %s refused: too many tries", re ? "rejoin" : "join", shown.empty() ? "(bad code)" : shown.c_str(), addrText(peer).c_str());
@@ -325,8 +325,8 @@ void Relay::onReceive(ENetPeer* peer, const uint8_t* data, size_t n) {
         JoinResult jr = re ? rooms.rejoin(key, mr.code, mr.version, mr.fingerprint, mr.playerId, mr.secret, now)
                            : rooms.join(key, mj.code, mj.version, mj.fingerprint, mj.name);
         if (jr.error) {
-            if (jr.error == netp::ERR_NO_SESSION || jr.error == netp::ERR_REJOIN_EXPIRED) tries.failed(pi.ip, now);
-            if (outOfTries && jr.error == netp::ERR_NO_SESSION) jr.error = netp::ERR_REJOIN_EXPIRED;
+            if (re || jr.error == netp::ERR_NO_SESSION) tries.failed(pi.ip, now);
+            if (re && outOfTries) jr.error = netp::ERR_REJOIN_EXPIRED;
             logf("%s %s from %s refused: %s", re ? "rejoin" : "join", shown.empty() ? "(bad code)" : shown.c_str(), addrText(peer).c_str(), netp::errorText(jr.error));
             sendError(peer, jr.error);
             return;

@@ -662,9 +662,48 @@ static void limitChecks() {
         pump([&] { return fr->count(MSG_WELCOME) || fr->count(MSG_ERROR); }, 10);
         MsgWelcome wb;
         bool back = fr->last(wb) && wb.playerId == made0.playerId;
-        snprintf(b, sizeof b, "address out of tries: a rejoin to an unknown code says \"%s\"; the right rejoin gets player %u back %d",
-                 errorText(e3.code), (unsigned)wb.playerId, (int)back);
-        check(noOracle && back, "limits: rejoins on a guessing address", b);
+        // every kind of failed rejoin from that address, to a session that exists or not, gets the same reply, byte for byte
+        auto reply = [&](MsgRejoin m) {
+            guesser->got.clear();
+            guesser->send(pack(m), CH_RELIABLE);
+            pump([&] { return !guesser->got.empty(); }, 10);
+            return guesser->got.empty() ? std::vector<uint8_t>() : guesser->got.back();
+        };
+        MsgRejoin real; real.code = made0.code; real.playerId = made0.playerId; real.secret = made0.secret;
+        MsgRejoin wf = real; wf.fingerprint = 999;   // (right everything but the world)
+        MsgRejoin wi = real; wi.playerId = 77; wi.fingerprint = 999;
+        MsgRejoin ws = real; ws.secret ^= 1; ws.fingerprint = 999;
+        auto r0 = reply(rj), r1 = reply(wf), r2 = reply(wi), r3 = reply(ws);
+        bool same = !r0.empty() && r0 == r1 && r0 == r2 && r0 == r3;
+        snprintf(b, sizeof b, "address out of tries: a rejoin to an unknown code says \"%s\", and the same bytes for a real code with a wrong world / "
+                 "id / secret %d; the right rejoin gets player %u back %d", errorText(e3.code), (int)same, (unsigned)wb.playerId, (int)back);
+        check(noOracle && same && back, "limits: rejoins on a guessing address", b);
+    }
+
+    {   // rejoins can't be used to probe codes for free: their failures use up the address's tries like wrong codes
+        rc.clear();
+        rel.stop();
+        if (!rel.start(0)) { check(false, "limits: rejoin probes use up tries", "can't bind UDP"); return; }
+        RawClient* host = add();
+        RawClient* prober = add();
+        pump([&] { return host->connected && prober->connected; }, 10);
+        host->send(pack(mc), CH_RELIABLE);
+        pump([&] { return host->count(MSG_CREATED) == 1; }, 10);
+        MsgCreated hc;
+        host->last(hc);
+        for (int k = 0; k < 12; k++) {
+            MsgRejoin p; p.code = k % 2 ? hc.code : std::string(5, 'Z') + CODE_ALPHABET[k]; p.playerId = 1; p.secret = k; p.fingerprint = 999;
+            prober->send(pack(p), CH_RELIABLE);
+        }
+        pump([&] { return prober->count(MSG_ERROR) >= 12; }, 10);
+        prober->got.clear();
+        MsgJoin j; j.code = hc.code; j.name = "p";
+        prober->send(pack(j), CH_RELIABLE);
+        pump([&] { return !prober->got.empty(); }, 10);
+        MsgError pe;
+        bool limited = prober->last(pe) && pe.code == ERR_SLOW_DOWN;
+        snprintf(b, sizeof b, "12 failed rejoins (6 to a live session, wrong world and secret), then a join with its code: \"%s\"", limited ? pe.text.c_str() : "let in");
+        check(limited, "limits: rejoin probes use up tries", b);
     }
 
     // what's sent on counts once per player it goes to: a client flooding a room of 4 with states gets cut off at its

@@ -94,7 +94,7 @@ void World::deckSegments(int axis, float center, float halfW, const std::vector<
 
 // parabolic cable between two points with a sag
 static void cable(MeshBuilder& m, Vector3 a, Vector3 b, float sag, float thick, Color c, MeshBuilder* susp,
-                  float (*deck)(float), int axis, float lat, Color sc, float step = 15.f) {
+                  float (*deck)(float), int axis, float lat, Color sc, World* aer = nullptr, float step = 15.f) {
     float L = axis == 0 ? fabsf(b.x - a.x) : fabsf(b.z - a.z);
     int n = std::max(2, (int)(L / step));
     Vector3 prev = a;
@@ -103,12 +103,14 @@ static void cable(MeshBuilder& m, Vector3 a, Vector3 b, float sag, float thick, 
         Vector3 p = Vector3Lerp(a, b, t);
         p.y -= 4 * sag * t * (1 - t);
         m.beam(prev, p, thick, thick, c);
+        if (aer) aer->addAerial(prev, p, thick * 0.5f);   // for the seaplane only: a skater never meets a cable
         if (susp && i < n) {
             float s = axis == 0 ? p.x : p.z;
             float dy = deck(s);
             if (p.y - dy > 1.5f) {
                 Vector3 bot = axis == 0 ? V3(p.x, dy + 0.1f, lat) : V3(lat, dy + 0.1f, p.z);
                 susp->beam(bot, p, 0.14f, 0.14f, sc);
+                if (aer) aer->addAerial(bot, p, 0.07f);
             }
         }
         prev = p;
@@ -192,6 +194,7 @@ void World::buildGoldenGate() {
         for (float py : {22.f, 78.f, 108.f, 134.f, 148.f}) {
             float hgt = py > 140 ? 6 : 4.5f;
             m.box({X - 15.5f, py, tz - 4.0f}, {X + 15.5f, py + hgt, tz + 4.0f}, orange, orange, 0.9f);
+            for (float dz : {-2.f, 2.f}) addAerial({X - 15.5f, py + hgt / 2, tz + dz}, {X + 15.5f, py + hgt / 2, tz + dz}, hgt / 2);   // the plane flies between the legs
         }
     }
     // main cables and suspenders
@@ -200,9 +203,9 @@ void World::buildGoldenGate() {
         float cx = X + sd * 15.0f;
         Vector3 sAnchor = {cx, ggDeck(-1045) + 4, -1045}, t1 = {cx, 150, -1250}, t2 = {cx, 150, -2130};
         Vector3 nAnchor = {cx, ggDeck(-2330) + 4, -2330};
-        cable(cm, sAnchor, t1, 10, 0.9f, orange, &cm, ggDeck, 1, cx, orange);
-        cable(cm, t1, t2, 110, 0.9f, orange, &cm, ggDeck, 1, cx, orange);
-        cable(cm, t2, nAnchor, 10, 0.9f, orange, &cm, ggDeck, 1, cx, orange);
+        cable(cm, sAnchor, t1, 10, 0.9f, orange, &cm, ggDeck, 1, cx, orange, this);
+        cable(cm, t1, t2, 110, 0.9f, orange, &cm, ggDeck, 1, cx, orange, this);
+        cable(cm, t2, nAnchor, 10, 0.9f, orange, &cm, ggDeck, 1, cx, orange, this);
     }
     // anchorages
     for (float az : {-1045.f, -2330.f}) {
@@ -286,11 +289,15 @@ void World::buildBayBridge() {
             addPlat({tx - 3.5f, tx + 3.5f, lz - 3.5f, lz + 3.5f, 142, 142, -10, 0, PK_BUILDING});
             m.box({tx - 0.6f, 142, lz - 0.6f}, {tx + 0.6f, 144, lz + 0.6f}, col(255, 30, 20, M_EMISSIVE));
         }
-        for (float y : {20.f, 60.f, 95.f, 125.f, 138.f})
+        for (float y : {20.f, 60.f, 95.f, 125.f, 138.f}) {
             m.box({tx - 2.5f, y, Z - 16}, {tx + 2.5f, y + 3.5f, Z + 16}, steel, steel, 0.9f);
+            addAerial({tx, y + 1.75f, Z - 16}, {tx, y + 1.75f, Z + 16}, 1.75f);
+        }
         for (float y0 : {60.f, 95.f}) { // X bracing
             m.beam({tx, y0 + 3.5f, Z - 16}, {tx, y0 + 33, Z + 16}, 1.2f, 1.2f, steel);
             m.beam({tx, y0 + 3.5f, Z + 16}, {tx, y0 + 33, Z - 16}, 1.2f, 1.2f, steel);
+            addAerial({tx, y0 + 3.5f, Z - 16}, {tx, y0 + 33, Z + 16}, 0.6f);
+            addAerial({tx, y0 + 3.5f, Z + 16}, {tx, y0 + 33, Z - 16}, 0.6f);
         }
     }
     // center anchorage + end anchorages
@@ -305,12 +312,12 @@ void World::buildBayBridge() {
     for (int sd = -1; sd <= 1; sd += 2) {
         float cz = Z + sd * 16.0f;
         auto C = [&](float x, float y) { return V3(x, y, cz); };
-        cable(cm, C(1460, bbDeck(1460) + 5), C(1580, 140), 6, 0.8f, steel, &cm, bbDeck, 0, cz, lights);
-        cable(cm, C(1580, 140), C(1820, 140), 95, 0.8f, steel, &cm, bbDeck, 0, cz, lights);
-        cable(cm, C(1820, 140), C(1925, bbDeck(1925) + 22), 6, 0.8f, steel, &cm, bbDeck, 0, cz, lights);
-        cable(cm, C(1925, bbDeck(1925) + 22), C(2030, 140), 6, 0.8f, steel, &cm, bbDeck, 0, cz, lights);
-        cable(cm, C(2030, 140), C(2270, 140), 95, 0.8f, steel, &cm, bbDeck, 0, cz, lights);
-        cable(cm, C(2270, 140), C(2450, bbDeck(2450) + 5), 8, 0.8f, steel, &cm, bbDeck, 0, cz, lights);
+        cable(cm, C(1460, bbDeck(1460) + 5), C(1580, 140), 6, 0.8f, steel, &cm, bbDeck, 0, cz, lights, this);
+        cable(cm, C(1580, 140), C(1820, 140), 95, 0.8f, steel, &cm, bbDeck, 0, cz, lights, this);
+        cable(cm, C(1820, 140), C(1925, bbDeck(1925) + 22), 6, 0.8f, steel, &cm, bbDeck, 0, cz, lights, this);
+        cable(cm, C(1925, bbDeck(1925) + 22), C(2030, 140), 6, 0.8f, steel, &cm, bbDeck, 0, cz, lights, this);
+        cable(cm, C(2030, 140), C(2270, 140), 95, 0.8f, steel, &cm, bbDeck, 0, cz, lights, this);
+        cable(cm, C(2270, 140), C(2450, bbDeck(2450) + 5), 8, 0.8f, steel, &cm, bbDeck, 0, cz, lights, this);
     }
     // eastern self-anchored span: one white tower
     {
@@ -321,11 +328,13 @@ void World::buildBayBridge() {
             float lz = Z + sd * 19.0f;
             m.box({tx - 3.0f, 4, lz - 3.0f}, {tx + 3.0f, 160, lz + 3.0f}, white, white, 0.9f);
             addPlat({tx - 3, tx + 3, lz - 3, lz + 3, 160, 160, -10, 0, PK_BUILDING});
-            for (float y : {50.f, 100.f, 150.f})
+            for (float y : {50.f, 100.f, 150.f}) {
                 m.box({tx - 2, y, Z - 19}, {tx + 2, y + 2.5f, Z + 19}, white, white, 0.9f);
+                if (sd > 0) addAerial({tx, y + 1.25f, Z - 19}, {tx, y + 1.25f, Z + 19}, 1.25f);
+            }
             float cz = Z + sd * 16.0f;
-            cable(cm, V3(2860, bbDeck(2860) + 1, cz), V3(tx, 158, cz), -25, 0.9f, white, &cm, bbDeck, 0, cz, white);
-            cable(cm, V3(tx, 158, cz), V3(3330, bbDeck(3330) + 1, cz), -25, 0.9f, white, &cm, bbDeck, 0, cz, white);
+            cable(cm, V3(2860, bbDeck(2860) + 1, cz), V3(tx, 158, cz), -25, 0.9f, white, &cm, bbDeck, 0, cz, white, this);
+            cable(cm, V3(tx, 158, cz), V3(3330, bbDeck(3330) + 1, cz), -25, 0.9f, white, &cm, bbDeck, 0, cz, white, this);
         }
     }
     // piers
@@ -373,6 +382,7 @@ void World::buildLandmarks() {
             m.box({cx + sd * off - (sd > 0 ? 0 : 5), wy0, cz - 4}, {cx + sd * off + (sd > 0 ? 5 : 0), wy1, cz + 4}, wc, col(220, 218, 210), 1.f);
         }
         m.beam({cx, y + H - 5, cz}, {cx, y + H + 35, cz}, 0.8f, 0.8f, col(236, 233, 226));
+        addAerial({cx, y + H - 5, cz}, {cx, y + H + 37, cz}, 0.5f);
         m.box({cx - 0.5f, y + H + 35, cz - 0.5f}, {cx + 0.5f, y + H + 37, cz + 0.5f}, col(255, 40, 30, M_EMISSIVE));
         // collision steps up the taper: each box is as wide as the glass at its own top, so it sits just inside the
         // walls all the way down (the old single +-15 box let the skater ride 2.4 m into the base, #65)
@@ -481,8 +491,12 @@ void World::buildLandmarks() {
             for (int s = 0; s < 3; s++)
                 m.beam({mt.x, y + 140 + s * 20, mt.z}, {mt.x, y + 160 + s * 20, mt.z}, 1.0f, 1.0f, (s % 2) ? red : wht);
             addPlat({b.x - 1.5f, b.x + 1.5f, b.z - 1.5f, b.z + 1.5f, y + 50, y + 50, y - 2, 0, PK_POLE});
+            addAerial(b, t, 0.8f);                                               // the plat stops at 50 m; the leg goes on up
+            addAerial(mt, {mt.x, y + 200, mt.z}, 0.5f);                          // masts
             for (float hy : {100.f, 140.f, 165.f}) {
                 float a2 = a + TAU_F / 3;
+                float rr = hy > 120 ? 14.f : 8.f;
+                addAerial({cx + cosf(a) * rr, y + hy, cz + sinf(a) * rr}, {cx + cosf(a2) * rr, y + hy, cz + sinf(a2) * rr}, 0.4f);   // cross arms
                 m.beam({cx + cosf(a) * (hy > 120 ? 14 : 8), y + hy, cz + sinf(a) * (hy > 120 ? 14 : 8)},
                        {cx + cosf(a2) * (hy > 120 ? 14 : 8), y + hy, cz + sinf(a2) * (hy > 120 ? 14 : 8)}, 0.8f, 0.8f, red);
             }
@@ -594,6 +608,10 @@ void World::buildLandmarks() {
             }
             m.box({3995 - 60, y + 42, z - 3}, {4005 + 30, y + 46, z + 3}, c, c, 1.f);
             m.beam({4005, y + 46, z}, {4005, y + 66, z}, 1.2f, 1.2f, c);
+            addAerial({3935, y + 44, z}, {4035, y + 44, z}, 2.5f);                 // boom girder (a box 4 m by 6 m)
+            addAerial({4005, y + 46, z}, {4005, y + 66, z}, 0.6f);
+            addAerial({4005, y + 66, z}, {3940, y + 46, z}, 0.2f);
+            addAerial({4005, y + 66, z}, {4035, y + 46, z}, 0.2f);
             m.beam({4005, y + 66, z}, {3940, y + 46, z}, 0.4f, 0.4f, c);
             m.beam({4005, y + 66, z}, {4035, y + 46, z}, 0.4f, 0.4f, c);
             m.box({4000, y + 46, z - 5}, {4012, y + 52, z + 5}, cr, cr, 1.f);
@@ -1064,6 +1082,7 @@ void World::buildAlcatraz() {
         g.box({244.5f, Y + 10.0f, -1917.5f}, {247.9f, Y + 11.0f, -1914.1f}, col(50, 60, 66));   // windows all round
         g.box({244.3f, Y + 11.4f, -1917.7f}, {248.1f, Y + 11.6f, -1913.9f}, roofC);
         pole(246.2f, -1915.8f, 1.3f, Y + 11.6f);
+        addAerial({246.2f, Y + 1.7f, -1915.8f}, {246.2f, Y + 9.9f, -1915.8f}, 1.7f);
     }
 
     // ---- the lighthouse, and the burned shell of the Warden's House beside it
@@ -1075,6 +1094,9 @@ void World::buildAlcatraz() {
         l.prism({lx, top + 0.3f, lz}, 8, 1.3f, 1.3f, 2.2f, col(255, 244, 205, M_EMISSIVE), col(255, 244, 205, M_EMISSIVE), 0.39f);
         l.prism({lx, top + 2.5f, lz}, 8, 1.6f, 0.2f, 1.3f, col(52, 54, 56), col(52, 54, 56), 0.39f);
         pole(lx, lz, 1.9f, top + 3.8f);
+        // capsules reach their radius past each end: the tower (tapering 1.9 to 1.5), then the lamp room and its roof
+        addAerial({lx, ly + 1.8f, lz}, {lx, top - 1.8f, lz}, 1.8f);
+        addAerial({lx, top + 1.6f, lz}, {lx, top + 2.5f, lz}, 1.3f);
     }
     {
         RNG wr(1963);
@@ -1097,6 +1119,7 @@ void World::buildAlcatraz() {
         wallRun(X1 - 0.5f, Z0 + 0.5f, X1, Z1 - 0.5f);
         mb(340, -1880).prism({344, terrain(344, -1880) - 0.5f, -1880}, 4, 0.9f, 0.8f, 10.5f, brick, burnt, 0.79f);   // the chimney still standing
         pole(344, -1880, 0.9f, terrain(344, -1880) + 10);
+        addAerial({344, terrain(344, -1880) + 0.4f, -1880}, {344, terrain(344, -1880) + 9.1f, -1880}, 0.9f);
     }
 
     // ---- the water tower on its stilts, and the smokestack
@@ -1108,7 +1131,9 @@ void World::buildAlcatraz() {
             float lx = wx + (k & 1 ? 3.5f : -3.5f), lz = wz + (k & 2 ? 3.5f : -3.5f);
             w.beam({lx, terrain(lx, lz) - 0.5f, lz}, {lx, ty, lz}, 0.35f, 0.35f, legC);
             pole(lx, lz, 0.3f, ty);
+            addAerial({lx, terrain(lx, lz) - 0.5f, lz}, {lx, ty, lz}, 0.35f);
         }
+        addAerial({wx, ty + 3.25f, wz}, {wx, ty + 3.25f, wz}, 4.4f);   // the tank, round (its plat is a box)
         for (float y : {wy + 5.f, wy + 10.f}) {   // cross braces
             w.beam({wx - 3.5f, y, wz - 3.5f}, {wx + 3.5f, y + 4, wz - 3.5f}, 0.12f, 0.12f, legC);
             w.beam({wx - 3.5f, y, wz + 3.5f}, {wx + 3.5f, y + 4, wz + 3.5f}, 0.12f, 0.12f, legC);
@@ -1124,6 +1149,7 @@ void World::buildAlcatraz() {
         float sx = 262, sz = -1925, sy = terrain(sx, sz) - 0.5f;
         mb(sx, sz).prism({sx, sy, sz}, 10, 1.7f, 1.2f, Y + 26 - sy, col(176, 164, 150), col(60, 56, 52), 0.f, true, 0.9f);
         pole(sx, sz, 1.6f, Y + 26);
+        addAerial({sx, sy + 1.5f, sz}, {sx, Y + 24.5f, sz}, 1.5f);
     }
 
     // ---- down at the dock: Building 64 (the old barracks) with its sign, a pier, a guard tower and the ferry
@@ -1146,6 +1172,7 @@ void World::buildAlcatraz() {
         g.box({447.6f, 9, -1899.4f}, {451.4f, 11.6f, -1895.6f}, col(196, 190, 176), roofC, 0.9f);
         g.box({447.5f, 10.2f, -1899.5f}, {451.5f, 11.2f, -1895.5f}, col(50, 60, 66));
         g.box({447.2f, 11.6f, -1899.8f}, {451.8f, 11.8f, -1895.2f}, roofC);
+        addAerial({449.5f, -0.8f, -1897.5f}, {449.5f, 9.5f, -1897.5f}, 2.2f);   // no plat at all: legs in the water, a cabin on top
         // the ferry tied up along the pier's south side
         MeshBuilder& f = mb(440, -1874);
         f.box({429, -1.f, -1878.8f}, {452, 2.2f, -1870.4f}, col(232, 234, 236), col(160, 120, 90), 0.85f);

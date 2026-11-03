@@ -149,6 +149,7 @@ void World::buildGondolas() {
             for (int sd = -1; sd <= 1; sd += 2) {
                 Vector3 o = Vector3Scale(side, CABLE_GAP * sd);
                 mb((a.x + b.x) / 2, (a.z + b.z) / 2).beam(Vector3Add(a, o), Vector3Add(b, o), 0.07f, 0.07f, dark);
+                addAerial(Vector3Add(a, o), Vector3Add(b, o), 0.04f);
             }
         }
         // stations and towers
@@ -179,7 +180,11 @@ void World::buildGondolas() {
                     float lx = cx[k] * w2, lz = cz[k] * w2;
                     return V3(n.x + lx * ca - lz * sa, n.y - 1.0f + (h + 1.0f) * u, n.z + lx * sa + lz * ca);
                 };
-                for (int k = 0; k < 4; k++) m.limb(foot(k, 0), foot(k, 1), 0.28f, 0.18f, steel, 6);
+                for (int k = 0; k < 4; k++) {
+                    m.limb(foot(k, 0), foot(k, 1), 0.28f, 0.18f, steel, 6);
+                    addAerial(foot(k, 0), foot(k, 1), 0.25f);
+                }
+                addAerial({n.x - sa * 3.2f, n.y + h, n.z + ca * 3.2f}, {n.x + sa * 3.2f, n.y + h, n.z - ca * 3.2f}, 0.4f);   // crossarm
                 for (int lv = 1; lv < 5; lv++) {   // horizontal ties and diagonals
                     float u0 = lv / 5.f, u1 = (lv + 1) / 5.f;
                     for (int k = 0; k < 4; k++) {

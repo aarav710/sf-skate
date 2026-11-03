@@ -108,9 +108,44 @@ const char* Seaplanes::refusalMsg() const {
     }
 }
 
+// Points over the whole plane, in the frame drawPlane draws it in (x forward, y up, z to the right, origin on the
+// water line): wing every 0.9 m, fuselage and tail, tailplane and fin, floats, the prop disc. They are 0.4 m balls, so
+// with that spacing nothing 0.14 m thick (a suspender) slips between two of them.
+static const std::vector<Vector3>& planePoints() {
+    static std::vector<Vector3> P;
+    if (P.empty()) {
+        for (float z = -5.75f; z <= 5.76f; z += 0.9f) P.push_back({0.7f, 2.88f, z});
+        for (float z : {-5.75f, 5.75f}) { P.push_back({-0.15f, 2.88f, z}); P.push_back({1.55f, 2.88f, z}); }
+        for (float x = -4.1f; x <= 3.3f; x += 0.9f) P.push_back({x, 2.1f, 0});
+        for (float z : {-1.5f, 0.f, 1.5f}) P.push_back({-3.95f, 2.4f, z});
+        P.push_back({-3.95f, 3.5f, 0});
+        for (float z : {-1.4f, 1.4f}) for (float x : {-2.6f, -1.3f, 0.f, 1.3f, 2.6f, 3.2f}) P.push_back({x, 0.4f, z});
+        for (float y : {1.0f, 3.1f}) P.push_back({3.3f, y, 0});
+    }
+    return P;
+}
+static constexpr float PLANE_BALL = 0.4f;
+
+static Vector3 planePoint(Vector3 pos, float yaw, float pitch, float roll, Vector3 l) {
+    float cr = cosf(roll), sr = sinf(roll), cp = cosf(pitch), sp = sinf(pitch);
+    float y1 = l.y * cr - l.z * sr, z1 = l.y * sr + l.z * cr;    // roll about x
+    float x2 = l.x * cp - y1 * sp, y2 = l.x * sp + y1 * cp;      // pitch about z
+    float cy = cosf(yaw), sy = sinf(yaw);
+    return {pos.x + x2 * cy - z1 * sy, pos.y + y2, pos.z + x2 * sy + z1 * cy};    // yaw: forward is (cos, sin)
+}
+
+// Did any part of the plane touch an aerial obstacle (a cable, a mast, a tower) between two poses? Each point is swept,
+// so a fast plane can't skip through a 0.9 m cable between frames.
+static bool planeHitsAerial(const World& w, Vector3 p0, float yaw0, float pitch0, float roll0, Vector3 p1, float yaw1, float pitch1, float roll1) {
+    for (const Vector3& l : planePoints())
+        if (w.aerialHit(planePoint(p0, yaw0, pitch0, roll0, l), planePoint(p1, yaw1, pitch1, roll1, l), PLANE_BALL)) return true;
+    return false;
+}
+
 float Seaplanes::altitude(const World& w) const { return pos.y - std::max(w.terrain(pos.x, pos.z), 0.f); }
 
 void Seaplanes::update(float dt, const Input& in, bool climb, bool dive, Player& p, World& w) {
+    Vector3 pos0 = pos; float yaw0 = yaw, pitch0 = pitch, roll0 = roll;   // last frame's pose, for the sweep
     // throttle stays where you leave it: W opens it up, S closes it
     if (in.push) throttle = std::min(1.f, throttle + 0.7f * dt);
     if (in.brake) throttle = std::max(0.f, throttle - 0.9f * dt);
@@ -131,7 +166,8 @@ void Seaplanes::update(float dt, const Input& in, bool climb, bool dive, Player&
         Vector3 np = Vector3Add(pos, Vector3Scale(f, speed * dt));
         np.y = std::max(np.y, 0.f);
         if (np.y < 0.4f && pitch < 0.08f) np.y = 0;   // still on the floats until it's rotated for takeoff
-        if (!openWater(w, np.x, np.z) && np.y < 0.4f) {      // ran into the shore, a pier or a piling
+        if ((!openWater(w, np.x, np.z) && np.y < 0.4f) ||
+            planeHitsAerial(w, pos0, yaw0, pitch0, roll0, np, yaw, pitch, roll)) {      // ran into the shore, a pier or a piling
             if (speed > 8) evCrash = true;
             speed = 0;
             np = pos;
@@ -172,7 +208,8 @@ void Seaplanes::update(float dt, const Input& in, bool climb, bool dive, Player&
             if (pitch > -0.3f && fabsf(roll) < 0.5f && speed < 48.f) {   // a landing
                 onWater = true; pos.y = 0; pitch = 0; roll = 0; speed *= 0.75f; evSplash = true;
             } else evCrash = true;
-        } else if ((!water && pos.y < g + 0.8f) || w.solidAt({pos.x, pos.y + 1.6f, pos.z})) evCrash = true;
+        } else if ((!water && pos.y < g + 0.8f) || w.solidAt({pos.x, pos.y + 1.6f, pos.z}) ||
+                   planeHitsAerial(w, pos0, yaw0, pitch0, roll0, pos, yaw, pitch, roll)) evCrash = true;   // cables, masts, towers: the whole plane
     }
     for (auto& s : spray) { s.life -= dt; s.vel.y -= 9.f * dt; s.pos = Vector3Add(s.pos, Vector3Scale(s.vel, dt)); }
     spray.erase(std::remove_if(spray.begin(), spray.end(), [](const Spray& s) { return s.life <= 0 || s.pos.y < 0; }), spray.end());

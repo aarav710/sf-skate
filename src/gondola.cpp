@@ -207,6 +207,12 @@ void World::buildGondolas() {
 }
 
 // ---------------------------------------------------------------- cabins
+static float stationFactor(const GondolaLine& g, float s) {
+    float dmin = 1e9f;
+    for (float ss : g.stationS) dmin = std::min(dmin, fabsf(s - ss));
+    return 0.18f + 0.82f * clampf(dmin / 40.f, 0, 1);
+}
+
 void Gondolas::init(const World& w) {
     cabins.clear();
     for (size_t l = 0; l < w.gondolas.size(); l++) {
@@ -214,12 +220,40 @@ void Gondolas::init(const World& w) {
         int n = std::max(4, (int)(L / 170.f));
         for (int i = 0; i < n; i++) cabins.push_back({(int)l, 2 * L * i / n, i % 4});
     }
+    // the time round each loop, a step at a time at the speed update moves them (slower past the stations)
+    loopT.assign(w.gondolas.size(), {});
+    for (size_t l = 0; l < w.gondolas.size(); l++) {
+        const GondolaLine& g = w.gondolas[l];
+        int n = (int)ceilf(2 * g.len / TABLE_STEP);
+        std::vector<double>& v = loopT[l];
+        v.resize(n + 1);
+        v[0] = 0;
+        for (int k = 0; k < n; k++) {
+            float u0 = k * TABLE_STEP, u1 = std::min((k + 1) * TABLE_STEP, 2 * g.len), um = (u0 + u1) / 2;
+            float s = um < g.len ? um : 2 * g.len - um;
+            v[k + 1] = v[k] + (u1 - u0) / (CABLE_SPEED * stationFactor(g, s));
+        }
+    }
+    for (auto& c : cabins) c.t0 = -timeAt(c.line, c.u);
 }
 
-static float stationFactor(const GondolaLine& g, float s) {
-    float dmin = 1e9f;
-    for (float ss : g.stationS) dmin = std::min(dmin, fabsf(s - ss));
-    return 0.18f + 0.82f * clampf(dmin / 40.f, 0, 1);
+double Gondolas::timeAt(int line, float u) const {
+    const std::vector<double>& v = loopT[line];
+    float k = clampf(u / TABLE_STEP, 0, (float)(v.size() - 1));
+    int i = std::min((int)k, (int)v.size() - 2);
+    return v[i] + (v[i + 1] - v[i]) * (k - i);
+}
+
+void Gondolas::setTime(double t, const World& w) {
+    for (auto& c : cabins) {
+        const std::vector<double>& v = loopT[c.line];
+        double period = v.back(), tt = fmod(t - c.t0, period);
+        if (tt < 0) tt += period;
+        size_t i = std::upper_bound(v.begin(), v.end(), tt) - v.begin();
+        i = std::min(std::max<size_t>(i, 1), v.size() - 1);
+        double f = (tt - v[i - 1]) / std::max(v[i] - v[i - 1], 1e-9);
+        c.u = std::min((float)((i - 1 + f) * TABLE_STEP), 2 * w.gondolas[c.line].len - 1e-3f);
+    }
 }
 
 void Gondolas::update(float dt, const World& w) {

@@ -2363,10 +2363,13 @@ int main() {
         check(bad == 0, "Stopped vehicles have a roof to land on", b);
     }
     {   // a vehicle that pulls away carries a skater standing on its roof along with it (#128), turning with it too;
-        // before, it slid out from under them and they dropped to the street. Each kind is stopped by the traffic,
-        // the skater put on the roof (standing, as the player update leaves them) at the back, then at the front
-        // (the car must not brake for its own rider), then the car let go for 8 s. Cars with another beside or in
-        // front of them are skipped (they may be held up): the first free ones that get away are the ones checked.
+        // before, it slid out from under them and they dropped to the street. Each kind is stopped, the skater put on
+        // the roof (standing, as the player update leaves them) at the back, then at the front (the car must not
+        // brake for its own rider), then the car let go for 8 s. The cars come from the generated traffic: every one
+        // of the kind that's out on the road is a candidate, so a change to the world's generation or random numbers
+        // can't leave a kind without one. Each runs on its own, with nobody beside or ahead of it to hold it up (how
+        // cars give way to each other is checked above), and the first that gets away (past a stop, a signal or the
+        // end of its line) is the one checked.
         int bad = 0, moved = 0;
         std::string det;
         struct { int type; const char* n; } kinds[] = {{CT_SEDAN, "car"}, {CT_BUS, "bus"}, {CT_CABLECAR, "cable car"},
@@ -2377,23 +2380,19 @@ int main() {
             Player far; far.spawn({0, W.ground(0, 0, 1000) + 200, 0}, 0);   // out of everyone's way
             for (int f = 0; f < 60 * 3; f++) T.update(1.f / 60, W, far);
             const CarModel& m = carModel(k.type);
-            std::vector<int> cands;
-            for (size_t i = 0; i < T.cars.size() && cands.size() < 40; i++) {
-                const Car& c = T.cars[i];
-                if (c.type != k.type || !c.placed || c.mode > 2) continue;
-                bool free = true;
-                for (size_t j = 0; j < T.cars.size() && free; j++) {
-                    const Car& o = T.cars[j];
-                    if (j == i || !o.placed) continue;
-                    free = sq(o.pos.x - c.pos.x) + sq(o.pos.z - c.pos.z) > sq(m.halfLen + carModel(o.type).halfLen + 6);
-                }
-                if (free) cands.push_back((int)i);
-            }
+            std::vector<Car> pool;
+            for (const Car& c : T.cars)
+                if (c.type == k.type && c.placed) pool.push_back(c);
+            std::vector<int> cands;   // spread over the pool, so they don't all share one stretch of road
+            for (size_t i = 0; i < pool.size() && i < 40; i++) cands.push_back((int)(i * pool.size() / std::min<size_t>(pool.size(), 40)));
             size_t next = 0;
             for (float off : {-0.5f, 0.5f}) {
                 bool got = false;
                 for (; next < cands.size() && !got; next++) {
-                    int ci = cands[next];
+                    T.cars.assign(1, pool[cands[next]]);   // (on its own: nobody to hold it up)
+                    T.boxUsers.clear();
+                    T.rideCar = -1;
+                    int ci = 0;
                     T.cars[ci].stopT = 1e9f;
                     for (int f = 0; f < 60 * 20 && T.cars[ci].speed > 0.02f; f++) T.update(1.f / 60, W, far);
                     Car& c = T.cars[ci];
@@ -2433,9 +2432,9 @@ int main() {
                         bad++;
                     }
                 }
-                if (!got && !cands.empty()) {   // a kind that is out in traffic but never got away with a rider on it
+                if (!got) {   // none of the kind out in traffic got away with a rider on it (or none out at all)
                     char one[96];
-                    snprintf(one, sizeof one, "%s%s at %+.1f m: none of %zu free cars pulled away", det.empty() ? "" : "; ", k.n, off, cands.size());
+                    snprintf(one, sizeof one, "%s%s at %+.1f m: none of %zu cars pulled away", det.empty() ? "" : "; ", k.n, off, cands.size());
                     det += one;
                     bad++;
                 }

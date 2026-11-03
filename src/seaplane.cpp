@@ -239,7 +239,10 @@ void Seaplanes::update(float dt, const Input& in, bool climb, bool dive, Player&
         float pin = (climb ? 1.f : 0.f) - (dive ? 1.f : 0.f), rin = fabsf(in.steer) > 0.05f ? in.steer : 0.f;
         stickIdle = (pin != 0 || rin != 0) ? 0.f : stickIdle + dt;
         float auth = clampf(speed / 22.f, 0.3f, 1.f);                       // slow: the controls go soft
-        float dPitch = pin * PITCH_RATE * auth * dt, dRoll = rin * ROLL_RATE * auth * dt;
+        // near the horizon the nose moves gently, so a short tap climbs a little instead of overshooting; past ~25 degrees it's full rate
+        float elev = fabsf(asinf(clampf(nose().y, -1.f, 1.f)));
+        float pitchRate = PITCH_RATE * (0.5f + 0.5f * smooth01(0.25f, 0.5f, elev));
+        float dPitch = pin * pitchRate * auth * dt, dRoll = rin * ROLL_RATE * auth * dt;
         q = QuaternionMultiply(q, QuaternionMultiply(QuaternionFromAxisAngle({1, 0, 0}, dRoll), QuaternionFromAxisAngle({0, 0, 1}, dPitch)));
         auto turnWorld = [&](Quaternion r) { q = QuaternionMultiply(r, q); dir = Vector3RotateByQuaternion(dir, r); };
         // banking: the lift's sideways part swings the heading round (upside down, "up" pulls toward the ground)
@@ -295,7 +298,7 @@ void Seaplanes::update(float dt, const Input& in, bool climb, bool dive, Player&
         int hit = sweepPlane(w, pos0, q0, pos, q);
         if (hit & (HIT_AERIAL | HIT_LAND | HIT_SOLID)) evCrash = true;                     // cables, towers, the ground, buildings: any part of the plane
         else if ((!water && pos.y < g + 0.8) || w.solidAt({pos.x, pos.y + 1.6f, pos.z})) evCrash = true;
-        else if (hit & HIT_WATER) {
+        else if ((hit & HIT_WATER) && !(dir.y * speed + sagY >= 0.5f && upY() > 0.5f)) {   // (climbing away from the water, just lifted off, isn't a touchdown)
             float vy = dir.y * speed + sagY;
             if (water && pitch > -0.3f && fabsf(roll) < 0.5f && speed < 48.f && vy > -14.f) {   // a landing: upright, level, gentle
                 onWater = true; pos.y = 0; pitch = 0; roll = 0; speed *= 0.75f; evSplash = true;

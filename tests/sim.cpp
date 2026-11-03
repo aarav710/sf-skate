@@ -2741,6 +2741,46 @@ int main() {
             snprintf(b, sizeof b, "up.y held %.2f (idle %.1f s), 0.8 s after release %.2f, 4 s later %.2f", held, idleHeld, soon, t.upY());
             check(fabsf(held) < 0.1f && idleHeld == 0 && fabsf(soon) < 0.1f && t.upY() > 0.5f, "seaplane: auto-level waits for the stick", b);
         }
+        {   // takeoff from a mooring (full throttle, Space held to rotate) gets airborne and stays airborne: the floats leaving the
+            // water are not a touchdown, at 60 and 30 fps; then a whole flight like SFSKATE_FLY=2: climb, cruise, throttle back, glide in and land
+            int airOk = 0, tries = 0, cycleOk = 0, cycleTries = 0;
+            float worstAlt = 1e9f;
+            for (int m = 0; m < (int)SP.moored.size(); m++)
+                for (float dt : {1.f / 60, 1.f / 30}) {
+                    Player q;
+                    Seaplanes t = SP;
+                    t.mount(m, q);
+                    bool air = false; int splashAfter = 0;
+                    for (float tm = 0; tm < 14 && t.riding; tm += dt) {
+                        Input in; in.push = true;
+                        t.update(dt, in, tm > 1 && t.pitch < 0.3f, false, q, W);
+                        if (!t.onWater) air = true;
+                        if (t.evSplash && air) splashAfter++;
+                        t.evSplash = false;
+                    }
+                    tries++;
+                    worstAlt = std::min(worstAlt, t.altitude(W));
+                    airOk += t.riding && air && !t.onWater && splashAfter == 0 && t.altitude(W) > 20;
+                }
+            for (int m = 0; m < 2 && m < (int)SP.moored.size(); m++) {
+                Player q;
+                Seaplanes t = SP;
+                t.mount(m, q);
+                bool landed = false;
+                for (float tm = 0; tm < 150 && t.riding && !landed; tm += DT) {
+                    bool land = tm > 25;
+                    Input in; in.push = !land; in.brake = land;
+                    bool climb = t.speed > 24 && t.altitude(W) < 80 && t.pitch < 0.25f && !land, dive = false;
+                    if (land) { climb = t.pitch < -0.12f; dive = t.pitch > -0.08f && t.altitude(W) > 6; }
+                    t.update(DT, in, climb, dive, q, W);
+                    landed = land && t.onWater;
+                }
+                cycleTries++;
+                cycleOk += landed && t.riding;
+            }
+            snprintf(b, sizeof b, "%d/%d takeoffs stay up (lowest %.0f m after 14 s); %d/%d full flights land", airOk, tries, worstAlt, cycleOk, cycleTries);
+            check(tries == 6 && airOk == tries && cycleOk == cycleTries, "seaplane: takeoff, climb, glide, land", b);
+        }
         {   // landing: upright, level and gentle works; the same touch upside down (or steeply banked) crashes
             auto touch = [&](float pitch, float roll, float spd) {
                 Player q;

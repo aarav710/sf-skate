@@ -1364,7 +1364,7 @@ int main() {
                 const char* skiLines[] = {"JET SKI", "W|go", "S|brake", "A D|steer", "Shift|boost", "E|hop off at the shore",
                                           "Right mouse|look around", "H|hide controls"};
                 const char* planeLines[] = {"SEAPLANE", "W / S|throttle", "A D|steer; roll in the air", "Space|nose up (lift off past 55 mph)",
-                                            "Shift|nose down", "Hold|loops, rolls, upside down", "E|climb out at the shore", "Right mouse|look around", "H|hide controls"};
+                                            "Shift|nose down", "Hold|loops, rolls, upside down", "E|climb out at the shore", "Wheel|zoom", "H|hide controls"};
                 const char** lines = JS.riding ? skiLines : SP.riding ? planeLines : skateLines;
                 const int n = JS.riding ? (int)(sizeof(skiLines) / sizeof(*skiLines))
                             : SP.riding ? (int)(sizeof(planeLines) / sizeof(*planeLines)) : (int)(sizeof(skateLines) / sizeof(*skateLines));

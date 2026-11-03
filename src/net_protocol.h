@@ -13,10 +13,10 @@
 
 namespace netp {
 
-constexpr uint16_t PROTOCOL_VERSION = 2;
+constexpr uint16_t PROTOCOL_VERSION = 3;
 // Bump when gameplay or world generation changes, so mismatched builds are refused even if the world counts happen
 // to agree (it goes into the world fingerprint, net_game.cpp). PROTOCOL_VERSION is for wire format changes.
-constexpr uint32_t GAME_BUILD = 2;
+constexpr uint32_t GAME_BUILD = 3;
 constexpr int MAX_PLAYERS = 8;
 constexpr int NAME_MAX = 16;          // bytes of UTF-8
 constexpr int CODE_LEN = 6;
@@ -47,8 +47,8 @@ enum MsgType : uint8_t {
     MSG_REJOIN = 12,       // reserved for later stages (plan section 4); not encoded yet
     MSG_CAR_SNAPSHOT = 13, // host -> relay -> room, 10 Hz, unreliable sequenced: the cars near the other players
     MSG_FULL_SNAPSHOT = 14,// host -> relay -> one player who asked, reliable: all of the traffic
-    MSG_WORLD_SETTINGS = 15,   // reserved
-    MSG_EVENT = 16,            // reserved
+    MSG_WORLD_SETTINGS = 15,   // host -> relay -> room: time of day and weather; anyone else -> relay -> host: a request
+    MSG_EVENT = 16,        // client -> relay -> room, reliable: something one player did to the shared world
     MSG_FULL_REQUEST = 17, // client -> relay -> host: send me a full snapshot (on joining, or when out of step)
     MSG_TYPE_COUNT
 };
@@ -390,6 +390,67 @@ struct MsgFullSnapshot {
         to = r.u8();
         if (r.bad || r.left() > MAX_SIZE) { r.bad = true; return; }
         data.assign(r.p + r.at, r.p + r.n); r.at = r.n;
+    }
+};
+
+// The session's time of day and weather. The host's goes to everyone (and to each player who joins); from anyone
+// else it's a request the relay passes to the host only, who takes it (or not) and sends it on as its own.
+struct MsgWorldSettings {
+    static constexpr uint8_t TYPE = MSG_WORLD_SETTINGS;
+    enum Flag : uint8_t { F_FOG = 1, F_RAIN = 2 };
+    uint8_t preset = 0;               // 0 day, 1 golden hour, 2 night
+    uint8_t flags = 0;
+    bool fog() const { return flags & F_FOG; }
+    bool rain() const { return flags & F_RAIN; }
+    bool operator==(const MsgWorldSettings& o) const { return preset == o.preset && flags == o.flags; }
+    bool operator!=(const MsgWorldSettings& o) const { return !(*this == o); }
+    void encode(ByteWriter& w) const { w.u8(preset); w.u8(flags); }
+    void decode(ByteReader& r) {
+        preset = r.u8(); flags = r.u8();
+        if (preset > 2 || flags > (F_FOG | F_RAIN)) r.bad = true;
+    }
+};
+
+// Something a player did to the shared world, reliable, to everyone else in the room (header.from: who did it).
+//  CAR_HIT: ran into car `idx` at traffic time simTime; `car` is that car as it was then (Traffic::serializeCars of
+//           it alone), so the host can stop it right where the hitter saw it stop
+//  PED_EVADE: person `idx` set off on a dodge (Traffic::startEvade's kind, dir, dist) to let the sender by
+//  PED_KNOCK: the sender knocked person `idx` down
+// Indices are checked against the traffic by whoever applies them (the relay doesn't load the world).
+enum EventKind : uint8_t { EVT_NONE = 0, EVT_CAR_HIT = 1, EVT_PED_EVADE = 2, EVT_PED_KNOCK = 3, EVT_COUNT };
+struct MsgEvent {
+    static constexpr uint8_t TYPE = MSG_EVENT;
+    static constexpr size_t CAR_MAX = 64;      // one car's record is 24-32 B
+    static constexpr float DIST_MAX = 12;      // m: the longest dodge (a dive past a skater going the other way)
+    uint8_t kind = EVT_NONE;
+    uint32_t idx = 0;
+    double simTime = 0;                        // CAR_HIT
+    std::vector<uint8_t> car;                  // CAR_HIT
+    uint8_t evade = 0;                         // PED_EVADE: EV_STEP .. EV_DIVE (traffic.h: 1..4)
+    float dirX = 0, dirZ = 0, dist = 0;        // PED_EVADE
+    void encode(ByteWriter& w) const {
+        w.u8(kind); w.u32(idx);
+        if (kind == EVT_CAR_HIT) {
+            w.f64(simTime);
+            size_t n = std::min(car.size(), CAR_MAX);
+            w.u8((uint8_t)n);
+            for (size_t i = 0; i < n; i++) w.u8(car[i]);
+        } else if (kind == EVT_PED_EVADE) {
+            w.u8(evade); w.f32(dirX); w.f32(dirZ); w.f32(dist);
+        }
+    }
+    void decode(ByteReader& r) {
+        kind = r.u8(); idx = r.u32();
+        if (kind == EVT_CAR_HIT) {
+            simTime = r.f64();
+            size_t n = r.u8();
+            if (r.bad || !std::isfinite(simTime) || simTime < 0 || simTime > MAX_HOST_TIME || idx > 0xFFFF || n > CAR_MAX || n > r.left()) { r.bad = true; return; }
+            car.assign(r.p + r.at, r.p + r.at + n); r.at += n;
+        } else if (kind == EVT_PED_EVADE) {
+            evade = r.u8(); dirX = r.f32(); dirZ = r.f32(); dist = r.f32();
+            float len = std::isfinite(dirX) && std::isfinite(dirZ) ? std::sqrt(dirX * dirX + dirZ * dirZ) : 0.f;
+            if (evade < 1 || evade > 4 || len < 0.9f || len > 1.1f || !std::isfinite(dist) || dist < 0 || dist > DIST_MAX) r.bad = true;
+        } else if (kind != EVT_PED_KNOCK) r.bad = true;
     }
 };
 

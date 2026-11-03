@@ -80,6 +80,7 @@ void Relay::service(int timeoutMs) {
             PeerInfo& pi = peers_[ev.peer];
             pi = PeerInfo();
             pi.rl.rate = rateBytes; pi.rl.burst = pi.rl.tokens = rateBurst;
+            pi.events.rate = EVENT_RATE; pi.events.burst = pi.events.tokens = EVENT_BURST;
             logf("connect %s", addrText(ev.peer).c_str());
             break;
         }
@@ -235,6 +236,27 @@ void Relay::onReceive(ENetPeer* peer, const uint8_t* data, size_t n) {
         bytes[1] = r->host;
         send(peerOf(to->peer), bytes, netp::CH_RELIABLE);
         logf("room %s: full snapshot (%zu B) from the host to player %u", r->code.c_str(), n, (unsigned)to->id);
+        return;
+    }
+    case netp::MSG_WORLD_SETTINGS: {
+        // the host's go to everyone; anyone else's are requests, for the host only (it decides, and sends them on)
+        const Room* r = rooms.roomOf(key);
+        netp::MsgWorldSettings m;
+        if (!r || !netp::unpack(data, n, m) || !pi.events.allow(1, now)) return;
+        uint8_t id = rooms.idOf(key);
+        std::vector<uint8_t> bytes(data, data + n);
+        bytes[1] = id;
+        for (auto& mem : r->members)
+            if (mem.peer != key && (id == r->host || mem.id == r->host)) send(peerOf(mem.peer), bytes, netp::CH_RELIABLE);
+        return;
+    }
+    case netp::MSG_EVENT: {
+        const Room* r = rooms.roomOf(key);
+        netp::MsgEvent m;
+        if (!r || !netp::unpack(data, n, m) || !pi.events.allow(1, now)) return;
+        std::vector<uint8_t> bytes(data, data + n);
+        bytes[1] = rooms.idOf(key);
+        for (auto& mem : r->members) if (mem.peer != key) send(peerOf(mem.peer), bytes, netp::CH_RELIABLE);
         return;
     }
     case netp::MSG_PING: {

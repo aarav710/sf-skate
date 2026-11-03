@@ -89,7 +89,8 @@ void Net::stop() {
     if (status != FAILED) status = OFF;
     remotes.clear();
     inbox.clear();
-    carInbox.clear(); fullInbox.clear(); fullRequests.clear();
+    carInbox.clear(); fullInbox.clear(); fullRequests.clear(); eventInbox.clear();
+    worldSet = worldIn = false;
     code.clear();
     myId = hostId = 0;
 }
@@ -100,7 +101,8 @@ void Net::fail(const std::string& why) {
     status = FAILED;
     remotes.clear();
     inbox.clear();
-    carInbox.clear(); fullInbox.clear(); fullRequests.clear();
+    carInbox.clear(); fullInbox.clear(); fullRequests.clear(); eventInbox.clear();
+    worldSet = worldIn = false;
 }
 
 void Net::sendCarSnapshot(const netp::MsgCarSnapshot& m, double now) {
@@ -117,6 +119,17 @@ void Net::sendFull(uint8_t to, const std::vector<uint8_t>& data, double now) {
 void Net::requestFull(double now) {
     if (status != IN_SESSION || isHost()) return;
     send(netp::pack(netp::MsgFullRequest(), myId, seq_++, clock(now)), netp::CH_RELIABLE);
+}
+
+void Net::sendEvent(const netp::MsgEvent& m, double now) {
+    if (status != IN_SESSION) return;
+    send(netp::pack(m, myId, seq_++, clock(now)), netp::CH_RELIABLE);
+}
+
+void Net::setWorld(const netp::MsgWorldSettings& w, double now) {
+    if (status != IN_SESSION) return;
+    if (isHost()) { world = w; worldSet = true; }
+    send(netp::pack(w, myId, seq_++, clock(now)), netp::CH_RELIABLE);   // (the relay passes a request to the host only)
 }
 
 void Net::send(const std::vector<uint8_t>& bytes, uint8_t channel) {
@@ -224,6 +237,7 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
         RemoteInfo r; r.id = m.id; r.name = m.name;
         remotes.push_back(r);
         log.push_back(m.name + " joined");
+        if (isHost() && worldSet) send(netp::pack(world, myId, seq_++, clock(now)), netp::CH_RELIABLE);   // (so they have it)
         return;
     }
     case netp::MSG_LEFT: {
@@ -238,6 +252,9 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
         if (status != IN_SESSION || !netp::unpack(data, n, m)) return;
         hostId = m.id;
         carInbox.clear(); fullInbox.clear(); fullRequests.clear();   // (the old host's, or asked of it)
+        // the session's weather is ours to keep now (what the old host last sent, which we show): everyone gets it
+        // again, in case one of the old host's never got there
+        if (m.id == myId && worldSet) send(netp::pack(world, myId, seq_++, clock(now)), netp::CH_RELIABLE);
         const RemoteInfo* r = remote(m.id);
         log.push_back(m.id == myId ? std::string("You are the host now") : (r ? r->name : std::string("someone")) + " is the host now");
         return;
@@ -273,6 +290,23 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
         netp::MsgFullRequest m;
         if (!isHost() || !netp::unpack(data, n, m, &h) || h.from == myId || !remote(h.from)) return;
         if (std::find(fullRequests.begin(), fullRequests.end(), h.from) == fullRequests.end()) fullRequests.push_back(h.from);
+        return;
+    }
+    case netp::MSG_WORLD_SETTINGS: {
+        netp::MsgWorldSettings m;
+        if (status != IN_SESSION || !netp::unpack(data, n, m, &h) || h.from == myId) return;
+        if (isHost()) {   // a request: taken, and sent on to everyone as the session's
+            if (!remote(h.from)) return;
+            setWorld(m, now);
+        } else if (h.from != hostId) return;
+        world = m; worldSet = true; worldIn = true; worldFrom = h.from;
+        return;
+    }
+    case netp::MSG_EVENT: {
+        EventIn in;
+        if (status != IN_SESSION || !netp::unpack(data, n, in.m, &h) || h.from == myId || !remote(h.from)) return;
+        in.from = h.from; in.recvAt = now;
+        if (eventInbox.size() < EVENT_INBOX_MAX) eventInbox.push_back(std::move(in));
         return;
     }
     case netp::MSG_PONG: {

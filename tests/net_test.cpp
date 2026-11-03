@@ -160,6 +160,39 @@ static void protocolChecks() {
         ok = ok && !unpack(bytes.data(), bytes.size(), v);
         check(ok, "proto: PLAYER_STATE saturates", "speeds +-327 m/s, rail out of range = none, NaN refused");
     }
+    {   // world settings and events: round trips, and anything out of range refused
+        MsgWorldSettings w, wo; w.preset = 2; w.flags = MsgWorldSettings::F_FOG | MsgWorldSettings::F_RAIN;
+        bool ok = roundTrip(w, wo) && wo == w && wo.fog() && wo.rain();
+        auto refuses = [](const std::vector<uint8_t>& bytes, auto m) { return !unpack(bytes.data(), bytes.size(), m); };
+        auto wb = pack(w); wb[HEADER_SIZE] = 3; ok = ok && refuses(wb, w);
+        wb = pack(w); wb[HEADER_SIZE + 1] = 4; ok = ok && refuses(wb, w);
+        MsgEvent h, ho; h.kind = EVT_CAR_HIT; h.idx = 65535; h.simTime = 1e6; h.car.assign(MsgEvent::CAR_MAX, 7);
+        ok = ok && roundTrip(h, ho) && ho.idx == 65535 && ho.simTime == 1e6 && ho.car == h.car;
+        MsgEvent e, eo; e.kind = EVT_PED_EVADE; e.idx = 4000000; e.evade = 4; e.dirX = -1; e.dirZ = 0; e.dist = 12;
+        ok = ok && roundTrip(e, eo) && eo.idx == 4000000 && eo.evade == 4 && eo.dirX == -1 && eo.dist == 12;
+        MsgEvent k, ko; k.kind = EVT_PED_KNOCK; k.idx = 9;
+        size_t ks = 0;
+        ok = ok && roundTrip(k, ko, &ks) && ko.kind == EVT_PED_KNOCK && ko.idx == 9 && ks == HEADER_SIZE + 5;
+        int refused = 0;
+        for (int v = 0; v < 8; v++) {
+            MsgEvent x = e;
+            switch (v) {
+            case 0: x.evade = 0; break;
+            case 1: x.evade = 5; break;
+            case 2: x.dirX = NAN; break;
+            case 3: x.dirX = 0.5f; break;   // (not a unit direction)
+            case 4: x.dist = -1; break;
+            case 5: x.dist = INFINITY; break;
+            case 6: x.kind = EVT_COUNT; break;
+            default: x = h; x.simTime = NAN; break;
+            }
+            refused += refuses(pack(x), x);
+        }
+        MsgEvent big = h; big.idx = 70000; refused += refuses(pack(big), big);   // (cars are u16)
+        char b[200];
+        snprintf(b, sizeof b, "presets 0-2 and fog/rain flags only; car hit / dodge / knock round trips; %d of 9 bad events refused", refused);
+        check(ok && refused == 9, "proto: WORLD_SETTINGS and EVENT", b);
+    }
     {   // a header clock that is NaN, infinite or absurd is refused, whatever the message (it feeds remote smoothing)
         MsgPlayerState m; MsgPing pg;
         bool ok = true;
@@ -590,6 +623,101 @@ static void liveChecks() {
         double tl = pump([&] { return A.remotes.size() == 1 && B.remotes.size() == 1; }, 10);
         snprintf(b, sizeof b, "both rosters back to 1 after %.2fs, A logged \"Raw left\"=%d", tl, (int)logged(A, "Raw left"));
         check(tl >= 0 && logged(A, "Raw left"), "live: LEFT on disconnect", b);
+    }
+    {   // the session's time of day and weather: the host's go to everyone; B's key press is a request the host takes and
+        // sends on; a bare client's goes to the host only (never straight to the others); someone joining gets the
+        // current ones. Then events: to everyone else, stamped with the sender; bad ones and floods dropped.
+        auto rcp = std::make_unique<RawClient>(), lp = std::make_unique<RawClient>();
+        RawClient& rc = *rcp;   // a bare client that sends
+        RawClient& ear = *lp;   // and one that listens
+        raw = &rc;
+        rc.start(rel.port());
+        pump([&] { return rc.connected; }, 10);
+        MsgJoin j; j.code = A.code; j.fingerprint = 42; j.name = "Raw";
+        rc.send(pack(j), CH_RELIABLE);
+        MsgWelcome w;
+        pump([&] { return !rc.got.empty() && A.remotes.size() == 2; }, 10);
+        bool joined = !rc.got.empty() && unpack(rc.got[0].data(), rc.got[0].size(), w);
+        A.worldIn = B.worldIn = false;
+        MsgWorldSettings night; night.preset = 2; night.flags = MsgWorldSettings::F_RAIN;
+        A.setWorld(night, nowSec());
+        double t1 = pump([&] { return B.worldIn; }, 10);
+        bool hostSent = t1 >= 0 && B.world == night && B.worldFrom == A.myId && A.world == night && !A.worldIn;
+        B.worldIn = false;
+        MsgWorldSettings fog; fog.preset = 1; fog.flags = MsgWorldSettings::F_FOG;
+        B.setWorld(fog, nowSec());   // (not the host: a request)
+        bool notYet = B.world == night;
+        double t2 = pump([&] { return A.worldIn && B.worldIn; }, 10);
+        bool request = t2 >= 0 && notYet && A.world == fog && A.worldFrom == B.myId && B.world == fog && B.worldFrom == A.myId;
+        A.worldIn = B.worldIn = false;
+        // the listener joins: it gets the session's settings from the host, unasked
+        ear.start(rel.port());
+        pump([&] { rc.service(); ear.service(); return ear.connected; }, 10);
+        MsgJoin j2 = j; j2.name = "Ear";
+        ear.send(pack(j2), CH_RELIABLE);
+        auto settingsIn = [](RawClient& c, uint8_t from, MsgWorldSettings* out) {
+            for (auto& g : c.got) {
+                MsgWorldSettings m; Header h;
+                if (unpack(g.data(), g.size(), m, &h) && (from == 0 || h.from == from)) { if (out) *out = m; return true; }
+            }
+            return false;
+        };
+        MsgWorldSettings got;
+        double t3 = pump([&] { ear.service(); return settingsIn(ear, A.myId, &got); }, 10);
+        bool joiner = t3 >= 0 && got == fog;
+        // the bare client's request (forged as the host's, even): only the host gets it, and sends it on as its own
+        ear.got.clear();
+        MsgWorldSettings day; day.preset = 0;
+        rc.send(pack(day, A.myId, 1), CH_RELIABLE);
+        double t4 = pump([&] { ear.service(); return A.worldIn && B.worldIn; }, 10);
+        pump([&] { ear.service(); return false; }, 0.3);
+        bool direct = false;
+        for (auto& g : ear.got) { Header h; MsgWorldSettings m; direct |= unpack(g.data(), g.size(), m, &h) && h.from != A.myId; }
+        bool viaHost = t4 >= 0 && A.worldFrom == w.playerId && B.world == day && B.worldFrom == A.myId && settingsIn(ear, A.myId, nullptr) && !direct;
+        // a bad one (preset 3) goes nowhere
+        A.worldIn = B.worldIn = false;
+        auto bad = pack(day, w.playerId, 2);
+        bad[HEADER_SIZE] = 3;
+        rc.send(bad, CH_RELIABLE);
+        pump([&] { ear.service(); return false; }, 0.3);
+        bool badDropped = !A.worldIn && !B.worldIn;
+        snprintf(b, sizeof b, "host's to B after %.2fs %d; B's request taken and back after %.2fs %d; joiner given them %d; a bare client's "
+                 "to the host only, sent on by it %d; bad one dropped %d", t1, (int)hostSent, t2, (int)request, (int)joiner, (int)viaHost, (int)badDropped);
+        check(joined && hostSent && request && joiner && viaHost && badDropped, "live: world settings", b);
+
+        // events
+        A.eventInbox.clear(); B.eventInbox.clear(); ear.got.clear();
+        MsgEvent pe; pe.kind = EVT_PED_EVADE; pe.idx = 1234; pe.evade = 3; pe.dirX = 0.6f; pe.dirZ = -0.8f; pe.dist = 2.5f;
+        B.sendEvent(pe, nowSec());
+        MsgEvent hit; hit.kind = EVT_CAR_HIT; hit.idx = 77; hit.simTime = 12.5; hit.car = {1, 2, 3, 4};
+        A.sendEvent(hit, nowSec());
+        auto evIn = [](RawClient& c) { int n = 0; for (auto& g : c.got) n += peekType(g.data(), g.size()) == MSG_EVENT; return n; };
+        double t5 = pump([&] { ear.service(); return !A.eventInbox.empty() && !B.eventInbox.empty() && evIn(ear) == 2; }, 10);
+        bool fwd = t5 >= 0 && A.eventInbox.size() == 1 && A.eventInbox[0].from == B.myId && A.eventInbox[0].m.idx == 1234 && A.eventInbox[0].m.evade == 3 &&
+                   A.eventInbox[0].m.dirZ == -0.8f && B.eventInbox.size() == 1 && B.eventInbox[0].from == A.myId && B.eventInbox[0].m.car == hit.car &&
+                   B.eventInbox[0].m.simTime == 12.5;
+        // bad ones (a NaN direction, an unknown kind) and a flood of good ones from the bare client
+        A.eventInbox.clear(); B.eventInbox.clear();
+        MsgEvent nan = pe; nan.dirX = NAN;
+        rc.send(pack(nan, w.playerId, 3), CH_RELIABLE);
+        auto unk = pack(pe, w.playerId, 4);
+        unk[HEADER_SIZE] = EVT_COUNT;
+        rc.send(unk, CH_RELIABLE);
+        pump([&] { ear.service(); return false; }, 0.3);
+        bool badEv = A.eventInbox.empty() && B.eventInbox.empty();
+        for (int k = 0; k < 300; k++) rc.send(pack(pe, w.playerId, (uint16_t)(10 + k)), CH_RELIABLE);
+        pump([&] { ear.service(); return false; }, 1.0);
+        size_t flood = B.eventInbox.size();
+        bool limited = flood >= (size_t)relay::EVENT_BURST && flood < (size_t)relay::EVENT_BURST + 40;
+        snprintf(b, sizeof b, "a dodge from B and a car hit from A to everyone else after %.2fs %d; bad ones dropped %d; 300 at once: %zu got through",
+                 t5, (int)fwd, (int)badEv, flood);
+        check(fwd && badEv && limited, "live: events", b);
+        A.eventInbox.clear(); B.eventInbox.clear();
+        raw = nullptr;
+        rcp.reset();
+        lp.reset();
+        pump([&] { return A.remotes.size() == 1 && B.remotes.size() == 1; }, 10);
+        A.log.clear(); B.log.clear();
     }
     {   // joins that must fail
         Net C, D;

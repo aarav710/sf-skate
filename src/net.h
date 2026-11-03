@@ -53,6 +53,12 @@ struct FullIn {
     double recvAt = 0;
     std::vector<uint8_t> data;   // Traffic::serializeFull
 };
+// An EVENT from another player as it arrived (our clock).
+struct EventIn {
+    uint8_t from = 0;
+    double recvAt = 0;
+    netp::MsgEvent m;
+};
 
 class Net {
 public:
@@ -70,6 +76,12 @@ public:
     void sendFull(uint8_t to, const std::vector<uint8_t>& data, double now);
     // traffic (not the host): ask the host for a full snapshot
     void requestFull(double now);
+    // something we did to the shared world, to everyone else (reliable)
+    void sendEvent(const netp::MsgEvent& m, double now);
+    // The session's time of day and weather. The host: these are the session's now, sent to everyone (and again to
+    // each player who joins, and by whoever hosts next). Anyone else: asks the host for them; they're the session's
+    // once the host sends them back (worldIn).
+    void setWorld(const netp::MsgWorldSettings& w, double now);
 
     bool active() const { return status != OFF; }
     bool isHost() const { return status == IN_SESSION && myId == hostId; }
@@ -93,6 +105,13 @@ public:
     static constexpr size_t CAR_INBOX_MAX = 128;
     std::vector<FullIn> fullInbox;
     std::vector<uint8_t> fullRequests;
+    std::vector<EventIn> eventInbox;    // other players' events, drained by the caller
+    static constexpr size_t EVENT_INBOX_MAX = 256;
+    // the session's time of day and weather: the host's (worldSet: there is one). worldIn: new ones came (from the
+    // host, or as the host a request it took, from worldFrom), for the caller to show and clear
+    netp::MsgWorldSettings world;
+    bool worldSet = false, worldIn = false;
+    uint8_t worldFrom = 0;
 
 private:
     _ENetHost* host_ = nullptr;

@@ -80,6 +80,7 @@ enum : unsigned char {
     M_HOUSE2 = 135,
     M_HOUSE3 = 120,
     M_INTERIOR = 105, // inside a house: lit by lamps and window light, not by the sun
+    M_SEA = 90,       // the bay: water whose vertex red channel is the depth of the seabed below it (see World::buildTerrainMesh)
 };
 
 inline Color col(int r, int g, int b, unsigned char m = M_PLAIN) {

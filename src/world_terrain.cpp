@@ -978,6 +978,8 @@ static Color groundColor(const World& w, float x, float z, float h, float slope)
 // The bay floor is drawn down to this depth, where the water has all but closed over it; below that one flat
 // floor stands in for it (see buildTerrainMesh), so the see-through water never shows empty space
 constexpr float SEABED_MIN = -7.f;
+// The depth range the sea mesh's red channel covers (see buildTerrainMesh); the shader's decode must match (SEA_D0, SEA_D1 in render.cpp)
+constexpr float SEA_D0 = -4.f, SEA_D1 = 6.f;
 
 void World::buildTerrainMesh() {
     const float S = 10.f;
@@ -1066,9 +1068,98 @@ void World::buildTerrainMesh() {
     }
     // the deep bay floor under everything, below the deepest seabed
     mbKey(900020).quad({-40000, -14.5f, -40000}, {40000, -14.5f, -40000}, {40000, -14.5f, 40000}, {-40000, -14.5f, 40000}, col(150, 140, 112, M_GROUND));
-    // the sea: one large quad, the shader animates it
-    Color wc = col(30, 78, 98, M_WATER);
-    waterB.quad({-40000, 0, -40000}, {40000, 0, -40000}, {40000, 0, 40000}, {-40000, 0, 40000}, wc);
+    // the sea, at y = 0 and animated by the shader. Not one big quad: every vertex carries the depth of the seabed
+    // under it in its red channel (SEA_D0..SEA_D1 metres over 0..255), so the shader can let the water thin out to
+    // nothing where it meets the sand, and wash up and down the beach, instead of starting at a hard line where the
+    // surface cuts the ground. The mesh follows the ground mesh's own triangles, so the depth interpolates exactly as
+    // the ground's height does. Cells of 10 m along the shore, fans of 16 x 16 cells over the deep water (their sides
+    // next to a shore block split at every cell so the two meet without cracks), nothing over dry land, and strips
+    // out to the edge of the world around the heightfield.
+    {
+        constexpr int BL = 16;
+        constexpr float FAR_XZ = 40000.f, DEEP = 3.f, DRY = 0.05f;
+        auto code = [&](float depth) {
+            float u = (clampf(depth, SEA_D0, SEA_D1) - SEA_D0) / (SEA_D1 - SEA_D0);
+            return col((int)(u * 255.f + 0.5f), 78, 98, M_SEA);
+        };
+        auto hAt = [&](int i, int j) { return H[(size_t)j * (nx + 1) + i]; };
+        auto X = [&](int i) { return WX0 + i * S; };
+        auto Z = [&](int j) { return WZ0 + j * S; };
+        Color deepC = code(SEA_D1);
+        int bx = (nx + BL - 1) / BL, bz = (nz + BL - 1) / BL;
+        enum { DEEP_B, SHORE_B, LAND_B };
+        std::vector<unsigned char> kind((size_t)bx * bz);
+        for (int bj = 0; bj < bz; bj++)
+            for (int bi = 0; bi < bx; bi++) {
+                float lo = 1e9f, hi = -1e9f;
+                for (int j = bj * BL; j <= std::min(bj * BL + BL, nz); j++)
+                    for (int i = bi * BL; i <= std::min(bi * BL + BL, nx); i++) { lo = std::min(lo, hAt(i, j)); hi = std::max(hi, hAt(i, j)); }
+                kind[(size_t)bj * bx + bi] = hi < -DEEP ? DEEP_B : lo > DRY ? LAND_B : SHORE_B;
+            }
+        auto kindAt = [&](int bi, int bj) { return bi < 0 || bj < 0 || bi >= bx || bj >= bz ? -1 : (int)kind[(size_t)bj * bx + bi]; };
+        // a quad a b d c (the ground mesh's winding), split a-b-d, a-d-c
+        auto cell = [&](Vector3 a, Vector3 b, Vector3 d, Vector3 c, Color ka, Color kb, Color kd, Color kc) {
+            waterB.vert(a, ka); waterB.vert(b, kb); waterB.vert(d, kd);
+            waterB.vert(a, ka); waterB.vert(d, kd); waterB.vert(c, kc);
+        };
+        for (int bj = 0; bj < bz; bj++)
+            for (int bi = 0; bi < bx; bi++) {
+                int k = kind[(size_t)bj * bx + bi];
+                int i0 = bi * BL, i1 = std::min(i0 + BL, nx), j0 = bj * BL, j1 = std::min(j0 + BL, nz);
+                if (k == LAND_B) continue;
+                if (k == SHORE_B) {
+                    for (int j = j0; j < j1; j++)
+                        for (int i = i0; i < i1; i++) {
+                            float ha = hAt(i, j), hb = hAt(i + 1, j), hc = hAt(i, j + 1), hd = hAt(i + 1, j + 1);
+                            if (std::min(std::min(ha, hb), std::min(hc, hd)) > DRY) continue;
+                            cell({X(i), 0, Z(j)}, {X(i + 1), 0, Z(j)}, {X(i + 1), 0, Z(j + 1)}, {X(i), 0, Z(j + 1)},
+                                 code(-ha), code(-hb), code(-hd), code(-hc));
+                        }
+                    continue;
+                }
+                // deep: a fan from the middle to the rim, the rim split into cells on the sides that meet a shore block
+                std::vector<Vector3> rim;
+                auto side = [&](int ia, int ja, int ib, int jb, int nbi, int nbj) {   // from (ia,ja) towards (ib,jb), excluding the end
+                    bool split = kindAt(nbi, nbj) == SHORE_B;
+                    int steps = std::max(abs(ib - ia), abs(jb - ja));
+                    int di = (ib > ia) - (ib < ia), dj = (jb > ja) - (jb < ja);
+                    if (!split) { rim.push_back({X(ia), 0, Z(ja)}); return; }
+                    for (int s = 0; s < steps; s++) rim.push_back({X(ia + di * s), 0, Z(ja + dj * s)});
+                };
+                side(i0, j0, i1, j0, bi, bj - 1);   // north, west to east
+                side(i1, j0, i1, j1, bi + 1, bj);   // east, north to south
+                side(i1, j1, i0, j1, bi, bj + 1);   // south, east to west
+                side(i0, j1, i0, j0, bi - 1, bj);   // west, south to north
+                Vector3 mid = {(X(i0) + X(i1)) / 2, 0, (Z(j0) + Z(j1)) / 2};
+                for (size_t r = 0; r < rim.size(); r++) {
+                    waterB.vert(mid, deepC);
+                    waterB.vert(rim[r], deepC);
+                    waterB.vert(rim[(r + 1) % rim.size()], deepC);
+                }
+            }
+        // out to the edge of the world: a strip off every rim segment (the same ones the blocks end on), and the corners
+        float xa = X(0), xb = X(nx), za = Z(0), zb = Z(nz), F = FAR_XZ;
+        for (int bi = 0; bi < bx; bi++) {
+            int k = kind[(size_t)bi], k2 = kind[(size_t)(bz - 1) * bx + bi];
+            int i0 = bi * BL, i1 = std::min(i0 + BL, nx);
+            for (int i = i0; i < i1; i += (k == SHORE_B ? 1 : BL))
+                cell({X(i), 0, -F}, {X(std::min(i + (k == SHORE_B ? 1 : BL), i1)), 0, -F}, {X(std::min(i + (k == SHORE_B ? 1 : BL), i1)), 0, za}, {X(i), 0, za}, deepC, deepC, deepC, deepC);
+            for (int i = i0; i < i1; i += (k2 == SHORE_B ? 1 : BL))
+                cell({X(i), 0, zb}, {X(std::min(i + (k2 == SHORE_B ? 1 : BL), i1)), 0, zb}, {X(std::min(i + (k2 == SHORE_B ? 1 : BL), i1)), 0, F}, {X(i), 0, F}, deepC, deepC, deepC, deepC);
+        }
+        for (int bj = 0; bj < bz; bj++) {
+            int k = kind[(size_t)bj * bx], k2 = kind[(size_t)bj * bx + bx - 1];
+            int j0 = bj * BL, j1 = std::min(j0 + BL, nz);
+            for (int j = j0; j < j1; j += (k == SHORE_B ? 1 : BL))
+                cell({-F, 0, Z(j)}, {xa, 0, Z(j)}, {xa, 0, Z(std::min(j + (k == SHORE_B ? 1 : BL), j1))}, {-F, 0, Z(std::min(j + (k == SHORE_B ? 1 : BL), j1))}, deepC, deepC, deepC, deepC);
+            for (int j = j0; j < j1; j += (k2 == SHORE_B ? 1 : BL))
+                cell({xb, 0, Z(j)}, {F, 0, Z(j)}, {F, 0, Z(std::min(j + (k2 == SHORE_B ? 1 : BL), j1))}, {xb, 0, Z(std::min(j + (k2 == SHORE_B ? 1 : BL), j1))}, deepC, deepC, deepC, deepC);
+        }
+        cell({-F, 0, -F}, {xa, 0, -F}, {xa, 0, za}, {-F, 0, za}, deepC, deepC, deepC, deepC);
+        cell({xb, 0, -F}, {F, 0, -F}, {F, 0, za}, {xb, 0, za}, deepC, deepC, deepC, deepC);
+        cell({-F, 0, zb}, {xa, 0, zb}, {xa, 0, F}, {-F, 0, F}, deepC, deepC, deepC, deepC);
+        cell({xb, 0, zb}, {F, 0, zb}, {F, 0, F}, {xb, 0, F}, deepC, deepC, deepC, deepC);
+    }
 }
 
 // ---------------------------------------------------------------- distant mountains

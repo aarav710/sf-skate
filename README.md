@@ -28,21 +28,29 @@ make run
 
 `make test` runs the headless gameplay checks (physics, tricks, grinds, collisions, spawn points).
 
-## Multiplayer (in development)
+## Multiplayer
 
-So far two or more copies of the game can share a session and see where everyone is (a debug panel; no
-avatars or shared traffic yet). Sessions go through a small relay server:
+Up to 8 players can skate the same city together. Everyone sees the other skaters (with name tags, arrows
+when they're off-screen, and markers on the minimap and big map), and the world is the same for everyone:
+traffic, trains, cable cars, signals, car crashes, people dodging, planes, gondolas, weather and time of
+day. The player who creates the session is the host; if they leave, someone else takes over.
+
+Sessions go through a small relay server that anyone in the session can reach:
 
 ```sh
 brew install enet            # one-time
 make relay && ./build/relay  # listens on UDP 7777
-./sfskate --create           # prints a 6-letter session code (and copies it)
-./sfskate --join CODE --relay host:7777
 ```
 
-`--name NAME` sets your name (default: your user name). The same settings work as environment variables:
-`SFSKATE_CREATE=1`, `SFSKATE_JOIN=CODE`, `SFSKATE_NAME`, `SFSKATE_RELAY`. `make test-net` runs the network
-checks. See [server/README.md](server/README.md) for running the relay on a server.
+In the game, press **Tab** (or use the title screen) and look at **PLAY WITH FRIENDS**: set the server to
+the relay's `host:port`, enter your name, then **Create session** and send friends the 6-letter code (the
+**Copy** button puts it on the clipboard). Friends paste the code and press **Join**. **Leave session**
+takes you back to skating on your own. Your name and server are remembered in `~/.sfskate`.
+
+The same can be done from the command line: `./sfskate --create`, `./sfskate --join CODE`, with
+`--name NAME` and `--relay host:port` (or `SFSKATE_CREATE=1`, `SFSKATE_JOIN`, `SFSKATE_NAME`,
+`SFSKATE_RELAY`). `make test-net` runs the network checks. See [server/README.md](server/README.md) for
+running the relay on a server.
 
 ## Controls
 

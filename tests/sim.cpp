@@ -2451,6 +2451,165 @@ int main() {
         check(tot > 61 * 200 && near > 61 * 10 && bad == 0, "Golden Gate walkers stay on the deck", b);
         W.vehicleTops.clear();   // T.update published the roofs of the cars near pl
     }
+    {   // Determinism (multiplayer groundwork): traffic given the same seed, the same fixed steps and the same skaters
+        // ("actors") comes out identical, whatever the frame rate or the camera; a full snapshot brings a diverged copy
+        // back in line; the compact car snapshot round-trips; init again gives the same cars.
+        // Two scripted skaters go back and forth along six blocks of a downtown street: one in the traffic lane (the
+        // cars brake for it), one along the sidewalk (people dodge it).
+        char b[640];   // (longer details than most)
+        const Grid& g = W.sf;
+        int i0 = -1, j0 = -1;
+        for (int j = g.nj / 2; j < g.nj && i0 < 0; j++)
+            for (int i = g.ni / 2; i + 6 < g.ni && i0 < 0; i++) {
+                bool ok = true;
+                for (int k = 0; k < 6 && ok; k++) ok = g.edge(i + k, j, 0) && g.nodeOk(i + k, j);
+                if (ok) { i0 = i; j0 = j; }
+            }
+        Vector2 n0 = g.node(std::max(i0, 0), std::max(j0, 0));
+        float L = 6 * g.sp;
+        // variant 1 is the same pair a little slower, for a copy whose traffic should come out different
+        auto actorsAt = [&](double t, int variant) {
+            std::vector<TrafficActor> v;
+            for (int k = 0; k < 2; k++) {
+                float sp = (k == 0 ? 8.f : 6.f) * (variant ? 0.8f : 1.f);
+                double u = fmod(t * sp + k * L, 2 * L);   // back and forth: 0..L out, L..2L back
+                float x = n0.x + (float)(u < L ? u : 2 * L - u), z = n0.y + (k == 0 ? 2.4f : g.walkOff), dir = u < L ? 1.f : -1.f;
+                TrafficActor a;
+                a.pos = {x, W.terrain(x, z) + 0.05f, z};
+                a.vel = {dir * sp, 0};
+                a.hspeed = sp;
+                a.state = Player::RIDE;
+                v.push_back(a);
+            }
+            return v;
+        };
+        auto mix = [](uint64_t& h, const void* p, size_t n) {
+            for (size_t k = 0; k < n; k++) { h ^= ((const uint8_t*)p)[k]; h *= 1099511628211ull; }
+        };
+        auto carHash = [&](const Traffic& T) {
+            uint64_t h = 1469598103934665603ull;
+            for (const Car& c : T.cars) {
+                int iv[7] = {c.mode, c.i, c.j, c.d, c.path, c.pdir, c.hops};
+                float fv[5] = {c.t, c.s, c.pos.x, c.pos.y, c.pos.z};
+                mix(h, iv, sizeof iv); mix(h, fv, sizeof fv);
+            }
+            for (const Train& t : T.trains) { float fv[3] = {t.s, t.v, t.dwell}; mix(h, fv, sizeof fv); mix(h, &t.dir, sizeof t.dir); }
+            return h;
+        };
+        // where everyone's route has them (pos: and where they're placed, which the camera may change)
+        auto pedHash = [&](const Traffic& T, bool pos) {
+            uint64_t h = 1469598103934665603ull;
+            for (const Ped& p : T.peds) {
+                int iv[7] = {p.mode, p.i, p.j, p.qx, p.qz, p.pdir, (int)p.rolls};
+                float fv[3] = {p.t, p.s, p.wait};
+                mix(h, iv, sizeof iv); mix(h, fv, sizeof fv);
+                if (pos) mix(h, &p.pos, sizeof p.pos);
+            }
+            return h;
+        };
+        const int SECS = 600, DIVERGE = 120;
+        Traffic A; A.init(W);
+        std::vector<uint64_t> aCars, aPeds, aRoutes;
+        std::vector<uint8_t> snap;   // A's full snapshot at DIVERGE s
+        int honks = 0, dodges = 0;
+        for (int s = 0; s < SECS; s++) {
+            for (int f = 0; f < 60; f++) {
+                A.update(Traffic::STEP, W, actorsAt(A.simTime, 0));
+                honks += A.evHonk;
+            }
+            for (const Ped& p : A.peds) dodges += p.evade != EV_NONE;
+            aCars.push_back(carHash(A)); aPeds.push_back(pedHash(A, true)); aRoutes.push_back(pedHash(A, false));
+            if (s + 1 == DIVERGE) A.serializeFull(snap);
+        }
+        // B: the same at fixed steps, but the steps come from the game's accumulator fed uneven frames (144 and 30 fps)
+        Traffic B; B.init(W);
+        int bBad = -1, frames = 0, steps = 0;
+        while (steps < 60 * SECS && bBad < 0) {
+            int n = B.takeSteps(frames++ % 2 ? 1.f / 30 : 1.f / 144);
+            for (int k = 0; k < n && bBad < 0; k++) {
+                B.update(Traffic::STEP, W, actorsAt(B.simTime, 0));
+                if (++steps % 60) continue;
+                int s = steps / 60 - 1;   // (checked every 60 steps, a second in, whichever frame that falls in)
+                if (s < SECS && (carHash(B) != aCars[s] || pedHash(B, true) != aPeds[s])) bBad = s;
+            }
+        }
+        // D: the camera somewhere else (at the far end of the city): who gets the full update changes, where they go doesn't
+        Traffic D; D.init(W);
+        D.view = {n0.x + 1500, 0, n0.y - 1500};
+        int dCarBad = -1, dRouteBad = -1, dPosDiff = 0;
+        const int DSECS = 200;
+        for (int s = 0; s < DSECS; s++) {
+            for (int f = 0; f < 60; f++) D.update(Traffic::STEP, W, actorsAt(D.simTime, 0));
+            if (dCarBad < 0 && carHash(D) != aCars[s]) dCarBad = s;
+            if (dRouteBad < 0 && pedHash(D, false) != aRoutes[s]) dRouteBad = s;
+            dPosDiff += pedHash(D, true) != aPeds[s];
+        }
+        snprintf(b, sizeof b, "block (%d, %d): %d honks, %d dodging samples; frames %d: %s; other camera: cars %s, routes %s (placings differ %d s of %d)",
+                 i0, j0, honks, dodges, frames, bBad < 0 ? "same" : TextFormat("differ from %d s", bBad),
+                 dCarBad < 0 ? "same" : TextFormat("differ from %d s", dCarBad), dRouteBad < 0 ? "same" : TextFormat("differ from %d s", dRouteBad),
+                 dPosDiff, DSECS);
+        check(i0 >= 0 && honks > 0 && dodges > 0 && bBad < 0 && dCarBad < 0 && dRouteBad < 0 && dPosDiff > 0, "traffic is deterministic", b);
+
+        // C: the slower skaters for DIVERGE s (so its traffic goes its own way), then A's full snapshot and A's skaters
+        Traffic C; C.init(W);
+        for (int f = 0; f < 60 * DIVERGE; f++) C.update(Traffic::STEP, W, actorsAt(C.simTime, 1));
+        bool diverged = carHash(C) != aCars[DIVERGE - 1];
+        bool applied = C.applyFull(snap.data(), snap.size());
+        bool same0 = carHash(C) == aCars[DIVERGE - 1];
+        int cBad = -1;
+        const int AFTER = 120;
+        for (int s = DIVERGE; s < DIVERGE + AFTER && cBad < 0; s++) {
+            for (int f = 0; f < 60; f++) C.update(Traffic::STEP, W, actorsAt(C.simTime, 0));
+            if (carHash(C) != aCars[s]) cBad = s;
+        }
+        snprintf(b, sizeof b, "%s after %d s; snapshot %zu B, applied %s, %s; then %s for %d s", diverged ? "diverged" : "did NOT diverge",
+                 DIVERGE, snap.size(), applied ? "ok" : "FAILED", same0 ? "same" : "different", cBad < 0 ? "same" : TextFormat("differs from %d s", cBad), AFTER);
+        check(diverged && applied && same0 && cBad < 0, "traffic reconverges via snapshot", b);
+
+        // compact car snapshots: from A onto C (now at DIVERGE + AFTER s, so most cars are somewhere else), then C
+        // must give back exactly the same bytes, with the routes exact and the rest to the snapshot's precision
+        Traffic& E = C;
+        std::vector<int> all;
+        for (int k = 0; k < (int)A.cars.size(); k++) all.push_back(k);
+        std::vector<uint8_t> cs, cs2;
+        A.serializeCars(all, cs);
+        int before = 0;
+        for (size_t k = 0; k < A.cars.size(); k++) before += A.cars[k].i != E.cars[k].i || A.cars[k].s != E.cars[k].s;
+        bool ok = E.applyCars(cs.data(), cs.size());
+        E.serializeCars(all, cs2);
+        int routeBad = 0;
+        float posErr = 0, tErr = 0, yawErr = 0, spErr = 0;
+        for (size_t k = 0; k < A.cars.size(); k++) {
+            const Car &a = A.cars[k], &e = E.cars[k];
+            routeBad += a.i != e.i || a.j != e.j || a.d != e.d || a.pd != e.pd || a.nd != e.nd || a.hops != e.hops || a.s != e.s ||
+                        a.pdir != e.pdir || (a.uturn < 0) != (e.uturn < 0) || a.placed != e.placed || (a.stopT > 0) != (e.stopT > 0);
+            posErr = std::max(posErr, Vector3Distance(a.pos, e.pos));
+            tErr = std::max(tErr, fabsf(a.t - e.t) * g.sp);
+            yawErr = std::max(yawErr, fabsf(wrapPi(a.yaw - e.yaw)));
+            spErr = std::max(spErr, fabsf(a.speed - e.speed));
+        }
+        float per = (cs.size() - 3) / (float)all.size();
+        snprintf(b, sizeof b, "%zu cars, %.1f B each; %d differed before; routes off %d, position %.3f m, along block %.4f m, yaw %.4f, speed %.3f; bytes %s",
+                 all.size(), per, before, routeBad, posErr, tErr, yawErr, spErr, cs == cs2 ? "same" : "differ");
+        check(ok && before > 100 && routeBad == 0 && posErr < 0.01f && tErr < 0.01f && yawErr < 1e-3f && spErr < 0.005f && cs == cs2 && per <= 28,
+              "car snapshot round-trip", b);
+
+        // init gives the same cars every time: a second Traffic, and the first one again
+        Traffic F; F.init(W);
+        auto looks = [](const Traffic& T) {
+            std::vector<uint32_t> v;
+            for (const Car& c : T.cars) v.push_back((uint32_t)c.type << 24 ^ (uint32_t)c.body.r << 16 ^ c.body.g << 8 ^ c.body.b ^ (uint32_t)(c.i * 7919 + c.s * 13));
+            for (const Ped& p : T.peds) v.push_back((uint32_t)p.shirt.r << 16 ^ p.hair.g << 8 ^ p.skin.b ^ (uint32_t)p.carry << 24);
+            return v;
+        };
+        auto lf = looks(F);
+        A.init(W);   // (A has run 600 s)
+        Traffic G; G.init(W);
+        bool sameA = looks(A) == lf && carHash(A) == carHash(F), sameG = looks(G) == lf && carHash(G) == carHash(F) && pedHash(G, true) == pedHash(F, true);
+        snprintf(b, sizeof b, "%zu cars, %zu people; a third Traffic %s, the first one again %s", F.cars.size(), F.peds.size(),
+                 sameG ? "same" : "DIFFERENT", sameA ? "same" : "DIFFERENT");
+        check(sameA && sameG, "re-init gives same cars", b);
+    }
     {   // Caltrain grade crossings (#60): street cars wait for the trains instead of driving straight through them.
         // Eight minutes of traffic, every grid car near a crossing against every car of every train (oriented boxes, a
         // little inside the drawn bodies); and the cars that waited for one got going again after it.

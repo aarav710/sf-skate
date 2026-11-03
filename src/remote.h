@@ -39,6 +39,7 @@ struct RemotePlayer {
     double lastSeen = -1;          // our clock when a state last arrived
     float fade = 0;                // 0..1: grows in on join, shrinks away on leave
     bool leaving = false;
+    bool away = false;             // their connection dropped: shown "reconnecting" (and out of the traffic's way) till they're back
 
     // set by advance()
     double drawnAt = 0;            // the sender's time the pose is from

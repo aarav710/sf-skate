@@ -310,9 +310,13 @@ static void drawEdgeMarker(float ang, const char* label, Color c, int sw, int sh
     }
 }
 
-// A tag box that lands on a HUD panel moves just below it (or above, if that is nearer); false if it still can't fit.
+// A tag box that lands on a HUD panel moves just below it (or above, if that is nearer); false if it still can't fit,
+// or would end up more than TAG_NUDGE px from where it belongs (it'd look like someone else's: left out instead).
+static constexpr float TAG_NUDGE = 60;
 static bool clearOfPanels(Rectangle& box, const std::vector<Rectangle>& avoid, int sh) {
+    const float y0 = box.y;
     for (int pass = 0; pass < 3; pass++) {
+        if (fabsf(box.y - y0) > TAG_NUDGE) return false;
         const Rectangle* hit = nullptr;
         for (const Rectangle& h : avoid) if (CheckCollisionRecs(box, h)) { hit = &h; break; }
         if (!hit) return true;
@@ -321,6 +325,7 @@ static bool clearOfPanels(Rectangle& box, const std::vector<Rectangle>& avoid, i
         if (!canBelow && !canAbove) return false;
         box.y = canBelow && (!canAbove || below - box.y <= box.y - above) ? below : above;
     }
+    if (fabsf(box.y - y0) > TAG_NUDGE) return false;
     for (const Rectangle& h : avoid) if (CheckCollisionRecs(box, h)) return false;
     return true;
 }
@@ -346,11 +351,12 @@ static void drawNameTags(const Camera3D& cam, Vector3 camFwd, Vector3 me, int sw
         }
         if (d < 150) {
             float a = fade * (1.f - smooth01(100.f, 150.f, d));
-            int fs = d < 40 ? 22 : 18, w = MeasureText(r.name.c_str(), fs);
+            std::string nm = r.away ? r.name + " (reconnecting)" : r.name;
+            int fs = d < 40 ? 22 : 18, w = MeasureText(nm.c_str(), fs);
             Rectangle box = {sp.x - w / 2.f - 4, sp.y - fs - 4.f, w + 8.f, fs + 8.f};
             if (a < 0.02f || !clearOfPanels(box, avoid, sh)) continue;
-            c.a = (unsigned char)(255 * a);
-            textCenter(r.name.c_str(), (int)sp.x, (int)box.y + 4, fs, c);
+            c.a = (unsigned char)(255 * a * (r.away ? 0.6f : 1.f));
+            textCenter(nm.c_str(), (int)sp.x, (int)box.y + 4, fs, c);
         } else {
             const char* label = TextFormat("%s  %d m", r.name.c_str(), dist);
             int fs = 16, w = MeasureText(label, fs);
@@ -368,7 +374,7 @@ static void drawNameTags(const Camera3D& cam, Vector3 camFwd, Vector3 me, int sw
 // distance and who hosts. Returns its height.
 static int drawPlayerList(int x, int y, int w, Vector3 me) {
     const int row = 22;
-    bool inSession = gFakeNet || NET.status == Net::IN_SESSION;
+    bool inSession = gFakeNet || NET.inSession();
     int n = inSession ? 1 : 0;
     for (auto& r : RM.list) n += !r.leaving;
     int h = 34 + row * n + (n ? 4 : 0);
@@ -376,7 +382,10 @@ static int drawPlayerList(int x, int y, int w, Vector3 me) {
     const char* code = gFakeNet ? "TEST00" : NET.code.c_str();
     if (inSession) {
         textShadow(TextFormat("SESSION %s", code), x + 10, y + 8, 18, {255, 210, 60, 255});
-        if (NET.rttMs >= 0) {
+        if (NET.status == Net::RECONNECTING) {
+            const char* rc = "reconnecting...";
+            textShadow(rc, x + w - 10 - MeasureText(rc, 14), y + 11, 14, {255, 150, 110, 255});
+        } else if (NET.rttMs >= 0) {
             const char* pg = TextFormat("%d ms", (int)NET.rttMs);
             textShadow(pg, x + w - 10 - MeasureText(pg, 14), y + 11, 14, {170, 180, 200, 255});
         }
@@ -388,10 +397,11 @@ static int drawPlayerList(int x, int y, int w, Vector3 me) {
         textShadow(st, x + 10, y + 9, fs, bad ? Color{255, 110, 90, 255} : Color{200, 210, 230, 255});
     }
     int ry = y + 34;
-    auto line = [&](Color sw, const std::string& name, bool you, bool host, int dist) {
+    auto line = [&](Color sw, const std::string& name, bool you, bool host, int dist, bool away) {
         DrawRectangle(x + 10, ry + 3, 12, 12, sw);
         DrawRectangleLines(x + 10, ry + 3, 12, 12, {0, 0, 0, 160});
-        const char* tag = host ? (you ? "you, host" : "host") : you ? "you" : "";
+        const char* tag = away ? "reconnecting" : host ? (you ? "you, host" : "host") : you ? "you" : "";
+        if (away) dist = -1;
         int right = x + w - 10;
         if (dist >= 0) {
             const char* dt = dist >= 1000 ? TextFormat("%.1f km", dist / 1000.f) : TextFormat("%d m", dist);
@@ -414,11 +424,11 @@ static int drawPlayerList(int x, int y, int w, Vector3 me) {
     };
     if (inSession) {
         uint8_t myId = gFakeNet ? RM.myId : NET.myId, hostId = gFakeNet ? RM.hostId : NET.hostId;
-        line({230, 40, 40, 255}, gFakeNet ? RM.myName : NET.myName, true, myId == hostId, -1);
+        line({230, 40, 40, 255}, gFakeNet ? RM.myName : NET.myName, true, myId == hostId, -1, false);
         for (auto& r : RM.list) {
             if (r.leaving) continue;
             Color sw = r.look.tag;
-            line(sw, r.name, false, r.id == hostId, r.hasPose ? (int)Vector3Distance(me, r.pos()) : -1);
+            line(sw, r.name, false, r.id == hostId, r.hasPose ? (int)Vector3Distance(me, r.pos()) : -1, r.away);
         }
     }
     return h;
@@ -429,7 +439,10 @@ static int drawPlayerList(int x, int y, int w, Vector3 me) {
 static void syncRemotes(double now, std::vector<std::pair<std::string, Color>>& toasts) {
     static bool wasIn = false;
     static uint8_t lastHost = 0;
-    bool in = NET.status == Net::IN_SESSION;
+    static uint32_t lastSession = 0;
+    bool in = NET.inSession();
+    if (in && NET.session != lastSession) { RM.clear(); wasIn = false; }   // (a new session: nobody from the last one)
+    lastSession = in ? NET.session : 0;
     RM.myId = NET.myId;
     RM.myName = NET.myName;
     bool changed = false;
@@ -444,7 +457,12 @@ static void syncRemotes(double now, std::vector<std::pair<std::string, Color>>& 
         if (!wasIn) toasts.push_back({NET.remotes.empty() ? "Session " + NET.code : "Joined session " + NET.code, {255, 210, 60, 255}});
     }
     for (auto& r : RM.list) {
-        if (r.leaving || (in && NET.remote(r.id))) continue;
+        const RemoteInfo* ri = in ? NET.remote(r.id) : nullptr;
+        if (ri && r.away != ri->away) {
+            r.away = ri->away;
+            toasts.push_back({r.name + (r.away ? " lost connection" : " is back"), r.look.tag});
+        }
+        if (r.leaving || ri) continue;
         RM.leave(r.id);
         if (in) toasts.push_back({r.name + " left", r.look.tag});
         changed = true;
@@ -475,7 +493,7 @@ static std::vector<TrafficActor> trafficActors() {
     std::vector<std::pair<uint8_t, TrafficActor>> v;
     if (inTraffic(myVehicle())) v.push_back({RM.myId, TrafficActor::of(P)});
     for (auto& r : RM.list)
-        if (r.hasPose && !r.leaving && inTraffic(r.cur.vehicle)) v.push_back({r.id, actorOf(r.cur)});
+        if (r.hasPose && !r.leaving && !r.away && inTraffic(r.cur.vehicle)) v.push_back({r.id, actorOf(r.cur)});
     std::stable_sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
     std::vector<TrafficActor> out;
     for (auto& e : v) out.push_back(e.second);
@@ -489,7 +507,7 @@ static void advanceTraffic(float dt) {
     if (gTrafficRan) return;
     gTrafficRan = true;
     std::vector<TrafficActor> actors = trafficActors();
-    if (NET.status == Net::IN_SESSION) {
+    if (NET.inSession()) {
         T.beginFrame();
         float alpha;
         int n = NET.isHost() ? TS.hostStep(T, W, actors, GetTime(), &alpha) : TS.step(T, W, actors, GetTime(), &alpha);
@@ -498,10 +516,29 @@ static void advanceTraffic(float dt) {
     T.advance(dt, W, P, actors);
 }
 
+// What this machine keeps of the session it's in (beside TS, RM and NET's own): all of it goes when the session ends.
+struct SessionSync {
+    uint32_t session = 0;                               // NET.session it's for (0: none)
+    uint8_t host = 0;                                   // who hosts, as last seen
+    Every carTimer{TrafficSync::INTERVAL};
+    std::vector<std::pair<uint8_t, double>> lastFull;   // (host) who was sent a full snapshot, when
+    std::vector<uint8_t> waiting;                       // (host) asked again while one was on its way
+    std::deque<std::pair<double, PedEvent>> peds;       // other players' people events, and when to apply them
+};
+static SessionSync gSync;
+
+// Starting and leaving sessions while the game runs (the title panel and the leave button drive these too). Whatever
+// belongs to a session goes when it ends (syncTraffic, syncRemotes and the session watch in the loop go by
+// NET.session), so one run can create, leave and join any number of times.
+static NetConfig gNetCfg;   // the relay and name from the options
+static void netCreate() { NetConfig c = gNetCfg; c.create = true; c.joinCode.clear(); NET.start(c, GetTime()); }
+static void netJoin(const std::string& code) { NetConfig c = gNetCfg; c.create = false; c.joinCode = code; NET.start(c, GetTime()); }
+static void netLeave() { NET.leave(); }
+
 // Other players' events, and ours: car hits go to the host (TrafficSync), people dodging or knocked down by another
 // player do the same here, when that player is drawn there (RemotePlayer::DELAY behind what they sent).
 static void syncEvents(double now) {
-    static std::deque<std::pair<double, PedEvent>> peds;   // (when to apply it)
+    auto& peds = gSync.peds;
     T.logEvents = true;
     if (!NET.remotes.empty()) for (const PedEvent& e : T.pedEvents) NET.sendEvent(pedEventMsg(e), now);
     T.pedEvents.clear();
@@ -521,12 +558,17 @@ static void syncEvents(double now) {
 // second and a full snapshot to whoever asks; everyone else hands what came in to TS and asks for a full snapshot
 // until one comes.
 static void syncTraffic(double now) {
-    static uint8_t host = 0;
-    static Every carTimer{TrafficSync::INTERVAL};
-    static std::vector<std::pair<uint8_t, double>> lastFull;   // who was sent one, when
-    static std::vector<uint8_t> waiting;                        // asked again while one was on its way
-    if (NET.status != Net::IN_SESSION) {   // (out of the session, or never in one): on our own again
-        if (host) { TS.reset(); T.acc = 0; host = 0; lastFull.clear(); waiting.clear(); carTimer.reset(); }
+    uint8_t& host = gSync.host;
+    auto& lastFull = gSync.lastFull;
+    auto& waiting = gSync.waiting;
+    uint32_t cur = NET.inSession() ? NET.session : 0;
+    if (cur != gSync.session) {   // out of a session (or into another): on our own again, from where the traffic is
+        TS.reset();
+        T.acc = 0;
+        gSync = SessionSync();
+        gSync.session = cur;
+    }
+    if (!cur) {
         T.logEvents = false;
         T.pedEvents.clear();
         return;
@@ -538,10 +580,15 @@ static void syncTraffic(double now) {
         }
         host = NET.hostId;
     }
+    if (NET.rejoined) {   // back after a dropped connection: the host's traffic again, from the start
+        NET.rejoined = false;
+        if (!NET.isHost()) TS.resync();
+    }
     syncEvents(now);
     if (NET.isHost()) {
-        if (!NET.remotes.empty() && carTimer.due(now)) {
-            carTimer.fired(now);
+        // (behind its own clock, a snapshot would carry an old time: the others' clocks would follow it back)
+        if (!NET.remotes.empty() && gSync.carTimer.due(now) && !TS.hostLagging(T, now)) {
+            gSync.carTimer.fired(now);
             std::vector<Vector3> others;
             for (auto& r : NET.remotes) if (r.hasState) others.push_back({r.state.x, r.state.y, r.state.z});
             for (auto& m : TrafficSync::snapshot(T, others, NET.rttMs)) NET.sendCarSnapshot(m, now);
@@ -565,13 +612,16 @@ static void syncTraffic(double now) {
     }
     for (auto& in : NET.carInbox) TS.onCarSnapshot(in.m, in.recvAt, NET.rttMs, T);
     NET.carInbox.clear();
-    for (auto& f : NET.fullInbox) {
+    std::vector<FullIn> fulls;
+    fulls.swap(NET.fullInbox);
+    for (auto& f : fulls) {
         double t0 = GetTime();
+        NET.service(t0);   // (the network is answered right before and after the long bit)
         bool ok = TS.onFull(T, W, f.data.data(), f.data.size());
+        NET.service(GetTime());
         TraceLog(LOG_INFO, "SFSKATE: net: full snapshot (%zu B) %s in %.0f ms, traffic at %.2f s", f.data.size(), ok ? "applied" : "TURNED DOWN",
                  (GetTime() - t0) * 1000, T.simTime);
     }
-    NET.fullInbox.clear();
     if (TS.shouldAsk(now)) NET.requestFull(now);
 }
 
@@ -581,7 +631,7 @@ static void netLogCars() {
     static FILE* f = getenv("SFSKATE_NETLOG") ? fopen(getenv("SFSKATE_NETLOG"), "w") : nullptr;
     static long long last = -1;
     long long st = stepOf(T.simTime);
-    if (!f || st == last || NET.status != Net::IN_SESSION) return;
+    if (!f || st == last || !NET.inSession()) return;
     last = st;
     for (int k = 0; k < (int)T.cars.size(); k++) {
         const Car& c = T.cars[k];
@@ -816,7 +866,10 @@ int main(int argc, char** argv) {
     // no MSAA on the window itself: the 3D scene is drawn multisampled into its own target (see render.cpp)
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     int winW = 1600, winH = 900;
-    if (getenv("SFSKATE_WINDOW")) sscanf(getenv("SFSKATE_WINDOW"), "%dx%d", &winW, &winH);   // test hook: window size "WxH"
+    if (getenv("SFSKATE_WINDOW")) {   // test hook: window size "WxH" (at least 320x240)
+        sscanf(getenv("SFSKATE_WINDOW"), "%dx%d", &winW, &winH);
+        winW = std::max(winW, 320); winH = std::max(winH, 240);
+    }
     InitWindow(winW, winH, "SF Skate");
     SetWindowFocused();   // take the keyboard from the terminal that launched us (see the first-frame note below)
     SetTargetFPS(0);   // no raylib frame limiter: see "frame pacing" above
@@ -859,11 +912,14 @@ int main(int argc, char** argv) {
     if (getenv("SFSKATE_SKI")) for (auto& s : JS.skis) TraceLog(LOG_INFO, "SFSKATE: ski at %.0f,%.0f yaw %.2f", s.pos.x, s.pos.z, s.yaw); // test hook
 
     BI.init(W);
-    if (netWanted) {
-        netCfg.fingerprint = worldFingerprint(W);
-        if (!NET.start(netCfg, GetTime())) fprintf(stderr, "sfskate: %s\n", NET.error.c_str());
-    }
-    gFakeNet = !NET.active() && getenv("SFSKATE_NET_FAKE") && atoi(getenv("SFSKATE_NET_FAKE")) != 0;   // test hook
+    netCfg.fingerprint = worldFingerprint(W);
+    gNetCfg = netCfg;
+    // (the session starts once the game runs smoothly: the first frames can take seconds, and the relay would give up
+    // on a player that quiet right after they joined)
+    bool netPending = netWanted;
+    double netWaitFrom = -1;
+    int netSmooth = 0;
+    gFakeNet = !netWanted && getenv("SFSKATE_NET_FAKE") && atoi(getenv("SFSKATE_NET_FAKE")) != 0;   // test hook
     if (getenv("SFSKATE_RAIN")) WX.raining = true, WX.rain = WX.wet = 1; // test hook: start in the rain
     const Shader& sh = R.city;
     rlDisableBackfaceCulling();
@@ -881,6 +937,10 @@ int main(int argc, char** argv) {
     Vector3 camPos = {P.pos.x - 6, P.pos.y + 3, P.pos.z};
 
     int preset = 0;
+    // in a session, what this player last asked the host for (time of day, weather) and when: keys go on from it until
+    // the host answers, so T pressed twice asks for two steps on
+    netp::MsgWorldSettings askW;
+    double askAt = -1;
     Sky sky = PRESETS[0];
     bool skySnap = true;
     bool heavyFog = false;
@@ -950,6 +1010,8 @@ int main(int argc, char** argv) {
                     TakeScreenshot("net_flip.png");
                     flipShot = true;
                 }
+                if (getenv("SFSKATE_POPUP") && atFrame >= 66 && atFrame <= 112) P.say("Ana joined", {255, 210, 60, 255}, "Multiplayer");   // test hook: a popup with the tags
+                if (getenv("SFSKATE_POPUP") && atFrame == 110) TakeScreenshot("net_popup.png");
                 if (atFrame == 160) showMap = true;
                 if (atFrame == 163) TakeScreenshot("net_map.png");
                 if (atFrame == 164) showMap = false;
@@ -1006,6 +1068,13 @@ int main(int argc, char** argv) {
             w.flags = (heavyFog ? netp::MsgWorldSettings::F_FOG : 0) | (WX.raining ? netp::MsgWorldSettings::F_RAIN : 0);
             return w;
         };
+        auto setWorldVars = [&](const netp::MsgWorldSettings& w) { preset = w.preset; heavyFog = w.fog(); WX.raining = w.rain(); };
+        // In a session only the host changes them: anyone else's key presses (and the Tab picker's time-of-day buttons,
+        // which go the same way on purpose) ask the host, starting from what they last asked for, while the session's
+        // stay on show until the host sends them back (to everyone)
+        const netp::MsgWorldSettings worldShown = worldNow();
+        const bool asking = NET.status == Net::IN_SESSION && !NET.isHost();
+        if (asking && askAt >= 0 && GetTime() - askAt < 3.0) setWorldVars(askW);
         const netp::MsgWorldSettings worldBefore = worldNow();
         auto setCops = [&](bool on) { // game mode: free roam (no police) or cop chase
             if (CH.on == on) return;
@@ -1109,12 +1178,14 @@ int main(int argc, char** argv) {
                 }
             }
         }
-        // in a session only the host changes them: anyone else's key press asks the host, and they change when the
-        // host sends them back (to everyone)
-        if (NET.status == Net::IN_SESSION && !NET.isHost() && worldNow() != worldBefore) {
-            NET.setWorld(worldNow(), GetTime());
-            preset = worldBefore.preset; heavyFog = worldBefore.fog(); WX.raining = worldBefore.rain();
-            P.say("Asked the host", {255, 225, 160, 255}, "The host sets the time of day and the weather");
+        if (asking) {
+            if (worldNow() != worldBefore) {
+                askW = worldNow();
+                askAt = GetTime();
+                NET.setWorld(askW, askAt);
+                P.say("Asked the host", {255, 225, 160, 255}, "The host sets the time of day and the weather");
+            }
+            setWorldVars(worldShown);
         }
         if (!title && !picker && IsKeyPressed(KEY_R)) { if (JS.riding) { JS.skis[JS.cur].pos = P.pos; JS.riding = false; JS.cur = -1; } if (SP.riding) { SP.riding = false; SP.cur = -1; } P.respawnSafe(W); P.say("Reset", WHITE); }
 
@@ -1155,8 +1226,10 @@ int main(int argc, char** argv) {
         // ---------------- update
         // wrapped at 75 * 76 s, a whole number of jet (75 s) and AirTrain (76 s) loops, so nothing jumps at the wrap
         // In a session they go by the session clock instead: the planes are where everyone else sees them, pause or not.
+        // (Getting into a session they jump once to the session's time, as the gondolas do, along with the traffic's
+        // full snapshot; out of it they carry on from there, so leaving doesn't move them.)
         double sessT = 0;
-        bool sessClock = NET.status == Net::IN_SESSION && TS.sessionNow(NET.isHost(), GetTime(), &sessT);
+        bool sessClock = NET.inSession() && TS.sessionNow(NET.isHost(), GetTime(), &sessT);
         if (sessClock) airT = (float)fmod(sessT, 75.0 * 76.0);
         else if (!paused && !showMap && (!picker || title)) airT = fmodf(airT + dt, 75.f * 76.f);
         bool running = !title && !paused && !showMap && !picker && !ride.on && !JS.riding && !SP.riding;
@@ -1296,7 +1369,7 @@ int main(int argc, char** argv) {
         }
         // a session's traffic is everyone's: it runs on whatever this machine is doing (paused, on the map), or the
         // session clock would stop with it (on the host) or leave it behind (anyone else)
-        if (NET.status == Net::IN_SESSION) advanceTraffic(dt);
+        if (NET.inSession()) advanceTraffic(dt);
         // sounds
         if (P.evPop) S.play(S.pop, 0.8f, 1.0f + GetRandomValue(-10, 10) / 100.f);
         if (P.evLand) S.play(S.land, 0.9f);
@@ -1304,7 +1377,7 @@ int main(int argc, char** argv) {
         else if (P.evBail) S.play(S.bail, 0.9f);
         if (P.evGrindStart) S.play(S.clack, 1.0f, 0.7f);
         // (in a session, cars honk at every player: only the ones nearby are heard)
-        if (NET.status == Net::IN_SESSION ? honkNear(T, ride.on ? cam.target : P.pos) : T.evHonk) S.play(S.honk, 0.6f, 1.0f + GetRandomValue(-15, 15) / 100.f);
+        if (NET.inSession() ? honkNear(T, ride.on ? cam.target : P.pos) : T.evHonk) S.play(S.honk, 0.6f, 1.0f + GetRandomValue(-15, 15) / 100.f);
         float spd = P.hspeed();
         if (ride.on) S.setLevels(0.25f + ride.v / 160.f, 0, ride.v / 200.f);
         else if (SP.riding) S.setLevels(0.2f + 0.45f * SP.throttle, 0, SP.speed / 50.f);
@@ -1721,6 +1794,31 @@ int main(int argc, char** argv) {
 
         // multiplayer: talk to the relay, send where we are at 20 Hz
         Vector3 netMe = ride.on ? cam.target : P.pos;
+        if (netPending) {   // (once three frames in a row came in under 0.25 s, or 10 s on)
+            if (netWaitFrom < 0) netWaitFrom = GetTime();
+            netSmooth = GetFrameTime() < 0.25f ? netSmooth + 1 : 0;
+            if (netSmooth >= 3 || GetTime() - netWaitFrom > 10) {
+                netPending = false;
+                if (!NET.start(netCfg, GetTime())) fprintf(stderr, "sfskate: %s\n", NET.error.c_str());
+            }
+        }
+        // test hook (SFSKATE_NET_CYCLE=secs[,create|,CODE]): leave the session secs after getting into it, then (if
+        // given) create a new one or join CODE, in the same run
+        if (getenv("SFSKATE_NET_CYCLE")) {
+            static double inSince = -1;
+            static bool done = false;
+            if (!done && NET.status == Net::IN_SESSION) {
+                if (inSince < 0) inSince = GetTime();
+                if (GetTime() - inSince > atof(getenv("SFSKATE_NET_CYCLE"))) {
+                    done = true;
+                    const char* then = strchr(getenv("SFSKATE_NET_CYCLE"), ',');
+                    TraceLog(LOG_INFO, "SFSKATE: net: leaving session %s (test hook)", NET.code.c_str());
+                    netLeave();
+                    if (then && !strcmp(then + 1, "create")) netCreate();
+                    else if (then) netJoin(then + 1);
+                }
+            }
+        }
         if (NET.active()) {
             double tn = GetTime();
             NET.service(tn);
@@ -1733,12 +1831,43 @@ int main(int argc, char** argv) {
             for (auto& l : NET.log) TraceLog(LOG_INFO, "SFSKATE: net: %s", l.c_str());
             NET.log.clear();
             if (NET.stateDue(tn)) NET.sendState(captureState(P, netMe, myVehicle()), tn);
+        }
+        {   // the session as a whole: this player's own time of day and weather back when it ends; dropped connections,
+            // failures and the session's time limit shown
+            static uint32_t sess = 0;
+            static netp::MsgWorldSettings own;
+            static Net::Status lastSt = Net::OFF;
+            static double shownEnd = -1;
+            uint32_t cur = NET.inSession() ? NET.session : 0;
+            if (cur != sess) {
+                if (sess) {
+                    setWorldVars(own);
+                    askAt = -1;
+                    TraceLog(LOG_INFO, "SFSKATE: net: out of the session");
+                } else own = worldNow();   // (kept across one session straight after another)
+                sess = cur;
+            }
+            if (NET.status != lastSt) {
+                if (NET.status == Net::RECONNECTING) P.say("Connection lost", {255, 150, 110, 255}, "Reconnecting...");
+                else if (NET.status == Net::IN_SESSION && lastSt == Net::RECONNECTING) P.say("Reconnected", {255, 210, 60, 255}, "Multiplayer");
+                else if (NET.status == Net::FAILED) P.say("Multiplayer", {255, 110, 90, 255}, NET.error);
+                else if (NET.status == Net::OFF && (lastSt == Net::IN_SESSION || lastSt == Net::RECONNECTING)) P.say("Left the session", WHITE, "Skating on your own");
+                lastSt = NET.status;
+            }
+            if (NET.endsAt > 0 && NET.endsAt != shownEnd) {
+                shownEnd = NET.endsAt;
+                P.say("Session ends soon", {255, 210, 60, 255}, TextFormat("In %d min (sessions last 6 hours)", (int)((NET.endsIn + 59) / 60)));
+            }
+        }
+        if (NET.inSession()) {
+            double tn = GetTime();
             // the session's time of day and weather: the host's came in (or, hosting, someone's request we took), or
             // we host and ours changed
             if (NET.worldIn) {
                 NET.worldIn = false;
+                askAt = -1;   // (the host answered)
                 netp::MsgWorldSettings was = worldNow(), w = NET.world;
-                preset = w.preset; heavyFog = w.fog(); WX.raining = w.rain();
+                setWorldVars(w);
                 const RemotePlayer* who = RM.find(NET.worldFrom);
                 std::string by = who && NET.worldFrom != NET.hostId ? " (asked by " + who->name + ")" : "";
                 if (w.preset != was.preset) P.say(PRESET_NAMES[w.preset], {255, 225, 160, 255}, "Time of day" + by);
@@ -1746,9 +1875,11 @@ int main(int argc, char** argv) {
                 else if (w.fog() != was.fog()) P.say(w.fog() ? "Fog rolling in" : "Fog lifting", {190, 210, 235, 255}, "Weather" + by);
             }
             if (NET.isHost() && (!NET.worldSet || NET.world != worldNow())) NET.setWorld(worldNow(), tn);
-            std::vector<std::pair<std::string, Color>> toasts;
-            syncRemotes(tn, toasts);
             netLogCars();
+        }
+        if (NET.active() || !RM.empty()) {
+            std::vector<std::pair<std::string, Color>> toasts;
+            if (!gFakeNet) syncRemotes(GetTime(), toasts);   // (also once out of a session: everyone fades away)
             for (auto& t : toasts) P.say(t.first, t.second, "Multiplayer");
         }
         syncTraffic(GetTime());   // (also after the session ends, to go back to traffic of our own)
@@ -2022,6 +2153,8 @@ int main(int argc, char** argv) {
             if (districtT > 0) {
                 unsigned char al = (unsigned char)(255 * clampf(districtT, 0, 1));
                 textCenter(dist, sw / 2, 40, 40, {255, 255, 255, al});
+                int dw = MeasureText(dist, 40);
+                hud.push_back({sw / 2.f - dw / 2.f - 6, 34, dw + 12.f, 52});   // (name tags stay off it, as off the popup)
             }
             // current combo
             if (!P.combo.empty() && (P.state == Player::AIR || P.state == Player::GRIND)) {
@@ -2043,8 +2176,12 @@ int main(int argc, char** argv) {
                 float a = clampf(P.popupT, 0, 1);
                 Color c = P.popupCol;
                 c.a = (unsigned char)(255 * a);
-                textCenter(P.popup.c_str(), sw / 2, sh2 / 2 - 140, 48, c);
-                if (!P.subPopup.empty()) textCenter(P.subPopup.c_str(), sw / 2, sh2 / 2 - 86, 22, {255, 255, 255, c.a});
+                int py = sh2 / 2 - 140;
+                if (CH.on) py = std::max(py, 92 + 78 + 8);   // (a short window: below the cop panel, not on it)
+                textCenter(P.popup.c_str(), sw / 2, py, 48, c);
+                if (!P.subPopup.empty()) textCenter(P.subPopup.c_str(), sw / 2, py + 54, 22, {255, 255, 255, c.a});
+                int pw = std::max(MeasureText(P.popup.c_str(), 48), P.subPopup.empty() ? 0 : MeasureText(P.subPopup.c_str(), 22));
+                hud.push_back({sw / 2.f - pw / 2.f - 6, py - 6.f, pw + 12.f, (P.subPopup.empty() ? 48.f : 76.f) + 12});   // (name tags stay off it)
             }
             if (CH.active) {
                 bool flip = (int)(now * 4) % 2;

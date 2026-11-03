@@ -44,6 +44,16 @@ struct StateIn {
     netp::PlayerState s;
 };
 
+// A CAR_SNAPSHOT from the host as it arrived (our clock), and a full snapshot meant for us.
+struct CarSnapIn {
+    double recvAt = 0;
+    netp::MsgCarSnapshot m;
+};
+struct FullIn {
+    double recvAt = 0;
+    std::vector<uint8_t> data;   // Traffic::serializeFull
+};
+
 class Net {
 public:
     enum Status { OFF, CONNECTING, JOINING, IN_SESSION, FAILED };
@@ -55,6 +65,11 @@ public:
     void service(double now);                       // once a frame: never blocks
     bool stateDue(double now) const { return status == IN_SESSION && stateTimer_.due(now); }
     void sendState(const netp::PlayerState& s, double now);
+    // traffic (host): a car snapshot part to the room, unreliable; a full snapshot to the player who asked for it
+    void sendCarSnapshot(const netp::MsgCarSnapshot& m, double now);
+    void sendFull(uint8_t to, const std::vector<uint8_t>& data, double now);
+    // traffic (not the host): ask the host for a full snapshot
+    void requestFull(double now);
 
     bool active() const { return status != OFF; }
     bool isHost() const { return status == IN_SESSION && myId == hostId; }
@@ -72,6 +87,12 @@ public:
     std::vector<std::string> log;   // join/leave/host lines for the HUD or stdout, drained by the caller
     std::vector<StateIn> inbox;     // every state that arrived, oldest first, drained by the caller
     static constexpr size_t INBOX_MAX = 512;   // ~3 s of 7 players: nobody draining it can't grow it for ever
+    // traffic, drained by the caller: the host's car snapshots, a full snapshot for us (only the newest is kept), and
+    // (host) the players who asked for a full snapshot
+    std::vector<CarSnapIn> carInbox;
+    static constexpr size_t CAR_INBOX_MAX = 128;
+    std::vector<FullIn> fullInbox;
+    std::vector<uint8_t> fullRequests;
 
 private:
     _ENetHost* host_ = nullptr;

@@ -121,7 +121,18 @@ void Relay::onGone(ENetPeer* peer, const char* why) {
 void Relay::onReceive(ENetPeer* peer, const uint8_t* data, size_t n) {
     PeerInfo& pi = peers_[peer];
     double now = nowSec();
-    if (!pi.rl.allow(n + 28, now)) {   // + UDP/IP overhead
+    PeerKey key = keyOf(peer);
+    uint8_t type = netp::peekType(data, n);
+    // a full snapshot from the host for someone waiting for one goes past the rate limit (it's a one-off ~220 KB, more
+    // than a second's allowance); anything else that size is turned away by the checks below
+    bool fullAnswer = false;
+    if (type == netp::MSG_FULL_SNAPSHOT && n >= netp::HEADER_SIZE + 1) {
+        const Room* r = rooms.roomOf(key);
+        const Member* to = r ? r->find(data[netp::HEADER_SIZE]) : nullptr;
+        auto it = to ? peers_.find(peerOf(to->peer)) : peers_.end();
+        fullAnswer = it != peers_.end() && rooms.idOf(key) == r->host && to->peer != key && it->second.wantsFull;
+    }
+    if (!fullAnswer && !pi.rl.allow(n + 28, now)) {   // + UDP/IP overhead
         pi.dropped++;
         if (now - pi.lastDropLog > 5) {
             logf("rate limit %s: dropped %llu packets", addrText(peer).c_str(), (unsigned long long)pi.dropped);
@@ -129,8 +140,6 @@ void Relay::onReceive(ENetPeer* peer, const uint8_t* data, size_t n) {
         }
         return;
     }
-    PeerKey key = keyOf(peer);
-    uint8_t type = netp::peekType(data, n);
     switch (type) {
     case netp::MSG_CREATE: {
         if (netp::peekVersion(data, n) != netp::PROTOCOL_VERSION) {
@@ -184,6 +193,40 @@ void Relay::onReceive(ENetPeer* peer, const uint8_t* data, size_t n) {
         std::vector<uint8_t> bytes(data, data + n);
         bytes[1] = rooms.idOf(key);
         for (auto& mem : r->members) if (mem.peer != key) send(peerOf(mem.peer), bytes, netp::CH_STATE);
+        return;
+    }
+    case netp::MSG_CAR_SNAPSHOT: {
+        // only the host decides the traffic: anyone else's is dropped
+        const Room* r = rooms.roomOf(key);
+        netp::MsgCarSnapshot m;
+        if (!r || rooms.idOf(key) != r->host || !netp::unpack(data, n, m)) return;
+        std::vector<uint8_t> bytes(data, data + n);
+        bytes[1] = r->host;
+        for (auto& mem : r->members) if (mem.peer != key) send(peerOf(mem.peer), bytes, netp::CH_STATE);
+        return;
+    }
+    case netp::MSG_FULL_REQUEST: {
+        const Room* r = rooms.roomOf(key);
+        netp::MsgFullRequest m;
+        if (!r || rooms.idOf(key) == r->host || !netp::unpack(data, n, m)) return;
+        const Member* h = r->find(r->host);
+        if (!h) return;
+        pi.wantsFull = true;
+        send(peerOf(h->peer), netp::pack(m, rooms.idOf(key)), netp::CH_RELIABLE);
+        return;
+    }
+    case netp::MSG_FULL_SNAPSHOT: {
+        if (!fullAnswer) return;
+        const Room* r = rooms.roomOf(key);
+        const Member* to = r->find(data[netp::HEADER_SIZE]);
+        ByteReader rd(data, n);
+        netp::readHeader(rd);
+        if (rd.bad) return;
+        peers_.find(peerOf(to->peer))->second.wantsFull = false;
+        std::vector<uint8_t> bytes(data, data + n);
+        bytes[1] = r->host;
+        send(peerOf(to->peer), bytes, netp::CH_RELIABLE);
+        logf("room %s: full snapshot (%zu B) from the host to player %u", r->code.c_str(), n, (unsigned)to->id);
         return;
     }
     case netp::MSG_PING: {

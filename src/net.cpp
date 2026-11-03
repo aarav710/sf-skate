@@ -2,6 +2,7 @@
 #include <enet/enet.h>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 
 // the relay players use unless told otherwise: set it at build time with -DSFSKATE_RELAY='"host:port"'
 #ifndef SFSKATE_RELAY
@@ -66,6 +67,7 @@ bool Net::start(const NetConfig& cfg, double now) {
     addr.port = port;
     host_ = enet_host_create(nullptr, 1, netp::CH_COUNT, 0, 0);
     if (!host_) { fail("Network setup failed"); return false; }
+    host_->maximumPacketSize = netp::MsgFullSnapshot::MAX_SIZE + 1024;   // (ENet's own default is 32 MB)
     peer_ = enet_host_connect(host_, &addr, netp::CH_COUNT, 0);
     if (!peer_) { fail("Network setup failed"); return false; }
     enet_peer_timeout(peer_, 32, 5000, 10000);
@@ -87,6 +89,7 @@ void Net::stop() {
     if (status != FAILED) status = OFF;
     remotes.clear();
     inbox.clear();
+    carInbox.clear(); fullInbox.clear(); fullRequests.clear();
     code.clear();
     myId = hostId = 0;
 }
@@ -97,6 +100,23 @@ void Net::fail(const std::string& why) {
     status = FAILED;
     remotes.clear();
     inbox.clear();
+    carInbox.clear(); fullInbox.clear(); fullRequests.clear();
+}
+
+void Net::sendCarSnapshot(const netp::MsgCarSnapshot& m, double now) {
+    if (!isHost()) return;
+    send(netp::pack(m, myId, seq_++, clock(now)), netp::CH_STATE);
+}
+
+void Net::sendFull(uint8_t to, const std::vector<uint8_t>& data, double now) {
+    if (!isHost() || data.size() > netp::MsgFullSnapshot::MAX_SIZE) return;
+    netp::MsgFullSnapshot m; m.to = to; m.data = data;
+    send(netp::pack(m, myId, seq_++, clock(now)), netp::CH_RELIABLE);
+}
+
+void Net::requestFull(double now) {
+    if (status != IN_SESSION || isHost()) return;
+    send(netp::pack(netp::MsgFullRequest(), myId, seq_++, clock(now)), netp::CH_RELIABLE);
 }
 
 void Net::send(const std::vector<uint8_t>& bytes, uint8_t channel) {
@@ -217,6 +237,7 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
         netp::MsgHostChanged m;
         if (status != IN_SESSION || !netp::unpack(data, n, m)) return;
         hostId = m.id;
+        carInbox.clear(); fullInbox.clear(); fullRequests.clear();   // (the old host's, or asked of it)
         const RemoteInfo* r = remote(m.id);
         log.push_back(m.id == myId ? std::string("You are the host now") : (r ? r->name : std::string("someone")) + " is the host now");
         return;
@@ -232,6 +253,27 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
             return;
         }
         return;   // not (or no longer) in the roster
+    }
+    case netp::MSG_CAR_SNAPSHOT: {
+        // only the host's (the relay checks too); unreliable sequenced, so ENet already dropped any older than the last
+        CarSnapIn in;
+        if (status != IN_SESSION || isHost() || !netp::unpack(data, n, in.m, &h) || h.from != hostId) return;
+        in.recvAt = now;
+        if (carInbox.size() < CAR_INBOX_MAX) carInbox.push_back(std::move(in));
+        return;
+    }
+    case netp::MSG_FULL_SNAPSHOT: {
+        netp::MsgFullSnapshot m;
+        if (status != IN_SESSION || isHost() || !netp::unpack(data, n, m, &h) || h.from != hostId || m.to != myId) return;
+        fullInbox.clear();
+        fullInbox.push_back({now, std::move(m.data)});
+        return;
+    }
+    case netp::MSG_FULL_REQUEST: {
+        netp::MsgFullRequest m;
+        if (!isHost() || !netp::unpack(data, n, m, &h) || h.from == myId || !remote(h.from)) return;
+        if (std::find(fullRequests.begin(), fullRequests.end(), h.from) == fullRequests.end()) fullRequests.push_back(h.from);
+        return;
     }
     case netp::MSG_PONG: {
         netp::MsgPong m;

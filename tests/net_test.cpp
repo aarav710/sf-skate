@@ -96,6 +96,27 @@ static void protocolChecks() {
         MsgPong q, qo; q.sentAt = -0.0;
         check(roundTrip(p, po) && po.sentAt == p.sentAt && roundTrip(q, qo), "proto: PING/PONG round trip", "f64 exact");
     }
+    {   // car and full snapshots: the car and full bytes run to the end of the message (their own formats check them)
+        MsgCarSnapshot a, o; a.simTime = 1234.0625; a.hostRttMs = 80; a.part = 2; a.parts = 3; a.trains = {3, 1, 4}; a.cars = {1, 5, 9, 2, 6};
+        auto bytes = pack(a);
+        bool ok = unpack(bytes.data(), bytes.size(), o) && o.simTime == a.simTime && o.hostRttMs == 80 && o.part == 2 && o.parts == 3 &&
+                  o.trains == a.trains && o.cars == a.cars;
+        for (size_t n = 0; n < HEADER_SIZE + 14; n++) { MsgCarSnapshot t; ok = ok && !unpack(bytes.data(), n, t); }   // (no room for the trains)
+        int refused = 0;
+        for (double st : {-1.0, 2e7, std::nan("")}) { MsgCarSnapshot c = a; c.simTime = st; auto bb = pack(c); refused += !unpack(bb.data(), bb.size(), o); }
+        for (int pp : {0, 9}) { MsgCarSnapshot c = a; c.parts = (uint8_t)pp; c.part = 0; auto bb = pack(c); refused += !unpack(bb.data(), bb.size(), o); }
+        { MsgCarSnapshot c = a; c.part = 3; auto bb = pack(c); refused += !unpack(bb.data(), bb.size(), o); }
+        { auto bb = bytes; bb[HEADER_SIZE + 12] = 200; refused += !unpack(bb.data(), bb.size(), o); }   // trains longer than the message
+        MsgFullSnapshot f, fo; f.to = 7; f.data.assign(MsgFullSnapshot::MAX_SIZE, 0xAB);
+        auto fb = pack(f);
+        ok = ok && unpack(fb.data(), fb.size(), fo) && fo.to == 7 && fo.data == f.data;
+        f.data.push_back(0); fb = pack(f);
+        refused += !unpack(fb.data(), fb.size(), fo);
+        MsgFullRequest rq, rqo;
+        ok = ok && roundTrip(rq, rqo);
+        snprintf(b, sizeof b, "exact; short ones refused; %d of 8 bad (time, parts, lengths, too big) refused", refused);
+        check(ok && refused == 8, "proto: CAR/FULL_SNAPSHOT round trip", b);
+    }
     {   // player state: size, quantization, boundaries
         MsgPlayerState a, o;
         PlayerState& s = a.s;
@@ -356,7 +377,7 @@ static void limitChecks() {
     pump([&] { return !rc[0]->got.empty(); }, 10);
     MsgCreated made;
     bool created = !rc[0]->got.empty() && unpack(rc[0]->got[0].data(), rc[0]->got[0].size(), made);
-    std::vector<uint8_t> fits(relay::MAX_PACKET, 0xEE), huge(256 * 1024, 0xEE);   // unknown type: ignored if it arrives
+    std::vector<uint8_t> fits(relay::MAX_PACKET, 0xEE), huge(relay::MAX_PACKET + 64 * 1024, 0xEE);   // unknown type: ignored if it arrives
     rc[1]->send(fits, CH_RELIABLE);
     rc[0]->send(huge, CH_RELIABLE);
     double tDrop = pump([&] { return rc[0]->dropped; }, 20);
@@ -463,6 +484,77 @@ static void liveChecks() {
         check(inOk && fromA && rising && last && n <= Net::INBOX_MAX, "live: timestamped states for smoothing", b);
     }
 
+    {   // shared traffic. A full snapshot (~220 KB) gets from the host to B only once B has asked for one; car snapshots
+        // go from the host to everyone; a car or full snapshot from anyone else is dropped by the relay (a bare client in
+        // the room, which takes whatever the relay sends it, listens)
+        auto rcp = std::make_unique<RawClient>();
+        RawClient& rc = *rcp;
+        raw = &rc;
+        rc.start(rel.port());
+        pump([&] { return rc.connected; }, 10);
+        MsgJoin j; j.code = A.code; j.fingerprint = 42; j.name = "Ear";
+        rc.send(pack(j), CH_RELIABLE);
+        MsgWelcome w;
+        pump([&] { return !rc.got.empty() && A.remotes.size() == 2 && B.remotes.size() == 2; }, 10);
+        bool joined = !rc.got.empty() && unpack(rc.got[0].data(), rc.got[0].size(), w);
+        auto heard = [&](uint8_t type) {
+            for (auto& g : rc.got) if (peekType(g.data(), g.size()) == type) return true;
+            return false;
+        };
+        std::vector<uint8_t> data(220 * 1024);
+        for (size_t i = 0; i < data.size(); i++) data[i] = (uint8_t)(i * 31 + 7 + (i >> 9));
+        // unasked: dropped
+        A.sendFull(B.myId, data, nowSec());
+        pump([&] { return false; }, 0.5);
+        bool unasked = B.fullInbox.empty();
+        double t0 = nowSec();
+        B.requestFull(t0);
+        double tReq = pump([&] { return !A.fullRequests.empty(); }, 10);
+        bool asked = tReq >= 0 && A.fullRequests.size() == 1 && A.fullRequests[0] == B.myId;
+        A.fullRequests.clear();
+        A.sendFull(B.myId, data, nowSec());
+        double tFull = pump([&] { return !B.fullInbox.empty(); }, 15);
+        bool full = tFull >= 0 && B.fullInbox.size() == 1 && B.fullInbox[0].data == data && !heard(MSG_FULL_SNAPSHOT);
+        B.fullInbox.clear();
+        A.sendFull(B.myId, data, nowSec());   // a second one, not asked for again: dropped
+        pump([&] { return false; }, 0.5);
+        bool once = B.fullInbox.empty();
+        // car snapshots: a second bare client's (a non-host) never gets to anyone; the host's reaches both others
+        auto rc2p = std::make_unique<RawClient>();
+        RawClient& rc2 = *rc2p;
+        rc2.start(rel.port());
+        pump([&] { rc2.service(); return rc2.connected; }, 10);
+        MsgJoin j2 = j; j2.name = "Mal";
+        rc2.send(pack(j2), CH_RELIABLE);
+        MsgWelcome w2;
+        pump([&] { rc2.service(); return !rc2.got.empty() && A.remotes.size() == 3; }, 10);
+        joined = joined && !rc2.got.empty() && unpack(rc2.got[0].data(), rc2.got[0].size(), w2);
+        MsgCarSnapshot cs; cs.simTime = 1234.5; cs.trains = {1, 2, 3}; cs.cars.assign(1000, 9);
+        rc2.send(pack(cs, w2.playerId, 1), CH_STATE);
+        MsgFullSnapshot fs; fs.to = w.playerId; fs.data = {1, 2, 3};
+        rc2.send(pack(fs, w2.playerId, 2), CH_RELIABLE);
+        MsgFullRequest fr;
+        rc.send(pack(fr, w.playerId, 3), CH_RELIABLE);   // (the listener is even waiting for a full snapshot)
+        pump([&] { rc2.service(); return false; }, 0.5);
+        bool nonHost = B.carInbox.empty() && B.fullInbox.empty() && !heard(MSG_CAR_SNAPSHOT) && !heard(MSG_FULL_SNAPSHOT);
+        A.fullRequests.clear();
+        cs.simTime = 99.25;
+        A.sendCarSnapshot(cs, nowSec());
+        double tCar = pump([&] { return !B.carInbox.empty() && heard(MSG_CAR_SNAPSHOT); }, 10);
+        bool car = tCar >= 0 && B.carInbox.size() == 1 && B.carInbox[0].m.simTime == 99.25 && B.carInbox[0].m.cars == cs.cars &&
+                   B.carInbox[0].m.trains == cs.trains && B.carInbox[0].recvAt > 0;
+        snprintf(b, sizeof b, "unasked full dropped %d; asked after %.2fs, %zu KB full arrived intact after %.2fs, a second one dropped %d; "
+                 "non-host car/full snapshots dropped %d; host's car snapshot to both after %.2fs",
+                 (int)unasked, tReq, data.size() / 1024, tFull, (int)once, (int)nonHost, tCar);
+        check(joined && unasked && asked && full && once && nonHost && car, "live: car and full snapshots", b);
+        B.carInbox.clear();
+        raw = nullptr;
+        rcp.reset();
+        rc2p.reset();
+        double tGone = pump([&] { return A.remotes.size() == 1 && B.remotes.size() == 1; }, 10);
+        check(tGone >= 0, "live: bare clients leave", "rosters back to 1");
+        A.log.clear(); B.log.clear();
+    }
     {   // a client that claims to be A: the relay stamps its real id; a wrong version is refused
         auto rcp = std::make_unique<RawClient>();
         RawClient& rc = *rcp;

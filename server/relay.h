@@ -7,11 +7,12 @@
 
 namespace relay {
 
-// ENet would accept a 32 MB packet (and buffer its fragments) per peer before the rate limiter ever sees it.
-// Today's biggest message is WELCOME (~160 B). Stage 3's full snapshot (~220 KB, reliable, fragmented) needs this
-// raised to ~512 KB; the rate limiter's 256 KB burst would then still hold a sender to about one snapshot.
-constexpr size_t MAX_PACKET = 4 * 1024;
-constexpr size_t MAX_WAITING_DATA = 256 * 1024;    // bytes ENet may hold per peer for packets not yet handed to us
+// ENet would accept a 32 MB packet (and buffer its fragments) per peer before the rate limiter ever sees it. The
+// biggest message is the full snapshot (~220 KB, reliable, fragmented); everything else is under 1.5 KB.
+constexpr size_t MAX_PACKET = netp::MsgFullSnapshot::MAX_SIZE + 1024;
+// bytes ENet may hold per peer for packets not yet handed to us. ENet checks it before taking a packet, so one full
+// snapshot (allocated whole at its first fragment) always gets in.
+constexpr size_t MAX_WAITING_DATA = 256 * 1024;
 constexpr size_t MAX_PEERS_PER_IP = 16;            // a household or a NAT'd office, not one script with 1600 peers
 
 class Relay {
@@ -33,6 +34,7 @@ private:
         RateLimit rl;
         double lastDropLog = -1e9;
         uint64_t dropped = 0;
+        bool wantsFull = false;   // asked the host for a full snapshot, and hasn't had it yet
     };
     ENetHost* host_ = nullptr;
     bool enetInit_ = false;

@@ -13,10 +13,10 @@
 
 namespace netp {
 
-constexpr uint16_t PROTOCOL_VERSION = 1;
+constexpr uint16_t PROTOCOL_VERSION = 2;
 // Bump when gameplay or world generation changes, so mismatched builds are refused even if the world counts happen
 // to agree (it goes into the world fingerprint, net_game.cpp). PROTOCOL_VERSION is for wire format changes.
-constexpr uint32_t GAME_BUILD = 1;
+constexpr uint32_t GAME_BUILD = 2;
 constexpr int MAX_PLAYERS = 8;
 constexpr int NAME_MAX = 16;          // bytes of UTF-8
 constexpr int CODE_LEN = 6;
@@ -44,12 +44,12 @@ enum MsgType : uint8_t {
     MSG_PLAYER_STATE = 9,  // client -> relay -> room, 20 Hz, unreliable sequenced
     MSG_PING = 10,         // client -> relay, 1 Hz
     MSG_PONG = 11,         // relay -> client, echoes the ping
-    // reserved for later stages (plan section 4); not encoded yet
-    MSG_REJOIN = 12,
-    MSG_CAR_SNAPSHOT = 13,
-    MSG_FULL_SNAPSHOT = 14,
-    MSG_WORLD_SETTINGS = 15,
-    MSG_EVENT = 16,
+    MSG_REJOIN = 12,       // reserved for later stages (plan section 4); not encoded yet
+    MSG_CAR_SNAPSHOT = 13, // host -> relay -> room, 10 Hz, unreliable sequenced: the cars near the other players
+    MSG_FULL_SNAPSHOT = 14,// host -> relay -> one player who asked, reliable: all of the traffic
+    MSG_WORLD_SETTINGS = 15,   // reserved
+    MSG_EVENT = 16,            // reserved
+    MSG_FULL_REQUEST = 17, // client -> relay -> host: send me a full snapshot (on joining, or when out of step)
     MSG_TYPE_COUNT
 };
 
@@ -342,6 +342,55 @@ struct MsgPong {
     double sentAt = 0;
     void encode(ByteWriter& w) const { w.f64(sentAt); }
     void decode(ByteReader& r) { sentAt = r.f64(); }
+};
+
+// The host's cars near the other players, its trains and its traffic time (the session clock). A snapshot with
+// more cars than fit in one packet goes as several parts, each a usable snapshot on its own (losing one loses
+// only its cars), so none is ever fragmented.
+struct MsgCarSnapshot {
+    static constexpr uint8_t TYPE = MSG_CAR_SNAPSHOT;
+    static constexpr int MAX_PARTS = 8;
+    double simTime = 0;               // the host's Traffic::simTime when it was taken
+    uint16_t hostRttMs = 0;           // the host's round trip to the relay: half of it is the first leg here
+    uint8_t part = 0, parts = 1;
+    std::vector<uint8_t> trains;      // Traffic::serializeTrains
+    std::vector<uint8_t> cars;        // Traffic::serializeCars: the rest of the message
+    void encode(ByteWriter& w) const {
+        w.f64(simTime); w.u16(hostRttMs); w.u8(part); w.u8(parts);
+        w.u16((uint16_t)trains.size());
+        for (uint8_t b : trains) w.u8(b);
+        for (uint8_t b : cars) w.u8(b);
+    }
+    void decode(ByteReader& r) {
+        simTime = r.f64(); hostRttMs = r.u16(); part = r.u8(); parts = r.u8();
+        if (!std::isfinite(simTime) || simTime < 0 || simTime > MAX_HOST_TIME || parts < 1 || parts > MAX_PARTS || part >= parts) r.bad = true;
+        size_t nt = r.u16();
+        if (r.bad || nt > r.left()) { r.bad = true; return; }
+        trains.assign(r.p + r.at, r.p + r.at + nt); r.at += nt;
+        cars.assign(r.p + r.at, r.p + r.n); r.at = r.n;
+    }
+};
+
+// Asks the host for a full snapshot. No payload: the relay stamps who asked (header.from) and forwards it.
+struct MsgFullRequest {
+    static constexpr uint8_t TYPE = MSG_FULL_REQUEST;
+    void encode(ByteWriter&) const {}
+    void decode(ByteReader&) {}
+};
+
+// All of the host's traffic (Traffic::serializeFull, ~220 KB), for the one player who asked: the relay passes it
+// on only from the host and only to someone waiting for one.
+struct MsgFullSnapshot {
+    static constexpr uint8_t TYPE = MSG_FULL_SNAPSHOT;
+    static constexpr size_t MAX_SIZE = 480 * 1024;
+    uint8_t to = NO_PLAYER;
+    std::vector<uint8_t> data;
+    void encode(ByteWriter& w) const { w.u8(to); for (uint8_t b : data) w.u8(b); }
+    void decode(ByteReader& r) {
+        to = r.u8();
+        if (r.bad || r.left() > MAX_SIZE) { r.bad = true; return; }
+        data.assign(r.p + r.at, r.p + r.n); r.at = r.n;
+    }
 };
 
 // Header plus payload in one buffer.

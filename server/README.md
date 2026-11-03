@@ -66,8 +66,10 @@ journalctl -u sfskate-relay -f      # the event log
 ## Limits
 
 - 8 players per session, 200 sessions per relay.
-- 64 KB/s per player (bursts up to 256 KB); packets over that are dropped and logged.
-- Packets over 4 KB are refused (the sender gets dropped), and one IP address can hold at most 16 connections.
+- 64 KB/s per player (bursts up to 256 KB); packets over that are dropped and logged. The one exception is a
+  host's full traffic snapshot (~220 KB) for a player who asked for one: it goes past the limit, once per ask.
+- Packets over ~480 KB are refused (the sender gets dropped), and one IP address can hold at most 16 connections.
+- Only the host's car and full snapshots are passed on; anyone else's are dropped.
 - A player who stops answering is dropped after 10 s; when the host leaves, the longest-connected player
   becomes host. The last player out closes the session.
 - Game and relay must have the same protocol version (`PROTOCOL_VERSION` in `src/net_protocol.h`), and everyone

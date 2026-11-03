@@ -2507,60 +2507,73 @@ int main() {
             }
             return h;
         };
-        const int SECS = 600, DIVERGE = 120;
-        Traffic A; A.init(W);
-        std::vector<uint64_t> aCars, aPeds, aRoutes;
-        std::vector<uint8_t> snap;   // A's full snapshot at DIVERGE s
-        int honks = 0, dodges = 0;
-        for (int s = 0; s < SECS; s++) {
-            for (int f = 0; f < 60; f++) {
-                A.update(Traffic::STEP, W, actorsAt(A.simTime, 0));
-                honks += A.evHonk;
-            }
-            for (const Ped& p : A.peds) dodges += p.evade != EV_NONE;
-            aCars.push_back(carHash(A)); aPeds.push_back(pedHash(A, true)); aRoutes.push_back(pedHash(A, false));
-            if (s + 1 == DIVERGE) A.serializeFull(snap);
-        }
-        // B: the same at fixed steps, but the steps come from the game's accumulator fed uneven frames (144 and 30 fps)
-        Traffic B; B.init(W);
-        int bBad = -1, frames = 0, steps = 0;
-        while (steps < 60 * SECS && bBad < 0) {
-            int n = B.takeSteps(frames++ % 2 ? 1.f / 30 : 1.f / 144);
-            for (int k = 0; k < n && bBad < 0; k++) {
-                B.update(Traffic::STEP, W, actorsAt(B.simTime, 0));
-                if (++steps % 60) continue;
-                int s = steps / 60 - 1;   // (checked every 60 steps, a second in, whichever frame that falls in)
-                if (s < SECS && (carHash(B) != aCars[s] || pedHash(B, true) != aPeds[s])) bBad = s;
-            }
-        }
-        // D: the camera somewhere else (at the far end of the city): who gets the full update changes, where they go doesn't
-        Traffic D; D.init(W);
+        // A: the reference. B: the same at fixed steps, but the steps come from the game's accumulator fed uneven frames
+        // (144 and 30 fps). D: the camera somewhere else (the far end of the city): who gets the full update changes,
+        // where anyone goes doesn't. C: the slower skaters for DIVERGE s (so its traffic goes its own way), then A's full
+        // snapshot and A's skaters. Each records its hashes once a second; the four run side by side (they share only
+        // the world, which they only read).
+        const int SECS = 300, DSECS = 150, DIVERGE = 90, AFTER = 90;
+        Traffic A, B, C, D;
+        for (Traffic* T : {&A, &B, &C, &D}) T->init(W);
         D.view = {n0.x + 1500, 0, n0.y - 1500};
-        int dCarBad = -1, dRouteBad = -1, dPosDiff = 0;
-        const int DSECS = 200;
-        for (int s = 0; s < DSECS; s++) {
-            for (int f = 0; f < 60; f++) D.update(Traffic::STEP, W, actorsAt(D.simTime, 0));
-            if (dCarBad < 0 && carHash(D) != aCars[s]) dCarBad = s;
-            if (dRouteBad < 0 && pedHash(D, false) != aRoutes[s]) dRouteBad = s;
-            dPosDiff += pedHash(D, true) != aPeds[s];
+        struct Rec { std::vector<uint64_t> cars, peds, routes; };
+        Rec ra, rb, rd;
+        std::vector<uint8_t> snap;   // A's full snapshot at DIVERGE s
+        int honks = 0, dodges = 0, frames = 0;
+        auto record = [&](Rec& r, const Traffic& T) { r.cars.push_back(carHash(T)); r.peds.push_back(pedHash(T, true)); r.routes.push_back(pedHash(T, false)); };
+        auto runA = [&] {
+            for (int s = 0; s < SECS; s++) {
+                for (int f = 0; f < 60; f++) {
+                    A.update(Traffic::STEP, W, actorsAt(A.simTime, 0));
+                    honks += A.evHonk;
+                }
+                for (const Ped& p : A.peds) dodges += p.evade != EV_NONE;
+                record(ra, A);
+                if (s + 1 == DIVERGE) A.serializeFull(snap);
+            }
+        };
+        auto runB = [&] {
+            for (int steps = 0; steps < 60 * SECS;) {
+                int n = B.takeSteps(frames++ % 2 ? 1.f / 30 : 1.f / 144);
+                for (int k = 0; k < n && steps < 60 * SECS; k++) {
+                    B.update(Traffic::STEP, W, actorsAt(B.simTime, 0));
+                    if (++steps % 60 == 0) record(rb, B);   // (a second in, whichever frame that falls in)
+                }
+            }
+        };
+        auto runD = [&] {
+            for (int s = 0; s < DSECS; s++) {
+                for (int f = 0; f < 60; f++) D.update(Traffic::STEP, W, actorsAt(D.simTime, 0));
+                record(rd, D);
+            }
+        };
+        auto runC = [&] { for (int f = 0; f < 60 * DIVERGE; f++) C.update(Traffic::STEP, W, actorsAt(C.simTime, 1)); };
+        {
+            auto fa = std::async(std::launch::async, runA), fb = std::async(std::launch::async, runB);
+            auto fd = std::async(std::launch::async, runD), fc = std::async(std::launch::async, runC);
+            fa.get(); fb.get(); fd.get(); fc.get();
         }
-        snprintf(b, sizeof b, "block (%d, %d): %d honks, %d dodging samples; frames %d: %s; other camera: cars %s, routes %s (placings differ %d s of %d)",
-                 i0, j0, honks, dodges, frames, bBad < 0 ? "same" : TextFormat("differ from %d s", bBad),
+        auto firstDiff = [](const std::vector<uint64_t>& x, const std::vector<uint64_t>& y) {
+            for (size_t k = 0; k < x.size(); k++) if (k >= y.size() || x[k] != y[k]) return (int)k;
+            return -1;
+        };
+        int bBad = std::max(firstDiff(rb.cars, ra.cars), firstDiff(rb.peds, ra.peds));
+        int dCarBad = firstDiff(rd.cars, ra.cars), dRouteBad = firstDiff(rd.routes, ra.routes), dPosDiff = 0;
+        for (int s = 0; s < DSECS; s++) dPosDiff += rd.peds[s] != ra.peds[s];
+        snprintf(b, sizeof b, "block (%d, %d), %d s: %d honks, %d dodging samples; %d uneven frames: %s; other camera: cars %s, routes %s (placings differ %d s of %d)",
+                 i0, j0, SECS, honks, dodges, frames, bBad < 0 && rb.cars.size() == (size_t)SECS ? "same" : TextFormat("differ from %d s", bBad),
                  dCarBad < 0 ? "same" : TextFormat("differ from %d s", dCarBad), dRouteBad < 0 ? "same" : TextFormat("differ from %d s", dRouteBad),
                  dPosDiff, DSECS);
-        check(i0 >= 0 && honks > 0 && dodges > 0 && bBad < 0 && dCarBad < 0 && dRouteBad < 0 && dPosDiff > 0, "traffic is deterministic", b);
+        check(i0 >= 0 && honks > 0 && dodges > 0 && bBad < 0 && rb.cars.size() == (size_t)SECS && dCarBad < 0 && dRouteBad < 0 && dPosDiff > 0,
+              "traffic is deterministic", b);
 
-        // C: the slower skaters for DIVERGE s (so its traffic goes its own way), then A's full snapshot and A's skaters
-        Traffic C; C.init(W);
-        for (int f = 0; f < 60 * DIVERGE; f++) C.update(Traffic::STEP, W, actorsAt(C.simTime, 1));
-        bool diverged = carHash(C) != aCars[DIVERGE - 1];
+        bool diverged = carHash(C) != ra.cars[DIVERGE - 1];
         bool applied = C.applyFull(snap.data(), snap.size());
-        bool same0 = carHash(C) == aCars[DIVERGE - 1];
+        bool same0 = carHash(C) == ra.cars[DIVERGE - 1];
         int cBad = -1;
-        const int AFTER = 120;
         for (int s = DIVERGE; s < DIVERGE + AFTER && cBad < 0; s++) {
             for (int f = 0; f < 60; f++) C.update(Traffic::STEP, W, actorsAt(C.simTime, 0));
-            if (carHash(C) != aCars[s]) cBad = s;
+            if (carHash(C) != ra.cars[s]) cBad = s;
         }
         snprintf(b, sizeof b, "%s after %d s; snapshot %zu B, applied %s, %s; then %s for %d s", diverged ? "diverged" : "did NOT diverge",
                  DIVERGE, snap.size(), applied ? "ok" : "FAILED", same0 ? "same" : "different", cBad < 0 ? "same" : TextFormat("differs from %d s", cBad), AFTER);
@@ -2593,6 +2606,49 @@ int main() {
                  all.size(), per, before, routeBad, posErr, tErr, yawErr, spErr, cs == cs2 ? "same" : "differ");
         check(ok && before > 100 && routeBad == 0 && posErr < 0.01f && tErr < 0.01f && yawErr < 1e-3f && spErr < 0.005f && cs == cs2 && per <= 28,
               "car snapshot round-trip", b);
+        {   // bad snapshots (short, corrupt, out of range) are turned down whole: nothing in the traffic changes
+            std::vector<uint8_t> full0, after;
+            E.serializeFull(full0);
+            int rejected = 0, tries = 0;
+            auto tryFull = [&](std::vector<uint8_t> m) {
+                tries++;
+                bool okk = E.applyFull(m.data(), m.size());
+                after.clear(); E.serializeFull(after);
+                rejected += !okk && after == full0;
+            };
+            auto tryCars = [&](std::vector<uint8_t> m) {
+                tries++;
+                bool okk = E.applyCars(m.data(), m.size());
+                after.clear(); E.serializeFull(after);
+                rejected += !okk && after == full0;
+            };
+            auto put32 = [](std::vector<uint8_t>& m, size_t at, uint32_t v) { for (int k = 0; k < 4; k++) m[at + k] = (uint8_t)(v >> 8 * k); };
+            std::vector<uint8_t> m = full0;
+            m.resize(m.size() - 10); tryFull(m);                                   // cut short
+            m = full0; m[0] ^= 1; tryFull(m);                                      // not a snapshot
+            m = full0; put32(m, 21, 999999); tryFull(m);                           // another number of cars
+            int grid = 0, road = 0;
+            while (E.cars[grid].mode != 0) grid++;
+            while (E.cars[road].mode != 1) road++;
+            const size_t HDR = 25, PER = 106;
+            m = full0; put32(m, HDR + grid * PER + 7, 1000000); tryFull(m);        // a grid car off its grid
+            m = full0; put32(m, HDR + road * PER + 34, 0x7fc00000); tryFull(m);    // a NaN along its road
+            m = full0; put32(m, HDR + road * PER + 30, 77); tryFull(m);            // on another road
+            m = full0; put32(m, m.size() - 4 - E.trains.size() * 13, 1u << 30); tryFull(m);   // a billion trains
+            // car snapshots: the first record good (it moves a car), the last one bad, so a partial apply would show
+            std::vector<uint8_t> two;
+            A.serializeCars({grid, road}, two);
+            m = two; m.resize(m.size() - 3); tryCars(m);                           // cut short
+            m = two; m[3 + 27] = 0xFF; m[3 + 28] = 0xFF; tryCars(m);              // an index past the last car
+            m = two; m[1] = 0xFF; m[2] = 0xFF; tryCars(m);                         // 65535 records
+            m = two; put32(m, m.size() - 6, 0xff800000); tryCars(m);               // -inf along the road
+            m = two; m[3 + 2] = 0; m[3 + 3] = 0; m[3 + 4] = 0xc0; m[3 + 5] = 0x7f; tryCars(m);   // NaN position
+            bool good = E.applyCars(two.data(), two.size());
+            snprintf(b, sizeof b, "%d of %d bad snapshots turned down with nothing changed; a good one %s; full snapshot %zu B",
+                     rejected, tries, good ? "taken" : "TURNED DOWN", full0.size());
+            check(rejected == tries && good && full0.size() == HDR + E.cars.size() * PER + 4 + E.trains.size() * 13,
+                  "snapshots reject bad input", b);
+        }
 
         // init gives the same cars every time: a second Traffic, and the first one again
         Traffic F; F.init(W);
@@ -2603,7 +2659,7 @@ int main() {
             return v;
         };
         auto lf = looks(F);
-        A.init(W);   // (A has run 600 s)
+        A.init(W);   // (A has run SECS s)
         Traffic G; G.init(W);
         bool sameA = looks(A) == lf && carHash(A) == carHash(F), sameG = looks(G) == lf && carHash(G) == carHash(F) && pedHash(G, true) == pedHash(F, true);
         snprintf(b, sizeof b, "%zu cars, %zu people; a third Traffic %s, the first one again %s", F.cars.size(), F.peds.size(),
@@ -2676,6 +2732,7 @@ int main() {
                     Car c; c.type = type; c.speed = 0; c.stopT = 1e9f; c.placed = true;
                     c.pos = {1950, W.ground(1950, 2262, 500), 2262};
                     T.cars.push_back(c);
+                    T.interpolate(1);   // (drawn, and solid, where it is)
                     Sim s; s.spawn(1950 + end * (m.halfLen + 2.5f), 2262 + lat, end > 0 ? PI : 0, 3);
                     float reach = 1e9f;
                     for (int f = 0; f < 60 * 3 && s.p.state != Player::BAIL; f++) {
@@ -2707,6 +2764,7 @@ int main() {
                 Car c; c.type = k.type; c.speed = 0; c.stopT = 1e9f; c.placed = true;
                 c.pos = {1950, W.ground(1950, 2262, 500), 2262};
                 T.cars.push_back(c);
+                T.interpolate(1);   // (drawn, and solid, where it is)
                 float roof = c.pos.y + m.height - 0.1f;
                 Sim s; s.spawn(1950 - m.halfLen + 0.3f, 2262, 0, spd);
                 s.p.pos.y = roof + 1; s.p.state = Player::AIR; s.p.vel = {spd, 0, 0}; s.p.vy = 0;
@@ -2815,6 +2873,68 @@ int main() {
         W.vehicleTops.clear();
         snprintf(b, sizeof b, "%d of %d vehicles pulling away lost their rider%s%s", bad, moved, det.empty() ? "" : ": ", det.c_str());
         check(bad == 0 && moved >= 6, "A moving vehicle carries a skater on its roof", b);
+    }
+    {   // the same at the game's own frame rates. Traffic runs fixed 1/60 s steps (Traffic::advance), so a frame runs
+        // none, one or two of them; the cars are drawn (and their roofs are) between the last two steps, so they move
+        // every frame, and a skater dropping onto a moving bus matching its speed just rides along: at 144 Hz (landing on
+        // frames with and without a step) and at 60 Hz with the frame times jittering by up to 0.6 ms.
+        Traffic T0; T0.init(W);
+        Player far; far.spawn({0, W.ground(0, 0, 1000) + 200, 0}, 0);
+        for (int f = 0; f < 60 * 3; f++) T0.update(1.f / 60, W, far);
+        std::vector<int> buses;
+        for (size_t i = 0; i < T0.cars.size() && buses.size() < 4; i++) {
+            const Car& c = T0.cars[i];
+            if (c.type == CT_BUS && c.placed && c.mode == 1 && c.uturn < 0 && c.speed > 8) buses.push_back((int)i);
+        }
+        int landings = 0, badLand = 0, frozen = 0, movingFrames = 0;
+        float worstSp = 0, worstJump = 1;
+        std::string det;
+        for (int rate = 0; rate < 2; rate++)
+            for (int ci : buses)
+                for (int phase = 0; phase < 3; phase++) {
+                    auto frameDt = [&](int f) { return rate == 0 ? 1.f / 144 : 1.f / 60 + ((f * 7919) % 7 - 3) * 0.0002f; };
+                    Traffic T = T0;
+                    int f = 0;
+                    for (; f < 30 + phase; f++) T.advance(frameDt(f), W, far);   // (running at that rate for a while first)
+                    const Car& c = T.cars[ci];
+                    const CarModel& m = carModel(c.type);
+                    Player P; P.spawn(c.vpos, c.vyaw);
+                    P.pos.y = c.vpos.y + (m.height - 0.1f) * cosf(c.vpitch);
+                    P.state = Player::RIDE; P.speed = c.speed; P.yaw = c.vyaw;   // moving with it, as dropping onto it
+                    T.publishRoofs(W, P.pos);
+                    float sp0 = 0, along = 0, lat = 0;
+                    bool off = false;
+                    Vector3 lastV = c.vpos;
+                    for (int k = 0; k < (rate == 0 ? 144 : 60); k++, f++) {
+                        float dt = frameDt(f);
+                        Input in;
+                        if (k > 0) P.update(dt, in, W);
+                        T.advance(dt, W, P);
+                        if (k == 0) sp0 = P.speed;
+                        float dx = P.pos.x - c.vpos.x, dz = P.pos.z - c.vpos.z;
+                        along = dx * cosf(c.vyaw) + dz * sinf(c.vyaw); lat = -dx * sinf(c.vyaw) + dz * cosf(c.vyaw);
+                        if (P.state != Player::RIDE || fabsf(along) > m.halfLen || fabsf(lat) > m.halfWid) off = true;
+                        // drawn: moving every frame, by about what the frame's time takes it
+                        float moved = sqrtf(sq(c.vpos.x - lastV.x) + sq(c.vpos.z - lastV.z)), want = c.speed * dt;
+                        if (c.speed > 5) {
+                            movingFrames++;
+                            if (moved < want * 0.4f) frozen++;
+                            worstJump = std::max(worstJump, moved / want);
+                        }
+                        lastV = c.vpos;
+                    }
+                    landings++;
+                    worstSp = std::max(worstSp, fabsf(sp0));
+                    if (fabsf(sp0) > 0.6f || off || fabsf(along) > 1.5f) {
+                        badLand++;
+                        if (det.size() < 120) det += TextFormat("; %s car %d phase %d: speed on the roof %.2f, %s, %.1f m along", rate ? "60 Hz" : "144 Hz", ci,
+                                                                phase, sp0, off ? "came off" : "stayed", along);
+                    }
+                }
+        W.vehicleTops.clear();
+        snprintf(b, sizeof b, "%d of %d landings on moving buses went wrong (worst speed on the roof %.2f m/s)%s; drawn: %d of %d frames frozen, biggest step %.1fx",
+                 badLand, landings, worstSp, det.c_str(), frozen, movingFrames, worstJump);
+        check(landings >= 12 && badLand == 0 && frozen == 0 && worstJump < 2.f, "Riding a bus at 144 Hz and jittery 60 Hz", b);
     }
     {   // the "SFO Airport" label covers the airport fill, and not the East Bay shore and hills beyond it
         int wrong = 0, land = 0, missed = 0, fill = 0;

@@ -3,6 +3,16 @@ CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -Wno-missing-field-initializers -Wno-un
 CXXFLAGS += $(shell pkg-config --cflags raylib)
 LDFLAGS  += $(shell pkg-config --libs raylib) -framework OpenGL -framework Cocoa -framework IOKit -framework CoreVideo
 
+# ENet (multiplayer): `brew install enet`. Homebrew names the pkg-config file libenet; plain -lenet if it's missing.
+ENET_CFLAGS := $(shell pkg-config --cflags libenet 2>/dev/null || pkg-config --cflags enet 2>/dev/null)
+ENET_LIBS   := $(shell pkg-config --libs libenet 2>/dev/null || pkg-config --libs enet 2>/dev/null || echo -lenet)
+CXXFLAGS += $(ENET_CFLAGS)
+LDFLAGS  += $(ENET_LIBS)
+# the relay players connect to by default, e.g. make SFSKATE_RELAY=relay.example.com:7777
+ifdef SFSKATE_RELAY
+CXXFLAGS += -DSFSKATE_RELAY='"$(SFSKATE_RELAY)"'
+endif
+
 SRC := $(wildcard src/*.cpp)
 OBJ := $(SRC:src/%.cpp=build/%.o)
 
@@ -32,3 +42,19 @@ test: build/sim
 	./build/sim
 
 .PHONY: test
+
+# multiplayer relay server (no raylib): ./build/relay --port 7777
+NET_CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Isrc -Iserver $(ENET_CFLAGS)
+RELAY_SRC := server/rooms.cpp server/relay.cpp
+relay: build/relay
+build/relay: $(RELAY_SRC) server/relay_main.cpp $(wildcard server/*.h) src/net_protocol.h src/bytes.h | build
+	$(CXX) $(NET_CXXFLAGS) -o $@ $(RELAY_SRC) server/relay_main.cpp $(ENET_LIBS)
+
+# protocol, relay rooms, and a relay with two clients over localhost UDP
+build/net_test: tests/net_test.cpp $(RELAY_SRC) src/net.cpp src/net.h $(wildcard server/*.h) src/net_protocol.h src/bytes.h | build
+	$(CXX) $(NET_CXXFLAGS) -o $@ tests/net_test.cpp $(RELAY_SRC) src/net.cpp $(ENET_LIBS)
+
+test-net: build/net_test
+	./build/net_test
+
+.PHONY: relay test-net

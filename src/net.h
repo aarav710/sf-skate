@@ -1,0 +1,76 @@
+// The game's multiplayer client: connects to the relay, creates or joins a session, sends this player's state
+// at 20 Hz and keeps the latest state of everyone else. No raylib here (the net tests link it without the game).
+#pragma once
+#include "net_protocol.h"
+#include <string>
+#include <vector>
+
+struct _ENetHost;
+struct _ENetPeer;
+
+struct NetConfig {
+    std::string relay = "127.0.0.1:7777";   // host:port
+    std::string name;
+    bool create = false;
+    std::string joinCode;                   // used when !create
+    uint32_t fingerprint = 0;
+};
+
+struct RemoteInfo {
+    uint8_t id = 0;
+    std::string name;
+    netp::PlayerState state;
+    bool hasState = false;
+    double lastSeen = -1;    // our clock when the last state arrived
+    uint16_t lastSeq = 0;
+};
+
+class Net {
+public:
+    enum Status { OFF, CONNECTING, JOINING, IN_SESSION, FAILED };
+    static constexpr double STATE_INTERVAL = 1.0 / 20, PING_INTERVAL = 1.0, CONNECT_TIMEOUT = 8.0;
+
+    ~Net() { stop(); }
+    bool start(const NetConfig& cfg, double now);   // false (and FAILED) if the relay address is bad
+    void stop();                                    // leaves the session and disconnects
+    void service(double now);                       // once a frame: never blocks
+    bool stateDue(double now) const { return status == IN_SESSION && now - lastStateSent_ >= STATE_INTERVAL; }
+    void sendState(const netp::PlayerState& s, double now);
+
+    bool active() const { return status != OFF; }
+    bool isHost() const { return status == IN_SESSION && myId == hostId; }
+    const RemoteInfo* remote(uint8_t id) const;
+    const char* statusText() const;
+
+    Status status = OFF;
+    std::string error;           // why FAILED
+    std::string code;            // the session code once in a session
+    std::string myName;
+    uint8_t myId = 0, hostId = 0;
+    std::vector<RemoteInfo> remotes;
+    double rttMs = -1;           // to the relay, from PING/PONG
+    bool justCreated = false;    // set when CREATED arrives; main clears it after showing the code
+    std::vector<std::string> log;   // join/leave/host lines for the HUD or stdout, drained by the caller
+
+private:
+    _ENetHost* host_ = nullptr;
+    _ENetPeer* peer_ = nullptr;
+    NetConfig cfg_;
+    double startedAt_ = 0, lastStateSent_ = -1e9, lastPing_ = -1e9;
+    uint16_t seq_ = 0;
+    bool enetInit_ = false;
+
+    void fail(const std::string& why);
+    void onConnect();
+    void onPacket(const uint8_t* data, size_t n, double now);
+    void send(const std::vector<uint8_t>& bytes, uint8_t channel);
+    float clock(double now) const { return (float)(now - startedAt_); }
+};
+
+// "host:port" (or "host", port 7777). False if it doesn't parse.
+bool parseHostPort(const std::string& s, std::string& host, uint16_t& port);
+
+// Session options from the environment (SFSKATE_CREATE=1, SFSKATE_JOIN, SFSKATE_NAME, SFSKATE_RELAY), then the
+// command line (--create, --join CODE, --name NAME, --relay host:port), which wins. Returns true if a session was
+// asked for. Unknown arguments are left alone; a flag missing its value is reported in `err`.
+bool netOptions(int argc, char** argv, NetConfig& cfg, std::string& err);

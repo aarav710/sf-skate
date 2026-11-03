@@ -10,3 +10,6 @@ uint32_t worldFingerprint(const World& w);
 
 // This player's state for PLAYER_STATE. pos is where they are (on a train, the train); vehicle is a PlayerState::Vehicle.
 netp::PlayerState captureState(const Player& p, Vector3 pos, uint8_t vehicle);
+
+// What another client draws from a received state (the inverse of captureState for the fields drawSkater reads).
+SkaterPose poseFromState(const netp::PlayerState& s);

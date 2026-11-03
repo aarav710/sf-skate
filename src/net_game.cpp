@@ -47,3 +47,19 @@ netp::PlayerState captureState(const Player& p, Vector3 pos, uint8_t vehicle) {
     s.score = p.score <= 0 ? 0u : p.score >= 0xFFFFFFFFll ? 0xFFFFFFFFu : (uint32_t)p.score;
     return s;
 }
+
+SkaterPose poseFromState(const netp::PlayerState& s) {
+    SkaterPose p;
+    p.state = s.state;
+    p.pos = {s.x, s.y, s.z};
+    p.yaw = s.yaw;
+    p.crouch = s.crouch; p.lean = s.lean; p.pushPhase = s.pushPhase; p.pushAmt = s.pushAmt; p.pitch = s.pitch;
+    p.flipProg = s.flipProg; p.shoveProg = s.shoveProg;
+    p.flipAngle = s.flipAngle; p.shoveAngle = s.shoveAngle;
+    p.grabbing = s.flags & netp::PlayerState::F_GRABBING;
+    p.bailT = s.bailT;
+    p.splashed = s.flags & netp::PlayerState::F_SPLASHED;
+    p.boardPos = {s.x + s.boardDx, s.y + s.boardDy, s.z + s.boardDz};
+    p.boardYaw = s.boardYaw;
+    return p;
+}

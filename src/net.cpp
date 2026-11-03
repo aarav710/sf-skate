@@ -86,6 +86,7 @@ void Net::stop() {
     if (enetInit_) { enet_deinitialize(); enetInit_ = false; }
     if (status != FAILED) status = OFF;
     remotes.clear();
+    inbox.clear();
     code.clear();
     myId = hostId = 0;
 }
@@ -95,6 +96,7 @@ void Net::fail(const std::string& why) {
     if (peer_) { enet_peer_disconnect_now(peer_, 0); peer_ = nullptr; }
     status = FAILED;
     remotes.clear();
+    inbox.clear();
 }
 
 void Net::send(const std::vector<uint8_t>& bytes, uint8_t channel) {
@@ -226,6 +228,7 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
             if (r.id != h.from) continue;
             if (r.hasState && (int16_t)(h.seq - r.lastSeq) <= 0) return;   // older than what we have
             r.state = m.s; r.hasState = true; r.lastSeen = now; r.lastSeq = h.seq;
+            if (inbox.size() < INBOX_MAX) inbox.push_back({h.from, h.hostTime, now, m.s});
             return;
         }
         return;   // not (or no longer) in the roster

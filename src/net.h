@@ -36,6 +36,14 @@ struct RemoteInfo {
     uint16_t lastSeq = 0;
 };
 
+// One PLAYER_STATE as it arrived, for smoothing (remote.h): the sender's clock and ours.
+struct StateIn {
+    uint8_t id = 0;
+    float sentAt = 0;     // header.hostTime: the sender's clock
+    double recvAt = 0;    // our clock
+    netp::PlayerState s;
+};
+
 class Net {
 public:
     enum Status { OFF, CONNECTING, JOINING, IN_SESSION, FAILED };
@@ -62,6 +70,8 @@ public:
     double rttMs = -1;           // to the relay, from PING/PONG
     bool justCreated = false;    // set when CREATED arrives; main clears it after showing the code
     std::vector<std::string> log;   // join/leave/host lines for the HUD or stdout, drained by the caller
+    std::vector<StateIn> inbox;     // every state that arrived, oldest first, drained by the caller
+    static constexpr size_t INBOX_MAX = 512;   // ~3 s of 7 players: nobody draining it can't grow it for ever
 
 private:
     _ENetHost* host_ = nullptr;

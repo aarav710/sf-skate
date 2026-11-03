@@ -438,6 +438,17 @@ static void liveChecks() {
     double t3 = pump([&] { return A.rttMs >= 0 && B.rttMs >= 0; }, 10);
     snprintf(b, sizeof b, "both positions after %.2fs, a moved one after %.2fs, ping %.1f / %.1f ms", t, t2, A.rttMs, B.rttMs);
     check(ok && t2 >= 0 && t3 >= 0, "live: players see each other's state", b);
+    {   // every state also lands in the inbox the game smooths from, with the sender's clock (rising) and ours
+        bool inOk = !B.inbox.empty(), rising = true, fromA = true;
+        for (size_t i = 0; i < B.inbox.size(); i++) {
+            fromA = fromA && B.inbox[i].id == A.myId && B.inbox[i].recvAt > 0;
+            if (i) rising = rising && B.inbox[i].sentAt > B.inbox[i - 1].sentAt;
+        }
+        bool last = inOk && B.inbox.back().s.x == 111;
+        size_t n = B.inbox.size();
+        snprintf(b, sizeof b, "%zu states, all from A %d, sender clock rising %d, newest is the moved one %d", n, fromA, rising, last);
+        check(inOk && fromA && rising && last && n <= Net::INBOX_MAX, "live: timestamped states for smoothing", b);
+    }
 
     {   // a client that claims to be A: the relay stamps its real id; a wrong version is refused
         auto rcp = std::make_unique<RawClient>();

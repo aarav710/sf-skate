@@ -11,6 +11,7 @@
 #include "../src/jetski.h"
 #include "../src/birds.h"
 #include "../src/net_game.h"
+#include "../src/remote.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -65,8 +66,159 @@ static bool rideRoute(Sim& s, const House& hs, bool fromStreet) {
     return false;
 }
 
+// Other players' smoothing (remote.cpp): needs no world, so it runs before the city is generated.
+static void remoteChecks() {
+    char b[256];
+    using PS = netp::PlayerState;
+    // a skater riding a 10 m circle at 8 m/s, bobbing up and down, as the sender's own clock sees it
+    auto truth = [](double t) {
+        PS s;
+        float a = (float)(t * 0.8);
+        s.x = 50 + 10 * cosf(a); s.z = -20 + 10 * sinf(a); s.y = 3 + 0.5f * sinf((float)t * 2);
+        s.vx = -8 * sinf(a); s.vz = 8 * cosf(a); s.vy = cosf((float)t * 2);
+        s.yaw = wrapPi(a + PI / 2);
+        return s;
+    };
+    // sender at 20 Hz on its clock (sender = ours + skew), 30..70 ms latency, some packets lost; we draw at 60 Hz
+    struct Run { double maxErr = 0, sumErr = 0, maxYaw = 0, maxStep = 0; int n = 0; std::vector<Vector3> drawn; };
+    auto run = [&](double skew, float loss) {
+        Run out;
+        RemotePlayer r;
+        RNG rng(11);
+        struct Pk { double recv; float sent; PS s; };
+        std::vector<Pk> flying;
+        int k = 0;
+        double lastRt = 0;
+        for (int f = 0; f < 60 * 20; f++) {
+            double now = 10 + f / 60.0;
+            while (k * 0.05 <= now - 10 + 1e-9) {   // the sender's ticks up to now
+                double ts = 10 + skew + k * 0.05;
+                if (!rng.chance(loss)) flying.push_back({ts - skew + rng.range(0.03f, 0.07f), (float)ts, truth(ts - skew)});
+                k++;
+            }
+            std::sort(flying.begin(), flying.end(), [](const Pk& a, const Pk& c) { return a.recv < c.recv; });
+            while (!flying.empty() && flying.front().recv <= now) {
+                r.addSample(flying.front().sent, flying.front().recv, flying.front().s);
+                flying.erase(flying.begin());
+            }
+            r.advance(now, 1 / 60.f);
+            PS cur = r.cur;
+            double rt = r.drawnAt;
+            if (f < 60 || !r.hasPose) { lastRt = rt; continue; }
+            out.maxStep = std::max(out.maxStep, fabs(rt - lastRt - 1 / 60.0));   // the drawn time runs steadily through the jitter
+            lastRt = rt;
+            PS want = truth(rt - skew);
+            double e = sqrt(sq(cur.x - want.x) + sq(cur.y - want.y) + sq(cur.z - want.z));
+            out.maxErr = std::max(out.maxErr, e); out.sumErr += e; out.n++;
+            out.maxYaw = std::max(out.maxYaw, (double)fabsf(wrapPi(cur.yaw - want.yaw)));
+            out.drawn.push_back({cur.x, cur.y, cur.z});
+        }
+        return out;
+    };
+    {
+        Run a = run(0, 0.1f), c = run(5000, 0.1f), lossless = run(0, 0);
+        double diff = 0;
+        for (size_t i = 0; i < a.drawn.size() && i < c.drawn.size(); i++) diff = std::max(diff, (double)Vector3Distance(a.drawn[i], c.drawn[i]));
+        snprintf(b, sizeof b, "10%% loss: max %.3f m, mean %.4f m, yaw %.3f, time step off by %.1f ms; no loss max %.3f; clock +5000 s differs by %.3f m",
+                 a.maxErr, a.sumErr / std::max(a.n, 1), a.maxYaw, a.maxStep * 1000, lossless.maxErr, diff);
+        check(a.n > 1000 && a.maxErr < 0.05 && a.sumErr / a.n < 0.01 && a.maxYaw < 0.02 && a.maxStep < 0.002 && lossless.maxErr < 0.02 &&
+              a.drawn.size() == c.drawn.size() && diff < 0.02, "remote: smooth 100 ms behind", b);
+    }
+    {   // updates stop: carry on along the velocity for 250 ms, then stand still
+        RemotePlayer r;
+        PS s; s.x = 0; s.vx = 4; s.vz = -2;
+        r.addSample(1.0f, 5.0, s);
+        PS a, c, d; bool fa, fc, fd;
+        r.stateAt(1.1, a, &fa); r.stateAt(1.25, c, &fc); r.stateAt(3.0, d, &fd);
+        snprintf(b, sizeof b, "x at +0.1 s %.2f, +0.25 s %.2f, +2 s %.2f (frozen %d %d %d)", a.x, c.x, d.x, fa, fc, fd);
+        check(fabsf(a.x - 0.4f) < 1e-4f && fabsf(c.x - 1.f) < 1e-4f && fabsf(d.x - 1.f) < 1e-4f && fabsf(d.z + 0.5f) < 1e-4f && !fa && !fc && fd,
+              "remote: extrapolate 250 ms then freeze", b);
+    }
+    {   // a teleport snaps, an angle goes the short way round, and tricks don't sweep across their start or end
+        auto two = [](const PS& p, const PS& q) { RemotePlayer r; r.addSample(1.f, 1.0, p); r.addSample(1.05f, 1.05, q); return r; };
+        PS p, q;
+        p.x = 0; q.x = 100;
+        RemotePlayer tp = two(p, q);
+        bool snap = true;
+        for (int i = 0; i <= 10; i++) {
+            PS o; tp.stateAt(1.0 + 0.05 * i / 10.0, o);
+            snap = snap && (o.x == 0.f || o.x == 100.f);
+        }
+        p = q = PS(); p.yaw = 3.0f; q.yaw = -3.0f;
+        PS o; two(p, q).stateAt(1.025, o);
+        float wrapYaw = o.yaw;
+        // [from angle, from progress, to angle, to progress] for: a trick starting, ending, a new one right after, one going on
+        const float cases[4][4] = {{0, -1, 108, 0.3f}, {342, 0.95f, 0, -1}, {324, 0.9f, -36, 0.1f}, {72, 0.2f, 144, 0.4f}};
+        bool sweepOk = true;
+        float mid = 0;
+        for (int c = 0; c < 4; c++) {
+            p = q = PS(); p.flipAngle = cases[c][0]; p.flipProg = cases[c][1]; q.flipAngle = cases[c][2]; q.flipProg = cases[c][3];
+            RemotePlayer r = two(p, q);
+            for (int i = 0; i <= 10; i++) {
+                r.stateAt(1.0 + 0.05 * i / 10.0, o);
+                if (c < 3) sweepOk = sweepOk && (o.flipAngle == cases[c][0] || o.flipAngle == cases[c][2]);
+                if (c == 3 && i == 5) mid = o.flipAngle;
+            }
+        }
+        snprintf(b, sizeof b, "teleport snaps %d; yaw 3.0 -> -3.0 midway %.3f; flips snap at start/end %d, midway in one %.1f deg",
+                 snap, wrapYaw, sweepOk, mid);
+        check(snap && fabsf(wrapYaw) > 3.1f && sweepOk && fabsf(mid - 108) < 0.01f, "remote: snaps and angles", b);
+    }
+    {   // join fades in once a state arrives, leave fades out over about a second and then drops them
+        Remotes rm;
+        rm.myId = 1; rm.myName = "me";
+        rm.join(2, "Ana");
+        rm.update(1.0, 0.1f);
+        float before = rm.list[0].fade;
+        PS s; s.x = 7;
+        rm.addSample(2, 0.5f, 1.0, s);
+        for (int i = 0; i < 10; i++) rm.update(1.0 + i * 0.1, 0.1f);
+        float in = rm.list[0].fade;
+        rm.leave(2);
+        rm.update(2.0, 0.5f);
+        bool half = rm.list.size() == 1 && rm.list[0].fade > 0.4f && rm.list[0].fade < 0.6f;
+        rm.update(2.6, 0.6f);
+        snprintf(b, sizeof b, "fade before a state %.2f, after 1 s %.2f, gone 1.1 s after leaving %d", before, in, rm.list.empty());
+        check(before == 0 && in == 1 && half && rm.list.empty(), "remote: fade in and out", b);
+    }
+    {   // colours: the same for the same roster on every client, all different, none like the local skater
+        std::vector<std::pair<uint8_t, std::string>> roster = {{3, "Ana"}, {1, "Bo"}, {7, "Cy"}, {2, "Dee"}, {4, "Eli"}, {9, "Fay"}, {5, "Gus"}, {6, "Hal"}};
+        // two names that ask for the same slot
+        std::string clash;
+        for (int i = 0; clash.empty() && i < 1000; i++) {
+            std::string nm = "p" + std::to_string(i);
+            if (nm != "Ana" && preferredSlot(nm) == preferredSlot("Ana")) clash = nm;
+        }
+        roster[7].second = clash;
+        std::vector<int> s1 = assignSlots(roster);
+        auto rev = roster;
+        std::reverse(rev.begin(), rev.end());
+        std::vector<int> s2 = assignSlots(rev);
+        bool same = true, distinct = true, notLocal = true;
+        for (size_t i = 0; i < roster.size(); i++) {
+            same = same && s1[i] == s2[roster.size() - 1 - i];
+            for (size_t j = 0; j < i; j++) distinct = distinct && s1[i] != s1[j];
+        }
+        SkaterLook local;
+        for (int k = 0; k < REMOTE_PALETTE; k++) {
+            RemoteLook l = remoteLook(k, "Ana");
+            notLocal = notLocal && !(l.skater.shirt.r == local.shirt.r && l.skater.shirt.g == local.shirt.g && l.skater.shirt.b == local.shirt.b);
+            for (int j = 0; j < k; j++) {
+                RemoteLook m = remoteLook(j, "Ana");
+                distinct = distinct && (l.tag.r != m.tag.r || l.tag.g != m.tag.g || l.tag.b != m.tag.b);
+            }
+        }
+        RemoteLook x = remoteLook(2, "Ana"), y = remoteLook(2, "Ana");
+        bool det = !memcmp(&x, &y, sizeof x);
+        snprintf(b, sizeof b, "8 players (Ana and %s ask for slot %d): same on every client %d, all different %d, none local %d, stable %d",
+                 clash.c_str(), preferredSlot("Ana"), same, distinct, notLocal, det);
+        check(!clash.empty() && same && distinct && notLocal && det, "remote: player colours", b);
+    }
+}
+
 int main() {
     SetTraceLogLevel(LOG_WARNING);
+    remoteChecks();
     W.keepFoliageMesh = true;   // leaves meshed in place too, to check the sources against
     W.freezeEarly = true;       // the cells the game bakes during generation: any later write to one stops the run
     W.generate(progress);
@@ -275,6 +427,25 @@ int main() {
         snprintf(b, sizeof b, "riding %.2f m/s; mid-flip angle %.2f/%.2f prog %.2f/%.2f vy %.2f/%.2f", rv, r.flipAngle, s.p.flipAngle,
                  r.flipProg, s.p.flipT / s.p.flipDur, r.vy, s.p.vy);
         check(ok, "net: skater state survives the wire", b);
+        // and another client poses it the same way: PlayerState -> SkaterPose, against the local skater's own
+        SkaterPose mine = s.p.pose(), theirs = poseFromState(r);
+        bool same = theirs.state == mine.state && Vector3Distance(theirs.pos, mine.pos) == 0 && ang(theirs.yaw, mine.yaw) < 1e-3f;
+        same = same && fabsf(theirs.flipProg - mine.flipProg) < 0.004f && fabsf(theirs.flipAngle - mine.flipAngle) < 0.011f;
+        same = same && theirs.shoveProg == mine.shoveProg && fabsf(theirs.crouch - mine.crouch) < 0.003f && fabsf(theirs.lean - mine.lean) < 0.01f;
+        same = same && fabsf(theirs.pitch - mine.pitch) < 0.006f && ang(theirs.pushPhase, mine.pushPhase) < 0.03f && theirs.grabbing == mine.grabbing;
+        same = same && Vector3Distance(theirs.boardPos, mine.boardPos) < 0.01f && ang(theirs.boardYaw, mine.boardYaw) < 1e-3f;
+        SkaterPose bailed;
+        {
+            Sim t; t.spawn(1045 + 2.4f, -80, PI / 2, 8);
+            t.p.bail("test");
+            t.run(20, Input{});
+            netp::PlayerState bs = wire(t.p).second;
+            bailed = poseFromState(bs);
+            same = same && bailed.state == Player::BAIL && fabsf(bailed.bailT - t.p.bailT) < 0.006f && Vector3Distance(bailed.boardPos, t.p.boardPos) < 0.01f;
+        }
+        snprintf(b, sizeof b, "flip %.1f/%.1f prog %.3f/%.3f; bailed board %.2f m from the rider", theirs.flipAngle, mine.flipAngle,
+                 theirs.flipProg, mine.flipProg, Vector3Distance(bailed.boardPos, bailed.pos));
+        check(same, "net: received state poses the skater", b);
     }
     {   // world fingerprint: stable, and a different world (one more rail) gives a different one
         uint32_t f0 = worldFingerprint(W), f1 = worldFingerprint(W);

@@ -689,7 +689,7 @@ int main() {
                 if (JS.dismount(P, W)) { camYaw = P.yaw; P.say("Back on land", WHITE); }
                 else P.say("Get closer to the shore to hop off", WHITE);
             }
-            if (JS.riding) { JS.update(dt, in, in.tuck, P, W); T.update(dt, W, P); }
+            if (JS.riding) { JS.update(dt, in, in.tuck, P, W); T.advance(dt, W, P); }
             if (JS.evMount) S.play(S.splash, 0.5f, 1.3f);
             if (JS.evCrash) S.play(S.splash, 0.9f, 0.7f);
             JS.evMount = JS.evCrash = false;
@@ -720,7 +720,7 @@ int main() {
                     in.steer = atFrame > 450 && !land ? 0.6f : 0.f;
                 }
                 SP.update(dt, in, climb, dive, P, W);
-                T.update(dt, W, P);
+                T.advance(dt, W, P);
                 if (!SP.riding) camYaw = P.yaw;   // crashed and put back on land
             }
             if (SP.evMount) S.play(S.splash, 0.4f, 1.5f);
@@ -734,7 +734,7 @@ int main() {
             ride.v += clampf(vt - ride.v, -6 * dt, 4 * dt);
             ride.v = std::max(ride.v, remain > 1 ? 2.f : 0.f);
             ride.s += ride.dir * ride.v * dt;
-            T.update(dt, W, P);
+            T.advance(dt, W, P);
             if (remain < 0.5f || IsKeyPressed(KEY_SPACE)) {
                 float yaw;
                 Vector3 p = W.caltrainDropoff(ride.dest, &yaw);
@@ -747,7 +747,7 @@ int main() {
         }
         if (running) {
             P.update(dt, in, W);
-            T.update(dt, W, P);
+            T.advance(dt, W, P);
             T.interact(P);
             {
                 Jet jets[2];
@@ -784,7 +784,7 @@ int main() {
                 }
             }
         } else if (title) {
-            T.update(dt, W, P);
+            T.advance(dt, W, P);
         }
         // sounds
         if (P.evPop) S.play(S.pop, 0.8f, 1.0f + GetRandomValue(-10, 10) / 100.f);

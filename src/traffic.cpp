@@ -1,8 +1,8 @@
 #include "traffic.h"
 #include "instance.h"
 #include "models.h"
+#include "bytes.h"
 
-static RNG gR(20240);
 static const World* gTrainWorld = nullptr;
 // Caltrain: five cars of 25.8 m behind the front; and how far either side of the line's middle a road car stops short
 // of it (the trains run 2.4 m out on either track and are 1.55 m half-wide; the ballast runs out to 7.5 m)
@@ -88,7 +88,8 @@ static Vector2 pathLane(const Path& P, float s, float off, Vector2* tan) {
 }
 
 // Pick which way a car leaves grid node (i, j), having arrived heading d. Prefers going straight; U-turns only at dead ends.
-static int pickGridDir(const Grid& g, int i, int j, int d, RNG& r) {
+// r: the car's own pick (see Traffic::update), so one car braking never changes where any other one goes.
+static int pickGridDir(const Grid& g, int i, int j, int d, RNG r) {
     int rev = d ^ 1;
     int opts[4], wts[4], n = 0, tot = 0;
     for (int k = 0; k < 4; k++) {
@@ -125,9 +126,25 @@ static Color carBody(int type, RNG& r) {
     return randomCarColor(r);
 }
 
-void Traffic::init(World& w) {
+TrafficActor TrafficActor::of(const Player& p) {
+    TrafficActor a;
+    a.pos = p.pos;
+    a.vel = p.state == Player::AIR ? Vector2{p.vel.x, p.vel.z} : Vector2{cosf(p.yaw) * p.speed, sinf(p.yaw) * p.speed};
+    a.hspeed = p.hspeed();
+    a.state = (int)p.state;
+    return a;
+}
+
+void Traffic::init(World& w, uint32_t seed) {
     gTrainWorld = &w;
-    RNG& r = gR;
+    // start over: init again gives the same traffic as the first time
+    cars.clear(); peds.clear(); cats.clear(); trains.clear(); boxUsers.clear(); carCells.clear();
+    clock = 0; simTime = 0; acc = 0; farTurn = 0; rideCar = -1; evHonk = evCrash = false;
+    this->seed = seed;
+    seedMix = hashu((int)seed, 0, 99);
+    rng = RNG(seed);
+    RNG& r = rng;
+    grids[0] = &w.sf; grids[1] = &w.oak; grids[2] = &w.mp;
     auto spawnGrid = [&](const Grid* g, int n, bool sf) {
         for (int k = 0; k < n * 20 && n > 0; k++) {
             int i = r.irange(0, g->ni - 1), j = r.irange(0, g->nj - 1), d = r.irange(0, 3);
@@ -472,46 +489,67 @@ void Traffic::startEvade(Ped& p, int kind, Vector2 dir, float dist) {
     else                      { p.evMove = 0.65f; p.evDur = 0.65f + 1.4f + 0.95f; }                     // leap, lie there, get up
 }
 
-// The cheap update for someone far from the skater and the camera: walk the route with no dodging and no
-// wall checks (the full update skips those past 250 m anyway), and one ground lookup for the height, so
-// they're on their route at the right height whenever they come back into view.
-void Traffic::farPedUpdate(Ped& p, float dt, World& w, RNG& r) {
-    if (p.knock > 0) { p.knock -= dt; return; }
-    if (p.mode == 3) return;
+// Where someone's route has them now (before any sidestep), and which way it runs ({0, 0}: standing).
+static Vector2 routeBase(const Ped& p, const World& w, Vector2* routeDir) {
+    Vector2 base;
+    *routeDir = {0, 0};
+    if (p.mode == 0) {
+        base = Vector2Lerp(p.from, p.to, clampf(p.t, 0, 1));
+        if (Vector2Length(Vector2Subtract(p.to, p.from)) > 0.1f) *routeDir = Vector2Normalize(Vector2Subtract(p.to, p.from));
+        // swing out round the front of a house's steps instead of walking through them (far from the skater
+        // too: nothing pushes them out of a stoop there)
+        base = Vector2Add(base, w.stoopDetour(base.x, base.y, *routeDir));
+    } else if (p.mode == 1) {
+        Vector2 dir;
+        base = w.pedPaths[p.path].at(p.s, &dir);
+        dir = Vector2Scale(dir, (float)p.pdir);
+        base = Vector2Add(base, Vector2Scale({-dir.y, dir.x}, p.lane));
+        *routeDir = dir;
+    } else base = p.from;
+    return base;
+}
+
+// Walk someone's route on by dt: every step for everyone, near the skaters or not, and with their own random picks
+// (hashed from who they are and how many picks they've made), so where everyone goes doesn't depend on the camera,
+// on who got the full update, or on the order they're updated in. hold: mid-dodge, they stop following it.
+void Traffic::pedRoute(Ped& p, int idx, float dt, bool hold) {
+    auto pick = [&] { return RNG(hashu(idx, (int)p.rolls++, 71) ^ seedMix); };
+    if (p.mode == 0) {
+        if (p.wait > 0) p.wait -= dt;   // waiting at the corner to cross
+        else if (!hold) p.t += p.speed * dt / p.len;
+        if (p.t >= 1) {
+            RNG r = pick();
+            p.t = 1;
+            nextPedMove(p, r);
+            if (r.chance(0.22f)) p.wait = r.range(1.5f, 5.f);
+        }
+    } else if (p.mode == 1) {
+        float len = gTrainWorld->pedPaths[p.path].len;
+        if (!hold) p.s += p.pdir * p.speed * dt;
+        if (p.s > len) { p.s = len; p.pdir = -1; }
+        if (p.s < 0) { p.s = 0; p.pdir = 1; }
+    } else if (p.mode == 2) {
+        p.idleTurn -= dt;
+        if (p.idleTurn < 0 && !hold) { RNG r = pick(); p.idleTurn = r.range(2, 7); p.yaw += r.range(-1.2f, 1.2f); }
+    }
+}
+
+// The cheap placing of someone far from the skaters and the camera, dt after they were last placed: on their route
+// (pedRoute keeps that up to date) with no dodging and no wall checks (the full update skips those past 250 m
+// anyway), and one ground lookup for the height, so they're at the right spot whenever they come back into view.
+void Traffic::pedPlaceFar(Ped& p, float dt, World& w) {
     float prevGround = p.pos.y - p.evY;
     if (p.evade != EV_NONE) { p.dodge = p.evTo; p.evade = EV_NONE; }   // nobody's dodging out here: finish the move
     p.evY = 0; p.evTilt = 0;
     float L = Vector2Length(p.dodge);   // and they drift back onto their route at a walk
     if (L > 0.01f) p.dodge = Vector2Scale(p.dodge, (L - std::min(L, 1.0f * dt)) / L);
-    Vector2 base, routeDir = {0, 0};
-    bool walking = false;
-    if (p.mode == 0) {
-        if (p.wait > 0) p.wait -= dt;
-        else { p.t += p.speed * dt / p.len; walking = true; }
-        if (p.t >= 1) { p.t = 1; nextPedMove(p, r); if (r.chance(0.22f)) p.wait = r.range(1.5f, 5.f); }
-        base = Vector2Lerp(p.from, p.to, clampf(p.t, 0, 1));
-        if (Vector2Length(Vector2Subtract(p.to, p.from)) > 0.1f) routeDir = Vector2Normalize(Vector2Subtract(p.to, p.from));
-        base = Vector2Add(base, w.stoopDetour(base.x, base.y, routeDir));   // round the front of a house's steps
-    } else if (p.mode == 1) {
-        const Path& P = w.pedPaths[p.path];
-        p.s += p.pdir * p.speed * dt;
-        if (p.s > P.len) { p.s = P.len; p.pdir = -1; }
-        if (p.s < 0) { p.s = 0; p.pdir = 1; }
-        Vector2 dir;
-        base = P.at(p.s, &dir);
-        dir = Vector2Scale(dir, (float)p.pdir);
-        base = Vector2Add(base, Vector2Scale({-dir.y, dir.x}, p.lane));
-        routeDir = dir;
-        walking = true;
-    } else {
-        base = p.from;
-        p.idleTurn -= dt;
-        if (p.idleTurn < 0) { p.idleTurn = r.range(2, 7); p.yaw += r.range(-1.2f, 1.2f); }
-    }
+    Vector2 routeDir;
+    Vector2 base = routeBase(p, w, &routeDir);
+    bool walking = p.mode == 1 || (p.mode == 0 && p.wait <= 0);
     float x = base.x + p.dodge.x, z = base.y + p.dodge.y;
     float y = w.ground(x, z, std::max(w.terrain(x, z), prevGround));   // same step-climbing reference as the full update
     p.pos = {x, y, z};
-    p.gait = walking && p.mode != 2 ? p.speed : 0;
+    p.gait = walking ? p.speed : 0;
     if (walking && (routeDir.x != 0 || routeDir.y != 0)) p.yaw = atan2f(routeDir.y, routeDir.x);
     p.phase += dt * p.gait * 5.2f;
 }
@@ -542,14 +580,57 @@ static Vector3 dogSpot(Ped& p, const World& w) {
     return pushed;
 }
 
+void Traffic::beginFrame() {
+    for (auto& c : cars) { c.lastPos = c.pos; c.lastYaw = c.yaw; c.lastPitch = c.pitch; c.lastPlaced = c.placed; }
+}
+
 void Traffic::update(float dt, World& w, Player& pl) {
-    RNG& r = gR;
+    beginFrame();
+    update(dt, w, std::vector<TrafficActor>{TrafficActor::of(pl)});
+    carryRider(pl, dt);
+    publishRoofs(w, pl.pos);
+}
+
+int Traffic::takeSteps(float frameDt) {
+    acc += frameDt;
+    int n = (int)(acc / STEP);
+    if (n > MAX_STEPS) { n = MAX_STEPS; acc = 0; }   // too far behind (a hitch): skip ahead rather than catch up
+    else acc -= n * (double)STEP;
+    return n;
+}
+
+int Traffic::advance(float frameDt, World& w, Player& pl) {
+    beginFrame();   // (the roofs the skater stood on this frame: as published at the end of the last one)
+    int n = takeSteps(frameDt);
+    std::vector<TrafficActor> actors{TrafficActor::of(pl)};
+    bool honk = false;
+    for (int k = 0; k < n; k++) { update(STEP, w, actors); honk |= evHonk; }
+    evHonk = honk;
+    carryRider(pl, frameDt);   // (no steps: the cars haven't moved, and neither does the skater on one)
+    publishRoofs(w, pl.pos);
+    return n;
+}
+
+void Traffic::update(float dt, World& w, const std::vector<TrafficActor>& actors) {
     evHonk = false;
     clock += dt;
-    for (auto& c : cars) { c.lastPos = c.pos; c.lastYaw = c.yaw; c.lastPitch = c.pitch; c.lastPlaced = c.placed; }
+    simTime += dt;
+    // the actor nearest a spot (on the ground plan), or null if there's nobody
+    auto nearest = [&](Vector3 at, float* d2) -> const TrafficActor* {
+        const TrafficActor* best = nullptr;
+        *d2 = 1e30f;
+        for (auto& a : actors) {
+            float e = sq(a.pos.x - at.x) + sq(a.pos.z - at.z);
+            if (e < *d2) { *d2 = e; best = &a; }
+        }
+        return best;
+    };
     for (auto& c : cats) {
-        float dx = c.pos.x - pl.pos.x, dz = c.pos.z - pl.pos.z, d2 = dx * dx + dz * dz;
-        if (d2 > 80 * 80) continue;
+        float d2;
+        const TrafficActor* pa = nearest(c.pos, &d2);
+        if (!pa || d2 > 80 * 80) continue;
+        const TrafficActor& pl = *pa;
+        float dx = c.pos.x - pl.pos.x, dz = c.pos.z - pl.pos.z;
         c.t += dt;
         if (c.flee > 0) {   // bolting away, around anything in the way
             c.flee -= dt;
@@ -558,12 +639,11 @@ void Traffic::update(float dt, World& w, Player& pl) {
             if (w.solidAt({nx, ny + 0.25f, nz}) || fabsf(ny - c.pos.y) > 0.6f || w.isWater(nx, nz, ny)) c.yaw += 1.6f;
             else c.pos = {nx, ny, nz};
             if (c.flee <= 0) { c.pose = 0; c.yaw += PI; }   // safe: sit down and look back
-        } else if (d2 < 25 && pl.hspeed() > 3.f && fabsf(c.pos.y - pl.pos.y) < 2) {
+        } else if (d2 < 25 && pl.hspeed > 3.f && fabsf(c.pos.y - pl.pos.y) < 2) {
             c.flee = 1.4f; c.pose = 2;
             c.yaw = atan2f(dz, dx) + ((int)(c.t * 10) % 2 ? 0.5f : -0.5f);
         }
     }
-    Vector3 pp = pl.pos;
     // every car keeps its distance from the others, near the skater or not (or they'd merge out on the bridges and
     // still be inside each other when you get there): bucket them into 40 m cells so each only looks at its neighbors
     const float CELL = 40.f;
@@ -599,7 +679,7 @@ void Traffic::update(float dt, World& w, Player& pl) {
         return u;
     };
     // who's cleared through, or waiting at, each grid intersection
-    auto gridIdx = [&](const Car& k) { return k.g == &w.sf ? 0 : k.g == &w.oak ? 1 : 2; };
+    auto gridIdx = [&](const Car& k) { return gridOf(k); };
     auto boxKey = [&](const Car& k, int n) { return gridIdx(k) << 20 | n; };
     auto setBox = [&](Car& k, int box, int want) {
         int idx = (int)(&k - cars.data());
@@ -631,13 +711,19 @@ void Traffic::update(float dt, World& w, Player& pl) {
         }
         return false;
     };
+    // a grid car's own pick of where to go at the node ahead: hashed from the car, the node and how many it's picked
+    auto turn = [&](Car& k) {
+        int n = (k.j + DJ[k.d]) * k.g->ni + k.i + DI[k.d];
+        return RNG(hashu((int)(&k - cars.data()), n, k.hops++) ^ seedMix);
+    };
     for (auto& c : cars) {
-        float distP = sqrtf(sq(c.pos.x - pp.x) + sq(c.pos.z - pp.z));
-        // target speed: stop for the skater and for cars ahead
+        // target speed: stop for the skaters and for cars ahead
         float target = c.maxSpeed;
         if (c.stopT > 0) { c.stopT -= dt; target = 0; }
         Vector2 f = {cosf(c.yaw), sinf(c.yaw)};
-        if (c.placed && distP < 40) {
+        for (const TrafficActor& a : actors) {
+            Vector3 pp = a.pos;
+            if (!c.placed || sq(c.pos.x - pp.x) + sq(c.pos.z - pp.z) >= 40 * 40) continue;
             float rx = pp.x - c.pos.x, rz = pp.z - c.pos.z;
             float along = rx * f.x + rz * f.y, lat = fabsf(-rx * f.y + rz * f.x);
             float look = 6 + c.speed * 0.9f + carModel(c.type).halfLen;
@@ -913,7 +999,7 @@ void Traffic::update(float dt, World& w, Player& pl) {
         if (c.mode == 0) {
             const Grid& g = *c.g;
             if (c.pd < 0) c.pd = c.d;
-            if (c.nd < 0) c.nd = pickGridDir(g, c.i + DI[c.d], c.j + DJ[c.d], c.d, r);
+            if (c.nd < 0) c.nd = pickGridDir(g, c.i + DI[c.d], c.j + DJ[c.d], c.d, turn(c));
             c.t += c.speed * dt / g.sp;
             if (backOff > 0) c.t = std::max(0.f, c.t - std::min(backOff, 3 * dt) / g.sp);   // ease back out of the car ahead
             int guard = 0;
@@ -921,7 +1007,7 @@ void Traffic::update(float dt, World& w, Player& pl) {
                 c.t -= 1;
                 c.i += DI[c.d]; c.j += DJ[c.d];
                 c.pd = c.d; c.d = c.nd;
-                c.nd = pickGridDir(g, c.i + DI[c.d], c.j + DJ[c.d], c.d, r);
+                c.nd = pickGridDir(g, c.i + DI[c.d], c.j + DJ[c.d], c.d, turn(c));
             }
             // the turn is decided a block ahead, so each intersection is driven as one smooth curve
             Vector2 a = g.node(c.i, c.j), b = g.node(c.i + DI[c.d], c.j + DJ[c.d]);
@@ -989,29 +1075,36 @@ void Traffic::update(float dt, World& w, Player& pl) {
         c.placed = true;
     }
 
-    // the skater's velocity on the ground, for the people deciding whether to get out of the way
-    Vector2 skV = pl.state == Player::AIR ? Vector2{pl.vel.x, pl.vel.z} : Vector2{cosf(pl.yaw) * pl.speed, sinf(pl.yaw) * pl.speed};
-    float skSp = Vector2Length(skV);
-    Vector2 skDir = skSp > 0.1f ? Vector2Scale(skV, 1.f / skSp) : Vector2{1, 0};
-    // Only people within PED_NEAR of the skater or the camera get the full update below (dodging, walls,
-    // climbing steps). Nobody is drawn past 230 m, so the rest just walk their routes: each frame one slice
-    // of them catches up on the time they've missed, and anyone coming into range catches up first.
+    // Everyone walks their route every step (pedRoute). Only people within PED_NEAR of a skater or the camera get
+    // the full update below on top of that (dodging, walls, climbing steps). Nobody is drawn past 230 m, so the
+    // rest are only placed on their routes now and then: each step one slice of them, and anyone coming into range
+    // first. (Which of them that is changes nothing about where anyone goes.)
     const float PED_NEAR = 300.f;
     const int FAR_SLICES = 16;
     farTurn = (farTurn + 1) % FAR_SLICES;
     for (size_t pi = 0; pi < peds.size(); pi++) {
         Ped& p = peds[pi];
-        float dP2 = sq(p.pos.x - pp.x) + sq(p.pos.z - pp.z);
-        if (std::min(dP2, sq(p.pos.x - view.x) + sq(p.pos.z - view.z)) > PED_NEAR * PED_NEAR) {
-            p.lag += dt;
-            if ((int)(pi % FAR_SLICES) == farTurn) { farPedUpdate(p, p.lag, w, r); p.lag = 0; }
-            continue;
-        }
-        if (p.lag > 0) { farPedUpdate(p, p.lag, w, r); p.lag = 0; }
         if (p.knock > 0) { p.knock -= dt; continue; }
         if (p.mode == 3) continue;   // sitting: stays put, on the seat
+        float dP2;
+        const TrafficActor* pa = nearest(p.pos, &dP2);
+        if (std::min(dP2, sq(p.pos.x - view.x) + sq(p.pos.z - view.z)) > PED_NEAR * PED_NEAR) {
+            pedRoute(p, (int)pi, dt, false);
+            p.lag += dt;
+            if ((int)(pi % FAR_SLICES) == farTurn) { pedPlaceFar(p, p.lag, w); p.lag = 0; }
+            continue;
+        }
+        if (p.lag > 0) { pedPlaceFar(p, p.lag, w); p.lag = 0; }
         Vector3 prev = p.pos;
         float prevGround = p.pos.y - p.evY;
+        // the skater nearest them (near the camera with nobody about: someone far off, who changes nothing below)
+        TrafficActor nobody;
+        nobody.pos = {1e6f, -1e6f, 1e6f};
+        const TrafficActor& pl = pa ? *pa : nobody;
+        Vector3 pp = pl.pos;
+        // their velocity on the ground, for deciding whether to get out of the way
+        float skSp = Vector2Length(pl.vel);
+        Vector2 skDir = skSp > 0.1f ? Vector2Scale(pl.vel, 1.f / skSp) : Vector2{1, 0};
 
         // ---- getting out of the skater's way
         // how soon they notice: someone heads-down in a phone or laptop spots the skater late, others at varying distances
@@ -1082,36 +1175,13 @@ void Traffic::update(float dt, World& w, Player& pl) {
             }
         }
 
-        Vector2 base, routeDir = {0, 0};
-        bool hold = evading;   // mid-dodge they stop following their route
-        if (p.mode == 0) {
-            if (p.wait > 0) p.wait -= dt;   // waiting at the corner to cross
-            else if (!hold) p.t += p.speed * dt / p.len;
-            if (p.t >= 1) { p.t = 1; nextPedMove(p, r); if (r.chance(0.22f)) p.wait = r.range(1.5f, 5.f); }
-            base = Vector2Lerp(p.from, p.to, clampf(p.t, 0, 1));
-            if (Vector2Length(Vector2Subtract(p.to, p.from)) > 0.1f) routeDir = Vector2Normalize(Vector2Subtract(p.to, p.from));
-            // swing out round the front of a house's steps instead of walking through them (far from the skater
-            // too: nothing pushes them out of a stoop there)
-            base = Vector2Add(base, w.stoopDetour(base.x, base.y, routeDir));
-        } else if (p.mode == 1) {
-            const Path& P = w.pedPaths[p.path];
-            if (!hold) p.s += p.pdir * p.speed * dt;
-            if (p.s > P.len) { p.s = P.len; p.pdir = -1; }
-            if (p.s < 0) { p.s = 0; p.pdir = 1; }
-            Vector2 dir;
-            base = P.at(p.s, &dir);
-            dir = Vector2Scale(dir, (float)p.pdir);
-            base = Vector2Add(base, Vector2Scale({-dir.y, dir.x}, p.lane));
-            routeDir = dir;
-        } else {
-            base = p.from;
-            p.idleTurn -= dt;
-            if (p.idleTurn < 0 && p.gait < 0.2f && !evading) { p.idleTurn = r.range(2, 7); p.yaw += r.range(-1.2f, 1.2f); }
-        }
+        pedRoute(p, (int)pi, dt, evading);   // (mid-dodge they stop following their route)
+        Vector2 routeDir;
+        Vector2 base = routeBase(p, w, &routeDir);
         // a skater standing or rolling slowly (too slow to set off the dodges above) is walked round like
         // anyone else on the sidewalk: drift sideways off the route while they're in the way ahead, to the
         // side already favoured, or the other side if a wall or the water is there
-        bool slowSk = pl.hspeed() < 2.f && fabsf(pl.pos.y - p.pos.y) < 1.4f;
+        bool slowSk = pl.hspeed < 2.f && fabsf(pl.pos.y - p.pos.y) < 1.4f;
         if (slowSk && !evading && dP2 < 4.f * 4.f && (routeDir.x != 0 || routeDir.y != 0)) {
             const float R = 0.8f;   // how wide a berth they give the skater
             Vector2 at = {base.x + p.dodge.x - pp.x, base.y + p.dodge.y - pp.z};   // skater to where they're headed
@@ -1202,7 +1272,9 @@ void Traffic::update(float dt, World& w, Player& pl) {
     // (sitting down, switching sides) and jump straight there when far off (just come into range).
     for (auto& p : peds) {
         if (!p.pet) continue;
-        if (std::min(sq(p.pos.x - pp.x) + sq(p.pos.z - pp.z), sq(p.pos.x - view.x) + sq(p.pos.z - view.z)) > 160 * 160) continue;
+        float d2;
+        nearest(p.pos, &d2);
+        if (std::min(d2, sq(p.pos.x - view.x) + sq(p.pos.z - view.z)) > 160 * 160) continue;
         Vector3 to = dogSpot(p, w);
         Vector2 off = {to.x - p.pos.x, to.z - p.pos.z}, go = Vector2Subtract(off, p.dogOff);
         if (sq(to.x - p.dog.x) + sq(to.z - p.dog.z) > 3 * 3 || Vector2LengthSqr(go) < 1e-4f) { p.dogOff = off; p.dog = to; continue; }
@@ -1211,8 +1283,6 @@ void Traffic::update(float dt, World& w, Player& pl) {
         float x = p.pos.x + p.dogOff.x, z = p.pos.z + p.dogOff.y;
         p.dog = {x, w.ground(x, z, std::max(w.terrain(x, z), to.y)), z};
     }
-    carryRider(pl, dt);
-    publishRoofs(w, pl.pos);
     // Caltrain: accelerate, brake for the next station, dwell, reverse at the ends
     float lineEnd = w.railLen() - 25, lineStart = w.stations.empty() ? 0 : w.stations[0].s;
     for (auto& t : trains) {
@@ -1883,4 +1953,174 @@ void Traffic::drawSignals(const World& w, Vector3 cam) const {
 
 void Traffic::drawTrains(const World& w, Vector3 cam) const {
     for (auto& t : trains) drawTrain(w, t.s, t.dir, cam);
+}
+
+// ---- snapshots
+
+void Traffic::unbox(int idx) {
+    Car& k = cars[idx];
+    for (int n : {k.box, k.wantBox}) {
+        if (n < 0) continue;
+        auto it = boxUsers.find(gridOf(k) << 20 | n);
+        if (it != boxUsers.end()) it->second.erase(std::remove(it->second.begin(), it->second.end(), idx), it->second.end());
+    }
+    k.box = k.wantBox = -1;
+}
+
+// boxUsers from each car's box and wantBox (only which cars are listed matters, not the order: see update)
+void Traffic::rebuildBoxUsers() {
+    boxUsers.clear();
+    for (int k = 0; k < (int)cars.size(); k++) {
+        const Car& c = cars[k];
+        if (c.box >= 0) boxUsers[gridOf(c) << 20 | c.box].push_back(k);
+        if (c.wantBox >= 0 && c.wantBox != c.box) boxUsers[gridOf(c) << 20 | c.wantBox].push_back(k);
+    }
+}
+
+// Compact: 18 bytes for every car (index, position, heading, speed, stop timer, flags) and the route by its kind: on
+// the grid the block, the headings in and out, how far along and the turns picked so far (+9); on a road or a line,
+// how far along it and how far into a U-turn or a crossover (+6). Which road or line a car is on, and its lane,
+// never change, so the other machine already has them.
+static const uint8_t CARS_VERSION = 1;
+enum : uint8_t { CF_FWD = 1, CF_PLACED = 2, CF_BRAKING = 4, CF_UTURN = 8, CF_PASSING = 16, CF_QUEUED = 32, CF_PD = 64, CF_ND = 128 };
+
+void Traffic::serializeCars(const std::vector<int>& idx, std::vector<uint8_t>& out) const {
+    ByteWriter b(out);
+    b.u8(CARS_VERSION);
+    int n = 0;
+    for (int k : idx) n += k >= 0 && k < (int)cars.size();
+    b.u16((uint16_t)n);
+    for (int k : idx) {
+        if (k < 0 || k >= (int)cars.size()) continue;
+        const Car& c = cars[k];
+        b.u16((uint16_t)k);
+        b.f32(c.pos.x); b.f32(c.pos.z);
+        b.i16((int16_t)clampf(roundf(c.pos.y * 64), -32768, 32767));
+        b.u16((uint16_t)((int)roundf((wrapPi(c.yaw) + PI) / TAU_F * 65536) & 0xFFFF));
+        b.u16((uint16_t)clampf(roundf(c.speed * 256), 0, 65535));
+        b.u8(c.stopT > 1e8f ? 255 : (uint8_t)clampf(ceilf(c.stopT * 8), 0, 254));   // (255: held for good)
+        b.u8((c.pdir > 0 ? CF_FWD : 0) | (c.placed ? CF_PLACED : 0) | (c.braking ? CF_BRAKING : 0) | (c.uturn >= 0 ? CF_UTURN : 0) |
+             (c.passing ? CF_PASSING : 0) | (c.queued ? CF_QUEUED : 0) | (c.pd >= 0 ? CF_PD : 0) | (c.nd >= 0 ? CF_ND : 0));
+        if (c.mode == 0) {
+            b.u16((uint16_t)c.i); b.u16((uint16_t)c.j);
+            b.u8((uint8_t)(c.d | (c.pd & 3) << 2 | (c.nd & 3) << 4));
+            b.u16((uint16_t)clampf(roundf(c.t * 65536), 0, 65535));
+            b.u16(c.hops);
+        } else {
+            b.f32(c.s);
+            if (c.mode == 1) b.u16((uint16_t)clampf(roundf(std::max(c.uturn, 0.f) * 64), 0, 65535));
+            else b.u16(c.xover > 4000 ? 65535 : (uint16_t)clampf(roundf(c.xover * 16), 0, 65534));   // (65535: long since)
+        }
+    }
+}
+
+bool Traffic::applyCars(const uint8_t* data, size_t size, bool snapPos) {
+    ByteReader b(data, size);
+    if (b.u8() != CARS_VERSION) return false;
+    int n = b.u16();
+    for (int q = 0; q < n && !b.bad; q++) {
+        int k = b.u16();
+        if (k >= (int)cars.size()) return false;
+        Car& c = cars[k];
+        float x = b.f32(), z = b.f32(), y = b.i16() / 64.f;
+        float yaw = b.u16() / 65536.f * TAU_F - PI;
+        float speed = b.u16() / 256.f;
+        uint8_t st = b.u8(), fl = b.u8();
+        if (c.mode == 0) {
+            int i = b.u16(), j = b.u16(), dirs = b.u8();
+            float t = b.u16() / 65536.f;
+            uint16_t hops = b.u16();
+            if (b.bad) return false;
+            int d = dirs & 3, pd = fl & CF_PD ? dirs >> 2 & 3 : -1, nd = fl & CF_ND ? dirs >> 4 & 3 : -1;
+            if (!c.g->in(i, j)) return false;
+            // on another block, or turning another way: its turn at the intersections it had is gone
+            if (i != c.i || j != c.j || d != c.d || nd != c.nd) unbox(k);
+            c.i = i; c.j = j; c.d = d; c.pd = pd; c.nd = nd; c.t = t; c.hops = hops;
+        } else {
+            float s = b.f32();
+            uint16_t extra = b.u16();
+            if (b.bad) return false;
+            c.s = s;
+            if (c.mode == 1) c.uturn = fl & CF_UTURN ? extra / 64.f : -1;
+            else c.xover = extra == 65535 ? 1e9f : extra / 16.f;
+        }
+        c.pdir = fl & CF_FWD ? 1 : -1;
+        c.speed = speed;
+        c.stopT = st == 255 ? 1e9f : st / 8.f;
+        c.braking = fl & CF_BRAKING;
+        c.passing = fl & CF_PASSING;
+        c.queued = fl & CF_QUEUED;
+        // the hook for smoothing: without snapPos the car keeps its spot and eases over to its new route point as it
+        // drives (update pulls a placed car's position toward that point every step)
+        if (snapPos || !c.placed) {
+            c.pos = {x, y, z};
+            c.yaw = yaw;
+            c.placed = fl & CF_PLACED;
+        }
+    }
+    return !b.bad;
+}
+
+static const uint32_t FULL_MAGIC = 0x31544653;   // "SFT1"
+
+void Traffic::serializeFull(std::vector<uint8_t>& out) const {
+    ByteWriter b(out);
+    b.u32(FULL_MAGIC);
+    b.u32(seed);
+    b.f32(clock); b.f64(simTime); b.u8((uint8_t)farTurn);
+    b.u32((uint32_t)cars.size());
+    for (const Car& c : cars) {
+        b.u8((uint8_t)c.type); b.u8(c.body.r); b.u8(c.body.g); b.u8(c.body.b); b.u8(c.body.a);
+        b.u8((uint8_t)c.mode); b.u8((uint8_t)gridOf(c));
+        b.i32(c.i); b.i32(c.j); b.u8((uint8_t)c.d); b.u8((uint8_t)c.pd); b.u8((uint8_t)c.nd);
+        b.f32(c.t); b.f32(c.uturn); b.f32(c.xover);
+        b.i32(c.path); b.f32(c.s); b.u8((uint8_t)c.pdir); b.f32(c.lane);
+        b.f32(c.speed); b.f32(c.maxSpeed); b.f32(c.stopT); b.f32(c.honkCD);
+        b.f32(c.pos.x); b.f32(c.pos.y); b.f32(c.pos.z); b.f32(c.yaw); b.f32(c.pitch);
+        b.u8((c.braking ? 1 : 0) | (c.placed ? 2 : 0) | (c.queued ? 4 : 0) | (c.passing ? 8 : 0));
+        b.f32(c.pedal); b.f32(c.acrossT);
+        b.i32(c.box); b.i32(c.wantBox); b.f32(c.boxSince); b.f32(c.still);
+        b.u16(c.hops);
+    }
+    b.u32((uint32_t)trains.size());
+    for (const Train& t : trains) { b.f32(t.s); b.u8((uint8_t)t.dir); b.f32(t.v); b.f32(t.dwell); }
+}
+
+bool Traffic::applyFull(const uint8_t* data, size_t size) {
+    ByteReader b(data, size);
+    if (b.u32() != FULL_MAGIC) return false;
+    uint32_t sd = b.u32();
+    float clk = b.f32();
+    double st = b.f64();
+    int ft = b.u8();
+    if (b.u32() != cars.size() || b.bad) return false;   // (another city, or another version of it)
+    std::vector<Car> next = cars;
+    for (Car& c : next) {
+        c.type = b.u8(); c.body.r = b.u8(); c.body.g = b.u8(); c.body.b = b.u8(); c.body.a = b.u8();
+        c.mode = b.u8();
+        c.g = grids[std::min<int>(b.u8(), 2)];
+        c.i = b.i32(); c.j = b.i32(); c.d = (int8_t)b.u8(); c.pd = (int8_t)b.u8(); c.nd = (int8_t)b.u8();
+        c.t = b.f32(); c.uturn = b.f32(); c.xover = b.f32();
+        c.path = b.i32(); c.s = b.f32(); c.pdir = (int8_t)b.u8(); c.lane = b.f32();
+        c.speed = b.f32(); c.maxSpeed = b.f32(); c.stopT = b.f32(); c.honkCD = b.f32();
+        c.pos.x = b.f32(); c.pos.y = b.f32(); c.pos.z = b.f32(); c.yaw = b.f32(); c.pitch = b.f32();
+        uint8_t fl = b.u8();
+        c.braking = fl & 1; c.placed = fl & 2; c.queued = fl & 4; c.passing = fl & 8;
+        c.pedal = b.f32(); c.acrossT = b.f32();
+        c.box = b.i32(); c.wantBox = b.i32(); c.boxSince = b.f32(); c.still = b.f32();
+        c.hops = b.u16();
+        // (where the roofs were last published is this machine's own business: as if published here)
+        c.lastPos = c.pos; c.lastYaw = c.yaw; c.lastPitch = c.pitch; c.lastPlaced = c.placed;
+    }
+    std::vector<Train> tr(b.u32());
+    if (b.bad || tr.size() > 64) return false;
+    for (Train& t : tr) { t.s = b.f32(); t.dir = (int8_t)b.u8(); t.v = b.f32(); t.dwell = b.f32(); }
+    if (b.bad) return false;
+    cars.swap(next);
+    trains.swap(tr);
+    seed = sd;
+    seedMix = hashu((int)seed, 0, 99);
+    clock = clk; simTime = st; farTurn = ft;
+    rebuildBoxUsers();
+    return true;
 }

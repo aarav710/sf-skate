@@ -35,6 +35,7 @@ struct Car {
     Vector3 lastPos{};          // where it was at the start of the last update (to carry a skater riding on its roof)
     float lastYaw = 0, lastPitch = 0;
     bool lastPlaced = false;
+    uint16_t hops = 0;          // grid cars: turns picked so far (each pick is hashed from the car, the node and this)
 };
 
 struct Ped {
@@ -71,7 +72,8 @@ struct Ped {
     Color extra{};
     float wait = 0;             // waiting at a corner to cross
     bool grass = false;         // sitting on a blanket on the lawn rather than on a bench
-    float lag = 0;              // far away: time not simulated yet (they're updated a few at a time, see Traffic::update)
+    float lag = 0;              // far away: time not placed yet (they're placed a few at a time, see Traffic::update)
+    uint32_t rolls = 0;         // random picks made so far (each one is hashed from the person and this)
 };
 enum { EV_NONE, EV_STEP, EV_BACK, EV_HOP, EV_DIVE };
 enum { HAIR_SHORT, HAIR_LONG, HAIR_BUN, HAIR_BALD, HAIR_CAP, HAIR_CURLY };
@@ -91,6 +93,16 @@ struct Train { float s; int dir; float v; float dwell; };
 // front stops at short of them, and where the lane is clear of them on the far side; s: along the line, at the crossing
 struct RailCrossing { float stop = 1e9f, clear = 0, s = 0; };   // stop 1e9: no crossing
 
+// Someone the traffic reacts to: cars stop for them, people get out of their way, cats bolt. The local skater, or
+// in a session every player, so all machines run the same traffic.
+struct TrafficActor {
+    Vector3 pos{};
+    Vector2 vel{};              // over the ground (m/s)
+    float hspeed = 0;           // as Player::hspeed
+    int state = 0;              // Player::State
+    static TrafficActor of(const Player& p);
+};
+
 struct Traffic {
     std::vector<Car> cars;
     std::vector<Ped> peds;
@@ -98,6 +110,10 @@ struct Traffic {
     std::vector<Train> trains; // Caltrain
     bool evHonk = false, evCrash = false;
     float clock = 0;            // drives the traffic signals
+    double simTime = 0;         // time simulated (fixed steps of STEP, see advance)
+    double acc = 0;             // frame time not simulated yet
+    static constexpr float STEP = 1.f / 60;
+    static constexpr int MAX_STEPS = 8;   // a frame runs at most this many steps; any backlog past that is dropped
     Vector3 view = {1e6f, 0, 1e6f};   // the camera, as of last frame: people near it get the full update too
     int farTurn = 0;            // which slice of the far-away people gets its catch-up update this frame
     std::unordered_map<int, std::vector<int>> boxUsers;   // grid intersection -> cars cleared through or waiting there
@@ -111,8 +127,18 @@ struct Traffic {
                                                    // lanes cross a grid street (from, to: s), in order
     std::vector<uint64_t> carCells;   // (40 m cell << 32 | car index), sorted: who's near whom, for every car each frame
 
-    void init(World& w);
-    void update(float dt, World& w, Player& p);   // (also carries a skater riding on a car's roof along with it)
+    // seed: the cars' types, colors and places and the people's looks; the same seed gives the same traffic
+    void init(World& w, uint32_t seed = 20240);
+    // one step of the simulation, reacting to everyone in `actors`. Nothing in it depends on the order things are
+    // updated in, the camera or the frame rate (given fixed steps), so machines with the same actors stay identical
+    void update(float dt, World& w, const std::vector<TrafficActor>& actors);
+    // one step for just the local skater, which also carries them along on a car roof and publishes the roofs
+    void update(float dt, World& w, Player& p);
+    // a frame of the game: as many fixed steps as frameDt adds up to (0 or more), then the skater's roof ride and the
+    // roofs. Returns the steps run.
+    int advance(float frameDt, World& w, Player& p);
+    int takeSteps(float frameDt);      // the accumulator: steps owed for a frame of frameDt
+    void beginFrame();                 // remember where the roofs are (as published), for carryRider after the steps
     int rideCar = -1;                  // the car (index) the skater was last carried on, -1 if none
     void interact(Player& p);
     // put the roofs of the vehicles near `at` into w.vehicleTops, for the skater to land on (update does this each frame)
@@ -128,8 +154,24 @@ struct Traffic {
     static void drawTrain(const World& w, float s, int dir, Vector3 cam);
     static void startEvade(Ped& p, int kind, Vector2 dir, float dist);   // set a person off on a dodge: dir unit, dist metres
 
+    // snapshots, for a host to correct other machines' traffic. serializeCars: the cars listed, compactly (position,
+    // heading, speed, route); applyCars snaps the cars to them (snapPos false: only the route, and the car eases over
+    // to it on its own as it drives, see update). serializeFull: everything that drives the cars and trains from
+    // here on, so init + applyFull on another machine carries on exactly as this one does. People aren't included.
+    void serializeCars(const std::vector<int>& idx, std::vector<uint8_t>& out) const;
+    bool applyCars(const uint8_t* data, size_t n, bool snapPos = true);
+    void serializeFull(std::vector<uint8_t>& out) const;
+    bool applyFull(const uint8_t* data, size_t n);
+
 private:
+    RNG rng{20240};                    // init's draws only: nothing in update takes from a shared stream
+    uint32_t seed = 20240, seedMix = 0;   // (seedMix: mixed into each car's and person's own picks)
+    const Grid* grids[3] = {};         // (sf, oak, mp) as in init
     void placeGridPed(Ped& p, RNG& r);
     void nextPedMove(Ped& p, RNG& r);
-    void farPedUpdate(Ped& p, float dt, World& w, RNG& r);
+    void pedRoute(Ped& p, int idx, float dt, bool hold);
+    void pedPlaceFar(Ped& p, float dt, World& w);
+    int gridOf(const Car& c) const { return c.g == grids[0] ? 0 : c.g == grids[1] ? 1 : 2; }
+    void unbox(int idx);               // take a car out of the intersections it's cleared through or waiting at
+    void rebuildBoxUsers();
 };

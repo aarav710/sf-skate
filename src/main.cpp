@@ -13,6 +13,7 @@
 #include "weather.h"
 #include "birds.h"
 #include "instance.h"
+#include "net_game.h"
 #include <cstdio>
 #include <chrono>
 #include <thread>
@@ -93,6 +94,7 @@ static Gondolas GO;
 static Renderer R;
 static Weather WX;
 static Birds BI;
+static Net NET;   // multiplayer session (inactive unless --create / --join)
 
 static const Color C_COP = {255, 70, 60, 255};
 
@@ -217,6 +219,27 @@ static void textShadow(const char* t, int x, int y, int size, Color c) {
     DrawText(t, x, y, size, c);
 }
 static void textCenter(const char* t, int cx, int y, int size, Color c) { textShadow(t, cx - MeasureText(t, size) / 2, y, size, c); }
+
+// Multiplayer debug block (Stage 1): the session code, large enough to read out, the status, and where everyone is.
+static void drawNetHud(int x, int y, Vector3 me, double now) {
+    int n = (int)NET.remotes.size(), h = 76 + 24 * std::max(n, 1);
+    DrawRectangle(x, y, 380, h, {0, 0, 0, 140});
+    if (!NET.code.empty()) textShadow(TextFormat("SESSION  %s", NET.code.c_str()), x + 12, y + 8, 32, {255, 210, 60, 255});
+    else textShadow("SESSION", x + 12, y + 8, 32, {255, 210, 60, 255});
+    bool bad = NET.status == Net::FAILED;
+    const char* st = NET.rttMs >= 0 && !bad ? TextFormat("%s, %s, ping %d ms", NET.statusText(), NET.myName.c_str(), (int)NET.rttMs)
+                                            : TextFormat("%s", NET.statusText());
+    textShadow(st, x + 12, y + 46, 18, bad ? Color{255, 110, 90, 255} : Color{200, 210, 230, 255});
+    if (n == 0 && !bad) textShadow("nobody else here yet", x + 12, y + 72, 18, {170, 180, 200, 255});
+    for (int i = 0; i < n; i++) {
+        const RemoteInfo& r = NET.remotes[i];
+        const char* host = r.id == NET.hostId ? " (host)" : "";
+        const char* line = !r.hasState ? TextFormat("%s%s  waiting...", r.name.c_str(), host)
+                         : TextFormat("%s%s  %.0f %.0f %.0f  %d m%s", r.name.c_str(), host, r.state.x, r.state.y, r.state.z,
+                                      (int)Vector3Distance(me, {r.state.x, r.state.y, r.state.z}), now - r.lastSeen > 2 ? "  (no updates)" : "");
+        textShadow(line, x + 12, y + 72 + 24 * i, 18, WHITE);
+    }
+}
 // centred 44 px prompt bar sized from the measured text (20 px padding each side); in narrow windows the
 // font shrinks until the bar fits with an 8 px margin, down to size 10
 static void promptBar(const char* t, int sw, int y, int size, Color bg, Color fg) {
@@ -346,7 +369,11 @@ static void airTraffic(float t, Jet out[2]) {
 }
 
 // ---------------------------------------------------------------- main
-int main() {
+int main(int argc, char** argv) {
+    NetConfig netCfg;
+    std::string netErr;
+    bool netWanted = netOptions(argc, argv, netCfg, netErr);
+    if (!netErr.empty()) { fprintf(stderr, "sfskate: %s\n", netErr.c_str()); return 2; }
     // no MSAA on the window itself: the 3D scene is drawn multisampled into its own target (see render.cpp)
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
     InitWindow(1600, 900, "SF Skate");
@@ -391,6 +418,10 @@ int main() {
     if (getenv("SFSKATE_SKI")) for (auto& s : JS.skis) TraceLog(LOG_INFO, "SFSKATE: ski at %.0f,%.0f yaw %.2f", s.pos.x, s.pos.z, s.yaw); // test hook
 
     BI.init(W);
+    if (netWanted) {
+        netCfg.fingerprint = worldFingerprint(W);
+        if (!NET.start(netCfg, GetTime())) fprintf(stderr, "sfskate: %s\n", NET.error.c_str());
+    }
     if (getenv("SFSKATE_RAIN")) WX.raining = true, WX.rain = WX.wet = 1; // test hook: start in the rain
     const Shader& sh = R.city;
     rlDisableBackfaceCulling();
@@ -1198,6 +1229,26 @@ int main() {
             }
         }
 
+        // multiplayer: talk to the relay, send where we are at 20 Hz
+        Vector3 netMe = ride.on ? cam.target : P.pos;
+        if (NET.active()) {
+            double tn = GetTime();
+            NET.service(tn);
+            if (NET.justCreated) {
+                NET.justCreated = false;
+                printf("SF Skate session code: %s   (friends join with: ./sfskate --join %s)\n", NET.code.c_str(), NET.code.c_str());
+                fflush(stdout);
+                SetClipboardText(NET.code.c_str());
+            }
+            for (auto& l : NET.log) TraceLog(LOG_INFO, "SFSKATE: net: %s", l.c_str());
+            NET.log.clear();
+            if (NET.stateDue(tn)) {
+                uint8_t veh = JS.riding ? netp::PlayerState::JETSKI : SP.riding ? netp::PlayerState::SEAPLANE
+                            : ride.on ? netp::PlayerState::TRAIN : netp::PlayerState::ON_FOOT;
+                NET.sendState(captureState(P, netMe, veh), tn);
+            }
+        }
+
         // ---------------- draw
         BeginDrawing();
         // sun shadows: the city, traffic and people near the camera, into one or two cascades
@@ -1624,6 +1675,7 @@ int main() {
             if (showMap) drawBigMap();
             DrawFPS(sw - 100, sh2 - 30);
         }
+        if (NET.active()) drawNetHud(16, title ? 16 : 132, netMe, GetTime());
         EndDrawing();
         waitForFrameSlot();
         static bool firstFrame = true;
@@ -1636,6 +1688,7 @@ int main() {
         }
     }
     if (autotest) TraceLog(LOG_INFO, "SFSKATE: average fps %.1f", atFpsN ? atFpsSum / atFpsN : 0.0);
+    NET.stop();
     S.shutdown();
     W.freeInteriors();
     W.freeFoliage();

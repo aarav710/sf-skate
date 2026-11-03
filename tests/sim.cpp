@@ -10,6 +10,7 @@
 #include "../src/gondola.h"
 #include "../src/jetski.h"
 #include "../src/birds.h"
+#include "../src/net_game.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -18,6 +19,7 @@
 #include <string>
 #include <algorithm>
 #include <unordered_set>
+
 
 static World W;
 static int fails = 0;
@@ -247,6 +249,40 @@ int main() {
         s.run(120, Input{}, [](Player& p) { return p.state != Player::AIR; });
         snprintf(b, sizeof b, "state=%d score=%lld", s.p.state, s.p.score);
         check(s.p.state == Player::RIDE && s.p.score >= 1000 && s.p.score <= 1400, "kickflip scores ~1200", b);
+    }
+    {   // multiplayer: the state another client would draw this skater from, mid-kickflip and riding
+        Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);
+        auto wire = [](const Player& p) {
+            netp::MsgPlayerState m, o;
+            m.s = captureState(p, p.pos, netp::PlayerState::ON_FOOT);
+            auto bytes = netp::pack(m, 1, 7, 0);
+            bool ok = netp::unpack(bytes.data(), bytes.size(), o);
+            return std::make_pair(ok, o.s);
+        };
+        auto ang = [](float u, float v) { return fabsf(wrapPi(u - v)); };
+        auto ride = wire(s.p);
+        float rv = sqrtf(sq(ride.second.vx) + sq(ride.second.vz));
+        Input in; in.ollie = true; s.run(1, in);
+        Input k; k.kickflip = true; s.run(1, k);
+        s.run(12, Input{});
+        auto air = wire(s.p);
+        const netp::PlayerState& r = air.second;
+        bool ok = ride.first && air.first && ride.second.state == Player::RIDE && fabsf(rv - 8) < 0.05f;
+        ok = ok && s.p.state == Player::AIR && s.p.flipT > 0 && r.state == Player::AIR && r.x == s.p.pos.x && r.y == s.p.pos.y && r.z == s.p.pos.z;
+        ok = ok && ang(r.yaw, s.p.yaw) < 1e-3f && fabsf(r.vx - s.p.vel.x) < 0.006f && fabsf(r.vy - s.p.vy) < 0.006f && fabsf(r.vz - s.p.vel.z) < 0.006f;
+        ok = ok && ang(r.flipAngle, s.p.flipAngle) < 1e-3f && fabsf(r.flipProg - s.p.flipT / s.p.flipDur) < 0.004f && r.shoveProg == -1;
+        ok = ok && fabsf(r.crouch - s.p.crouch) < 0.003f && fabsf(r.pitch - s.p.pitch) < 0.006f && r.score == (uint32_t)s.p.score;
+        snprintf(b, sizeof b, "riding %.2f m/s; mid-flip angle %.2f/%.2f prog %.2f/%.2f vy %.2f/%.2f", rv, r.flipAngle, s.p.flipAngle,
+                 r.flipProg, s.p.flipT / s.p.flipDur, r.vy, s.p.vy);
+        check(ok, "net: skater state survives the wire", b);
+    }
+    {   // world fingerprint: stable, and a different world (one more rail) gives a different one
+        uint32_t f0 = worldFingerprint(W), f1 = worldFingerprint(W);
+        W.rails.push_back(W.rails.back());
+        uint32_t f2 = worldFingerprint(W);
+        W.rails.pop_back();
+        snprintf(b, sizeof b, "%08x, again %08x, one more rail %08x, back %08x", f0, f1, f2, worldFingerprint(W));
+        check(f0 == f1 && f2 != f0 && worldFingerprint(W) == f0, "net: world fingerprint", b);
     }
     {   // late kickflip should bail
         Sim s; s.spawn(1045 + 2.4f, -80, PI / 2, 8);

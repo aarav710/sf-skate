@@ -22,11 +22,27 @@ A 3D skateboarding game in C++ set in a stylized San Francisco. Skate down Twin 
 ## Build & run (macOS)
 
 ```sh
-brew install raylib   # one-time
+brew install raylib enet   # one-time
 make run
 ```
 
 `make test` runs the headless gameplay checks (physics, tricks, grinds, collisions, spawn points).
+
+## Multiplayer (in development)
+
+So far two or more copies of the game can share a session and see where everyone is (a debug panel; no
+avatars or shared traffic yet). Sessions go through a small relay server:
+
+```sh
+brew install enet            # one-time
+make relay && ./build/relay  # listens on UDP 7777
+./sfskate --create           # prints a 6-letter session code (and copies it)
+./sfskate --join CODE --relay host:7777
+```
+
+`--name NAME` sets your name (default: your user name). The same settings work as environment variables:
+`SFSKATE_CREATE=1`, `SFSKATE_JOIN=CODE`, `SFSKATE_NAME`, `SFSKATE_RELAY`. `make test-net` runs the network
+checks. See [server/README.md](server/README.md) for running the relay on a server.
 
 ## Controls
 

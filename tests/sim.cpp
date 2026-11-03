@@ -433,7 +433,7 @@ int main() {
         same = same && fabsf(theirs.flipProg - mine.flipProg) < 0.004f && fabsf(theirs.flipAngle - mine.flipAngle) < 0.011f;
         same = same && theirs.shoveProg == mine.shoveProg && fabsf(theirs.crouch - mine.crouch) < 0.003f && fabsf(theirs.lean - mine.lean) < 0.01f;
         same = same && fabsf(theirs.pitch - mine.pitch) < 0.006f && ang(theirs.pushPhase, mine.pushPhase) < 0.03f && theirs.grabbing == mine.grabbing;
-        same = same && Vector3Distance(theirs.boardPos, mine.boardPos) < 0.01f && ang(theirs.boardYaw, mine.boardYaw) < 1e-3f;
+        same = same && ang(theirs.boardYaw, mine.boardYaw) < 1e-3f;   // (the board's own position only counts in a bail: below)
         SkaterPose bailed;
         {
             Sim t; t.spawn(1045 + 2.4f, -80, PI / 2, 8);

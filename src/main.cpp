@@ -14,6 +14,7 @@
 #include "birds.h"
 #include "instance.h"
 #include "net_game.h"
+#include "remote.h"
 #include <cstdio>
 #include <chrono>
 #include <thread>
@@ -95,6 +96,8 @@ static Renderer R;
 static Weather WX;
 static Birds BI;
 static Net NET;   // multiplayer session (inactive unless --create / --join)
+static Remotes RM;   // the other players in it, smoothed for drawing
+static bool gFakeNet = false;   // test hook SFSKATE_NET_FAKE: scripted other players, no network
 
 static const Color C_COP = {255, 70, 60, 255};
 
@@ -220,26 +223,6 @@ static void textShadow(const char* t, int x, int y, int size, Color c) {
 }
 static void textCenter(const char* t, int cx, int y, int size, Color c) { textShadow(t, cx - MeasureText(t, size) / 2, y, size, c); }
 
-// Multiplayer debug block (Stage 1): the session code, large enough to read out, the status, and where everyone is.
-static void drawNetHud(int x, int y, Vector3 me, double now) {
-    int n = (int)NET.remotes.size(), h = 76 + 24 * std::max(n, 1);
-    DrawRectangle(x, y, 380, h, {0, 0, 0, 140});
-    if (!NET.code.empty()) textShadow(TextFormat("SESSION  %s", NET.code.c_str()), x + 12, y + 8, 32, {255, 210, 60, 255});
-    else textShadow("SESSION", x + 12, y + 8, 32, {255, 210, 60, 255});
-    bool bad = NET.status == Net::FAILED;
-    const char* st = NET.rttMs >= 0 && !bad ? TextFormat("%s, %s, ping %d ms", NET.statusText(), NET.myName.c_str(), (int)NET.rttMs)
-                                            : TextFormat("%s", NET.statusText());
-    textShadow(st, x + 12, y + 46, 18, bad ? Color{255, 110, 90, 255} : Color{200, 210, 230, 255});
-    if (n == 0 && !bad) textShadow("nobody else here yet", x + 12, y + 72, 18, {170, 180, 200, 255});
-    for (int i = 0; i < n; i++) {
-        const RemoteInfo& r = NET.remotes[i];
-        const char* host = r.id == NET.hostId ? " (host)" : "";
-        const char* line = !r.hasState ? TextFormat("%s%s  waiting...", r.name.c_str(), host)
-                         : TextFormat("%s%s  %.0f %.0f %.0f  %d m%s", r.name.c_str(), host, r.state.x, r.state.y, r.state.z,
-                                      (int)Vector3Distance(me, {r.state.x, r.state.y, r.state.z}), now - r.lastSeen > 2 ? "  (no updates)" : "");
-        textShadow(line, x + 12, y + 72 + 24 * i, 18, WHITE);
-    }
-}
 // centred 44 px prompt bar sized from the measured text (20 px padding each side); in narrow windows the
 // font shrinks until the bar fits with an 8 px margin, down to size 10
 static void promptBar(const char* t, int sw, int y, int size, Color bg, Color fg) {
@@ -257,6 +240,248 @@ static void drawPlayerArrow(Vector2 c, float yaw, float s, Color col) {
     Vector2 d = {c.x - f.x * s * 0.6f - r.x * s * 0.6f, c.y - f.y * s * 0.6f - r.y * s * 0.6f};
     DrawTriangle(a, d, b, col);
     DrawTriangle(a, b, d, col);
+}
+
+// The way to `to` from `from`, as a screen direction for this camera: 0 = right, -pi/2 = up (= straight ahead).
+static float screenBearing(const Camera3D& cam, Vector3 from, Vector3 to) {
+    Vector2 f = Vector2Normalize({cam.target.x - cam.position.x, cam.target.z - cam.position.z});
+    Vector2 d = Vector2Normalize({to.x - from.x, to.z - from.z});
+    return atan2f(-(d.x * f.x + d.y * f.y), d.x * -f.y + d.y * f.x);
+}
+
+// A world point on the minimap (centred on c, k pixels a metre), pinned just inside the border when out of range
+// so it still shows the way.
+static Vector2 minimapPin(Vector3 p, Vector3 c, int x, int y, int size, float k) {
+    float sx = x + size / 2 + (p.x - c.x) * k, sy = y + size / 2 + (p.z - c.z) * k;
+    sx = clampf(sx, x + 6, x + size - 6);
+    sy = clampf(sy, y + 6, y + size - 6);
+    return {sx, sy};
+}
+
+static bool inRect(Vector2 p, Rectangle r) { return p.x >= r.x && p.x <= r.x + r.width && p.y >= r.y && p.y <= r.y + r.height; }
+
+// An arrow at the screen edge pointing (screen angle ang) at someone out of view, with a label beside it, kept
+// clear of the HUD panels in `avoid`.
+static void drawEdgeMarker(float ang, const char* label, Color c, int sw, int sh, const std::vector<Rectangle>& avoid) {
+    const float M = 44;
+    Vector2 ctr = {sw * 0.5f, sh * 0.5f}, d = {cosf(ang), sinf(ang)};
+    float tx = fabsf(d.x) > 1e-4f ? (sw * 0.5f - M) / fabsf(d.x) : 1e9f, ty = fabsf(d.y) > 1e-4f ? (sh * 0.5f - M) / fabsf(d.y) : 1e9f;
+    float t = std::min(tx, ty);
+    Vector2 p = {ctr.x + d.x * t, ctr.y + d.y * t};
+    for (int pass = 0; pass < 2; pass++)   // slide out of a panel to its nearest side (twice: panels can touch)
+        for (const Rectangle& r0 : avoid) {
+            Rectangle r = {r0.x - 18, r0.y - 18, r0.width + 36, r0.height + 36};
+            if (!inRect(p, r)) continue;
+            float l = p.x - r.x, rr = r.x + r.width - p.x, u = p.y - r.y, dn = r.y + r.height - p.y;
+            float m = std::min(std::min(l, rr), std::min(u, dn));
+            if (m == l) p.x = r.x; else if (m == rr) p.x = r.x + r.width; else if (m == u) p.y = r.y; else p.y = r.y + r.height;
+            p.x = clampf(p.x, M, sw - M); p.y = clampf(p.y, M, sh - M);
+        }
+    drawPlayerArrow(p, ang, 16, {0, 0, 0, (unsigned char)(c.a * 0.6f)});
+    drawPlayerArrow(p, ang, 12, c);
+    // the label sits on the screen side of the arrow
+    int fs = 18, w = MeasureText(label, fs);
+    float lx = p.x - d.x * (30 + w * 0.5f * fabsf(d.x)) - w * 0.5f, ly = p.y - d.y * 30 - fs * 0.5f;
+    lx = clampf(lx, 8, sw - 8 - w);
+    ly = clampf(ly, 8, sh - 8 - fs);
+    textShadow(label, (int)lx, (int)ly, fs, c);
+}
+
+// Name tags over the other players: fading out with distance (gone past 150 m), and an edge arrow with the name
+// and distance for anyone out of view. Far away but in view: a small marker on them instead.
+static void drawNameTags(const Camera3D& cam, Vector3 camFwd, Vector3 me, int sw, int sh, const std::vector<Rectangle>& avoid) {
+    for (auto& r : RM.list) {
+        if (!r.shown()) continue;
+        float fade = smooth01(0.f, 1.f, r.fade);
+        Color c = r.look.tag;
+        Vector3 head = Vector3Add(r.pos(), {0, 2.15f, 0});
+        Vector3 rel = Vector3Subtract(head, cam.position);
+        float d = Vector3Length(rel), z = Vector3DotProduct(rel, camFwd);
+        int dist = (int)Vector3Distance(me, r.pos());
+        Vector2 sp = GetWorldToScreen(head, cam);
+        bool onScreen = z > 0.5f && sp.x >= 0 && sp.x <= sw && sp.y >= 0 && sp.y <= sh;
+        if (!onScreen) {
+            float ang = z > 0.5f ? atan2f(sp.y - sh * 0.5f, sp.x - sw * 0.5f) : screenBearing(cam, cam.position, head);
+            c.a = (unsigned char)(255 * fade);
+            drawEdgeMarker(ang, TextFormat("%s  %d m", r.name.c_str(), dist), c, sw, sh, avoid);
+            continue;
+        }
+        if (d < 150) {
+            float a = fade * (1.f - smooth01(100.f, 150.f, d));
+            int fs = d < 40 ? 22 : 18, w = MeasureText(r.name.c_str(), fs);
+            Rectangle box = {sp.x - w / 2.f - 4, sp.y - fs - 4.f, w + 8.f, fs + 8.f};
+            bool hidden = false;
+            for (const Rectangle& h : avoid) hidden = hidden || CheckCollisionRecs(box, h);
+            if (hidden || a < 0.02f) continue;
+            c.a = (unsigned char)(255 * a);
+            textCenter(r.name.c_str(), (int)sp.x, (int)sp.y - fs, fs, c);
+        } else {
+            const char* label = TextFormat("%s  %d m", r.name.c_str(), dist);
+            int fs = 16, w = MeasureText(label, fs);
+            Rectangle box = {sp.x - w / 2.f - 4, sp.y - fs - 14.f, w + 8.f, fs + 18.f};
+            bool hidden = false;
+            for (const Rectangle& h : avoid) hidden = hidden || CheckCollisionRecs(box, h);
+            if (hidden) continue;
+            c.a = (unsigned char)(220 * fade);
+            drawPlayerArrow({sp.x, sp.y - 6}, PI / 2, 7, c);   // pointing down at them
+            textCenter(label, (int)sp.x, (int)sp.y - fs - 14, fs, c);
+        }
+    }
+}
+
+// The session panel under the minimap: the code (small, to read out to friends), then everyone with their colour,
+// distance and who hosts. Returns its height.
+static int drawPlayerList(int x, int y, int w, Vector3 me) {
+    const int row = 22;
+    bool inSession = gFakeNet || NET.status == Net::IN_SESSION;
+    int n = inSession ? 1 : 0;
+    for (auto& r : RM.list) n += !r.leaving;
+    int h = 34 + row * n + (n ? 4 : 0);
+    DrawRectangle(x, y, w, h, {0, 0, 0, 140});
+    const char* code = gFakeNet ? "TEST00" : NET.code.c_str();
+    if (inSession) {
+        textShadow(TextFormat("SESSION %s", code), x + 10, y + 8, 18, {255, 210, 60, 255});
+        if (NET.rttMs >= 0) {
+            const char* pg = TextFormat("%d ms", (int)NET.rttMs);
+            textShadow(pg, x + w - 10 - MeasureText(pg, 14), y + 11, 14, {170, 180, 200, 255});
+        }
+    } else {
+        bool bad = NET.status == Net::FAILED;
+        const char* st = NET.statusText();
+        int fs = 16;
+        while (fs > 10 && MeasureText(st, fs) > w - 20) fs--;
+        textShadow(st, x + 10, y + 9, fs, bad ? Color{255, 110, 90, 255} : Color{200, 210, 230, 255});
+    }
+    int ry = y + 34;
+    auto line = [&](Color sw, const std::string& name, bool you, bool host, int dist) {
+        DrawRectangle(x + 10, ry + 3, 12, 12, sw);
+        DrawRectangleLines(x + 10, ry + 3, 12, 12, {0, 0, 0, 160});
+        const char* tag = host ? (you ? "you, host" : "host") : you ? "you" : "";
+        int right = x + w - 10;
+        if (dist >= 0) {
+            const char* dt = dist >= 1000 ? TextFormat("%.1f km", dist / 1000.f) : TextFormat("%d m", dist);
+            right -= MeasureText(dt, 16);
+            textShadow(dt, right, ry + 1, 16, {210, 215, 230, 255});
+            right -= 8;
+        }
+        if (*tag) {
+            right -= MeasureText(tag, 14);
+            textShadow(tag, right, ry + 2, 14, {255, 210, 60, 255});
+            right -= 8;
+        }
+        std::string nm = name;   // trimmed to the room left
+        while (nm.size() > 1 && MeasureText(nm.c_str(), 18) > right - (x + 30)) {
+            nm.pop_back();
+            while (!nm.empty() && ((unsigned char)nm.back() & 0xC0) == 0x80) nm.pop_back();   // whole UTF-8 characters
+        }
+        textShadow(nm.c_str(), x + 30, ry, 18, WHITE);
+        ry += row;
+    };
+    if (inSession) {
+        uint8_t myId = gFakeNet ? RM.myId : NET.myId, hostId = gFakeNet ? RM.hostId : NET.hostId;
+        line({230, 40, 40, 255}, gFakeNet ? RM.myName : NET.myName, true, myId == hostId, -1);
+        for (auto& r : RM.list) {
+            if (r.leaving) continue;
+            Color sw = r.look.tag;
+            line(sw, r.name, false, r.id == hostId, r.hasPose ? (int)Vector3Distance(me, r.pos()) : -1);
+        }
+    }
+    return h;
+}
+
+// Keeps RM in step with the net client: who is in the session, who hosts, and the states that came in. Join, leave
+// and host lines become toasts.
+static void syncRemotes(double now, std::vector<std::pair<std::string, Color>>& toasts) {
+    static bool wasIn = false;
+    static uint8_t lastHost = 0;
+    bool in = NET.status == Net::IN_SESSION;
+    RM.myId = NET.myId;
+    RM.myName = NET.myName;
+    bool changed = false;
+    if (in) {
+        for (auto& ri : NET.remotes) {
+            RemotePlayer* r = RM.find(ri.id);
+            if (r && !r->leaving) continue;
+            RemotePlayer& j = RM.join(ri.id, ri.name);
+            if (wasIn) toasts.push_back({ri.name + " joined", j.look.tag});
+            changed = true;
+        }
+        if (!wasIn) toasts.push_back({NET.remotes.empty() ? "Session " + NET.code : "Joined session " + NET.code, {255, 210, 60, 255}});
+    }
+    for (auto& r : RM.list) {
+        if (r.leaving || (in && NET.remote(r.id))) continue;
+        RM.leave(r.id);
+        if (in) toasts.push_back({r.name + " left", r.look.tag});
+        changed = true;
+    }
+    if (changed) RM.assignLooks();
+    if (in && wasIn && NET.hostId != lastHost) {
+        const RemotePlayer* r = RM.find(NET.hostId);
+        toasts.push_back({NET.hostId == NET.myId ? std::string("You are the host now") : (r ? r->name : std::string("Someone")) + " is the host now",
+                          r ? r->look.tag : Color{255, 210, 60, 255}});
+    }
+    RM.hostId = NET.hostId;
+    lastHost = NET.hostId;
+    wasIn = in;
+    for (auto& st : NET.inbox) RM.addSample(st.id, st.sentAt, st.recvAt, st.s);
+    NET.inbox.clear();
+    (void)now;
+}
+
+// test hook (SFSKATE_NET_FAKE=1): three scripted players and no network, so screenshots and the autotest can show
+// them: Ana circles near where you are doing kickflips and heelflips, Ben rolls back and forth 400 m west, Cy
+// stands at Menlo Park station on the Peninsula. Sent at 20 Hz on a clock 1000 s ahead of ours, 40 ms late.
+static void fakeRemotes(double now, Vector3 me) {
+    using PS = netp::PlayerState;
+    static Vector3 home{1e9f, 0, 0};
+    static double next = 0;
+    if (RM.empty()) {
+        RM.myId = 1; RM.myName = "You"; RM.hostId = 2;
+        RM.join(2, "Ana"); RM.join(3, "Ben"); RM.join(4, "Cy");
+        next = now;
+    }
+    if (Vector3Distance(home, me) > 60) home = me;   // you went somewhere else: Ana follows (a teleport for her)
+    for (; next <= now; next += 0.05) {
+        double t = next;
+        float sent = (float)(t + 1000);
+        {   // Ana: a 3.5 m circle 7 m east of home at 5 m/s, popping a flip every 1.4 s
+            PS s;
+            float a = (float)fmod(t * 5 / 3.5, TAU_F);
+            s.x = home.x + 7 + 3.5f * cosf(a); s.z = home.z + 3.5f * sinf(a);
+            float g = W.skaterGround(s.x, s.z, home.y + 2);
+            s.vx = -5 * sinf(a); s.vz = 5 * cosf(a);
+            s.yaw = wrapPi(a + PI / 2); s.boardYaw = s.yaw;
+            float ph = (float)fmod(t, 1.4);
+            int jump = (int)(t / 1.4);
+            s.y = g;
+            s.crouch = 0.35f;
+            if (ph < 0.7f) {
+                s.state = 1;   // AIR
+                s.y = g + 5.6f * ph - 8 * ph * ph;
+                s.vy = 5.6f - 16 * ph;
+                s.crouch = 0.6f;
+                float fp = (ph - 0.1f) / 0.42f;
+                if (fp >= 0 && fp < 1) { s.flipProg = fp; s.flipAngle = (jump % 2 ? -360.f : 360.f) * fp; }
+            }
+            RM.addSample(2, sent, t + 0.04, s);
+        }
+        {   // Ben: rolling back and forth 400 m west, pushing now and then
+            PS s;
+            float a = (float)(t * 0.15);
+            s.x = home.x - 400 + 40 * sinf(a); s.z = home.z;
+            s.y = W.skaterGround(s.x, s.z, home.y + 30);
+            s.vx = 6 * cosf(a);
+            s.yaw = s.vx >= 0 ? 0 : PI; s.boardYaw = s.yaw;
+            s.pushAmt = fmod(t, 4) < 1.5 ? 1.f : 0.f; s.pushPhase = wrapPi((float)(t * 5.5));
+            RM.addSample(3, sent, t + 0.04, s);
+        }
+        {   // Cy: waiting on the platform at Menlo Park
+            PS s;
+            Vector3 p = W.caltrainDropoff((int)W.stations.size() - 1, &s.yaw);
+            s.x = p.x; s.y = p.y; s.z = p.z; s.boardYaw = s.yaw;
+            RM.addSample(4, sent, t + 0.04, s);
+        }
+    }
 }
 
 static void drawMinimap(int x, int y, int size) {
@@ -281,13 +506,21 @@ static void drawMinimap(int x, int y, int size) {
     }
     if (CH.on)
         for (auto& cp : CH.cops) {
-            float sx = x + size / 2 + (cp.pos.x - c.x) * k, sy = y + size / 2 + (cp.pos.z - c.z) * k;
-            sx = clampf(sx, x + 6, x + size - 6);
-            sy = clampf(sy, y + 6, y + size - 6);
+            Vector2 q = minimapPin(cp.pos, c, x, y, size, k);
+            float sx = q.x, sy = q.y;
             DrawCircle((int)sx, (int)sy, 6, ((int)(GetTime() * 6) % 2) ? C_COP : Color{70, 110, 255, 255});
             DrawCircleLines((int)sx, (int)sy, 6, WHITE);
         }
     EndScissorMode();
+    // other players: an arrow in their colour, on the border when they're out of range
+    for (auto& r : RM.list) {
+        if (!r.shown()) continue;
+        Vector2 q = minimapPin(r.pos(), c, x, y, size, k);
+        Color col = r.look.tag;
+        col.a = (unsigned char)(255 * clampf(r.fade, 0, 1));
+        drawPlayerArrow(q, r.cur.yaw, 9, {0, 0, 0, (unsigned char)(col.a * 0.7f)});
+        drawPlayerArrow(q, r.cur.yaw, 7, col);
+    }
     // tokens outside the view: arrows on the border
     drawPlayerArrow({(float)x + size / 2, (float)y + size / 2}, P.state == Player::AIR ? atan2f(P.vel.z, P.vel.x) : P.yaw, 9, {230, 40, 40, 255});
     DrawRectangleLines(x - 1, y - 1, size + 2, size + 2, {255, 255, 255, 120});
@@ -327,6 +560,32 @@ static void drawBigMap() {
         for (auto& cp : CH.cops) DrawCircleV(S2(cp.pos.x, cp.pos.z), 8, C_COP);
     drawPlayerArrow(S2(P.pos.x, P.pos.z), P.yaw, 11, {230, 40, 40, 255});
     EndScissorMode();
+    // other players: an arrow and their name; off this map (the other one, SF or the Peninsula) an arrow on its
+    // border pointing their way, with where they are
+    bool onPen = gMapFocus.z > 3400;
+    for (auto& r : RM.list) {
+        if (!r.shown()) continue;
+        Vector3 rp = r.pos();
+        Vector2 p = S2(rp.x, rp.z);
+        Color col = r.look.tag;
+        col.a = (unsigned char)(255 * clampf(r.fade, 0, 1));
+        bool other = (rp.z > 3400) != onPen;
+        if (!other && p.x > x0 + 4 && p.x < x0 + w - 4 && p.y > y0 + 4 && p.y < y0 + h - 4) {
+            drawPlayerArrow(p, r.cur.yaw, 13, {0, 0, 0, (unsigned char)(col.a * 0.7f)});
+            drawPlayerArrow(p, r.cur.yaw, 10, col);
+            textCenter(r.name.c_str(), (int)p.x, (int)p.y - 30, 18, col);
+            continue;
+        }
+        Vector2 q = {clampf(p.x, x0 + 22, x0 + w - 22), clampf(p.y, y0 + 22, y0 + h - 22)};
+        float ang = atan2f(p.y - q.y, p.x - q.x);
+        drawPlayerArrow(q, ang, 15, {0, 0, 0, (unsigned char)(col.a * 0.7f)});
+        drawPlayerArrow(q, ang, 12, col);
+        const char* where = other ? (rp.z > 3400 ? "  (Peninsula)" : "  (San Francisco)") : "";
+        const char* label = TextFormat("%s%s", r.name.c_str(), where);
+        int lw = MeasureText(label, 18);
+        float lx = clampf(q.x - lw / 2.f - cosf(ang) * 40, x0 + 6, x0 + w - 6 - lw), ly = clampf(q.y - 9 - sinf(ang) * 34, y0 + 6, y0 + h - 26);
+        textShadow(label, (int)lx, (int)ly, 18, col);
+    }
     textCenter("MAP  -  press a number key to travel there,  M to close", sw / 2, 20, 22, WHITE);
 }
 
@@ -422,6 +681,7 @@ int main(int argc, char** argv) {
         netCfg.fingerprint = worldFingerprint(W);
         if (!NET.start(netCfg, GetTime())) fprintf(stderr, "sfskate: %s\n", NET.error.c_str());
     }
+    gFakeNet = !NET.active() && getenv("SFSKATE_NET_FAKE") && atoi(getenv("SFSKATE_NET_FAKE")) != 0;   // test hook
     if (getenv("SFSKATE_RAIN")) WX.raining = true, WX.rain = WX.wet = 1; // test hook: start in the rain
     const Shader& sh = R.city;
     rlDisableBackfaceCulling();
@@ -498,6 +758,17 @@ int main(int argc, char** argv) {
             atFrame++;
             if (atFrame == 60) TakeScreenshot("shot_title.png");
             if (atFrame == 61) { title = false; picker = false; }
+            if (gFakeNet) { // test hook: Ana close up mid-flip (see the camera below), then the map with everyone on it
+                static bool flipShot = false;
+                const RemotePlayer* a = RM.find(2);
+                if (!flipShot && atFrame > 70 && atFrame < 150 && a && a->pose.flipProg > 0.3f && a->pose.flipProg < 0.7f) {
+                    TakeScreenshot("net_flip.png");
+                    flipShot = true;
+                }
+                if (atFrame == 160) showMap = true;
+                if (atFrame == 163) TakeScreenshot("net_map.png");
+                if (atFrame == 164) showMap = false;
+            }
             if (atFrame == 75 && getenv("SFSKATE_SCUFFLE")) { // test hook: an officer grabs the skater (plus a cruiser and a second officer)
                 CH.reset(0);
                 CH.active = true; CH.stars = 2;
@@ -1128,6 +1399,14 @@ int main(int argc, char** argv) {
                     cam.target = {c.pos.x, c.pos.y + 1.2f, c.pos.z};
                     break;
                 }
+        if (autotest && gFakeNet && atFrame > 62 && atFrame < 150) { // test hook: watch Ana (a fake player) from the front, close up
+            if (const RemotePlayer* a = RM.find(2); a && a->hasPose) {
+                Vector3 ap = a->pose.pos;
+                float y = a->pose.yaw;
+                cam.position = {ap.x - sinf(y) * 3.4f + cosf(y) * 1.2f, ap.y + 1.3f, ap.z + cosf(y) * 3.4f + sinf(y) * 1.2f};
+                cam.target = {ap.x, ap.y + 0.8f, ap.z};
+            }
+        }
         Vector3 camFwd = Vector3Normalize(Vector3Subtract(cam.target, cam.position));
         T.view = cam.position;   // people near the camera get the full update next frame, even far from the skater
         gMapFocus = ride.on ? cam.target : P.pos;
@@ -1247,6 +1526,14 @@ int main(int argc, char** argv) {
                             : ride.on ? netp::PlayerState::TRAIN : netp::PlayerState::ON_FOOT;
                 NET.sendState(captureState(P, netMe, veh), tn);
             }
+            std::vector<std::pair<std::string, Color>> toasts;
+            syncRemotes(tn, toasts);
+            for (auto& t : toasts) P.say(t.first, t.second, "Multiplayer");
+        }
+        if (gFakeNet || !RM.empty()) {
+            double rn = gFakeNet && autotest ? atFrame / 60.0 : GetTime();   // the autotest steps a fixed 60 Hz clock, for repeatable shots
+            if (gFakeNet) fakeRemotes(rn, P.pos);
+            RM.update(rn, dt);
         }
 
         // ---------------- draw
@@ -1265,6 +1552,7 @@ int main(int argc, char** argv) {
                 GO.draw(W, cam.position);
                 if (k == 0) {
                     if (!ride.on && !JS.riding && !SP.riding) P.draw();
+                    if (!RM.empty() && !title) RM.drawCasters(c, 80.f);
                     JS.draw(now, cam.position);
                     if (CH.on && !ride.on)
                         for (size_t i = 0; i < CH.cops.size(); i++) {
@@ -1371,6 +1659,7 @@ int main(int argc, char** argv) {
         R.staticNormals(false);
         drawMovers(true);
         if (!title && !ride.on && !JS.riding && !SP.riding) P.draw();
+        if (!title && !RM.empty()) RM.draw(cam.position, camFwd, 260.f);
         JS.draw(now, cam.position);
         for (auto& t : W.tokens) {
             if (t.got) continue;
@@ -1404,13 +1693,18 @@ int main(int argc, char** argv) {
         WX.drawSteam(cam, W, now, sky.night);
         WX.drawRain(cam, W, now, sky.night, R.quality);
         // a soft contact blob under the skater helps judge landings (the sun's shadow can fall far away)
-        if (!title && !ride.on && !JS.riding && !SP.riding && !(P.state == Player::BAIL && P.splashed)) {
-            Vector3 sp = P.state == Player::BAIL ? P.boardPos : P.pos;
-            float gy = W.skaterGround(sp.x, sp.z, P.pos.y + 0.1f);
-            float hgt = P.pos.y - gy;
+        auto contactBlob = [&](const SkaterPose& p, float fade) {
+            if (p.state == Player::BAIL && p.splashed) return;
+            Vector3 sp = p.state == Player::BAIL ? p.boardPos : p.pos;
+            float gy = W.skaterGround(sp.x, sp.z, p.pos.y + 0.1f);
+            float hgt = p.pos.y - gy;
             float k = R.nCasc > 0 ? 0.6f : 1.f;
-            if (hgt < 12) DrawCylinder({sp.x, gy + 0.12f, sp.z}, 0.6f, 0.6f, 0.01f, 14, {0, 0, 0, (unsigned char)(55 * k * clampf(1 - hgt / 8, 0.25f, 1))});
-        }
+            if (hgt < 12) DrawCylinder({sp.x, gy + 0.12f, sp.z}, 0.6f, 0.6f, 0.01f, 14, {0, 0, 0, (unsigned char)(55 * k * clampf(1 - hgt / 8, 0.25f, 1) * fade)});
+        };
+        if (!title && !ride.on && !JS.riding && !SP.riding) contactBlob(P.pose(), 1.f);
+        if (!title)
+            for (auto& r : RM.list)
+                if (r.shown() && Vector3Distance(r.pose.pos, cam.position) < 80) contactBlob(r.pose, smooth01(0.f, 1.f, r.fade));
         if (R.nCasc == 0) {   // without sun shadows, blobs keep everything grounded
             if (CH.on) {
                 for (auto& cp : CH.cops) DrawCylinder({cp.pos.x, cp.pos.y + 0.12f, cp.pos.z}, cp.onFoot ? 0.5f : 2.0f, cp.onFoot ? 0.5f : 2.0f, 0.01f, 14, {0, 0, 0, 70});
@@ -1485,6 +1779,9 @@ int main(int argc, char** argv) {
             textCenter(title ? "Press ENTER to drop in" : "Press ENTER to go there", sw / 2, py + 130 + n * 34, 28,
                        {255, 230, 120, (unsigned char)(255 * a)});
         }
+        bool showList = NET.active() || gFakeNet;   // the session's player list, under the minimap
+        int listY = title ? 20 : ride.on ? 106 : 262, listH = 0;
+        std::vector<Rectangle> hud;   // panels name tags stay off
         if (!title) {
             if (!ride.on) { // regular HUD (hidden while riding Caltrain)
             // score panel
@@ -1534,6 +1831,11 @@ int main(int argc, char** argv) {
                 DrawRectangleGradientH(sw - 90, 0, 90, sh2, {0, 0, 0, 0}, flip ? Color{40, 80, 255, (unsigned char)(90 * k)} : Color{255, 40, 40, (unsigned char)(90 * k)});
             }
             drawMinimap(sw - 250, 20, 230);
+            if (showList) listH = drawPlayerList(sw - 250, listY, 230, netMe);
+            const int helpTop = listH ? listY + listH + 8 : 270;   // the help panel goes below the minimap (and the player list)
+            hud.push_back({16, 16, 300, 108});
+            hud.push_back({16, (float)sh2 - 92, 330, 76});
+            hud.push_back({(float)sw - 254, 16, 238, 238});
             if (CH.scuffle) {
                 int bw = 380, bx = sw / 2 - bw / 2, by = sh2 - 124;
                 const char* hint = "Mash SPACE and A / D   -   swing the board with J K L";
@@ -1548,6 +1850,7 @@ int main(int argc, char** argv) {
             }
             if (CH.on) {
                 int bw = 440, bx = sw / 2 - bw / 2, by = 92;
+                hud.push_back({(float)bx, (float)by, (float)bw, 78});
                 DrawRectangle(bx, by, bw, 78, {0, 0, 0, 140});
                 DrawRectangle(bx, by, 6, 78, CH.active ? C_COP : Color{110, 230, 120, 255});
                 if (CH.active) {
@@ -1567,9 +1870,7 @@ int main(int argc, char** argv) {
                     // arrow toward the closest cop, relative to the camera
                     const Cop* nc = &CH.cops[0];
                     for (auto& cp : CH.cops) if (Vector3Distance(cp.pos, P.pos) < Vector3Distance(nc->pos, P.pos)) nc = &cp;
-                    Vector2 f = Vector2Normalize({cam.target.x - cam.position.x, cam.target.z - cam.position.z});
-                    Vector2 d = Vector2Normalize({nc->pos.x - P.pos.x, nc->pos.z - P.pos.z});
-                    float ang = atan2f(-(d.x * f.x + d.y * f.y), d.x * -f.y + d.y * f.x); // screen direction: right, up = ahead
+                    float ang = screenBearing(cam, P.pos, nc->pos);
                     drawPlayerArrow({(float)bx + bw - 22, (float)by + 56}, ang, 14, C_COP);
                 } else {
                     textShadow("LAYING LOW", bx + 20, by + 8, 24, {170, 240, 170, 255});
@@ -1615,11 +1916,12 @@ int main(int argc, char** argv) {
                 };
                 auto panelH = [&](int fs) { return 10 + n * (fs + 4) + 8; };   // 22 px rows at size 18
                 int fs = 18;
-                while (fs > 12 && (panelH(fs) > sh2 - 40 - 270 || panelW(fs) > sw - 32)) fs--;
+                while (fs > 12 && (panelH(fs) > sh2 - 40 - helpTop || panelW(fs) > sw - 32)) fs--;
                 while (fs > 10 && panelH(fs) > sh2 - 32) fs--;   // tiny windows: last resort, smallest legible size
                 int hw = panelW(fs), hh = panelH(fs);
-                int hx = std::max(16, sw - hw - 16), hy = std::max(16, std::min(270, sh2 - 40 - hh));
+                int hx = std::max(16, sw - hw - 16), hy = std::max(16, std::min(helpTop, sh2 - 40 - hh));
                 DrawRectangle(hx, hy, hw, hh, {0, 0, 0, 140});
+                hud.push_back({(float)hx, (float)hy, (float)hw, (float)hh});
                 int kc = keyCol(fs); std::string k;
                 for (int i = 0; i < n; i++) {
                     int y = hy + 10 + i * (fs + 4);
@@ -1630,7 +1932,7 @@ int main(int argc, char** argv) {
                     } else DrawText(lines[i], hx + 14, y, i == 0 ? fs + 4 : fs, i == 0 ? head : WHITE);
                 }
             } else if (JS.riding || SP.riding) {
-                textShadow("H  show controls", sw - MeasureText("H  show controls", 18) - 24, 270, 18, {220, 225, 235, 220});
+                textShadow("H  show controls", sw - MeasureText("H  show controls", 18) - 24, helpTop, 18, {220, 225, 235, 220});
             }
             }
             if (nearSki >= 0) {
@@ -1641,6 +1943,7 @@ int main(int argc, char** argv) {
             }
             if (SP.riding) {
                 int bx = 16, by = sh2 - 200;
+                hud.push_back({(float)bx, (float)by, 300, 96});
                 DrawRectangle(bx, by, 300, 96, {0, 0, 0, 130});
                 textShadow(TextFormat("ALT  %d ft", (int)(SP.altitude(W) * 3.281f)), bx + 14, by + 10, 24, WHITE);
                 textShadow("THROTTLE", bx + 14, by + 50, 18, {220, 220, 220, 255});
@@ -1659,6 +1962,7 @@ int main(int argc, char** argv) {
                 const char* town = "";
                 for (auto& t : towns) if (cam.target.z < t.z) { town = t.n; break; }
                 DrawRectangle(0, 0, sw, 96, {150, 20, 30, 225});
+                hud.push_back({0, 0, (float)sw, 96});
                 textShadow("CALTRAIN", 24, 14, 36, WHITE);
                 textShadow(TextFormat("%s to %s", ride.dir > 0 ? "Southbound" : "Northbound", W.stations[ride.dest].name), 24, 56, 22, {255, 225, 200, 255});
                 textCenter(town, sw / 2, 20, 34, WHITE);
@@ -1671,11 +1975,15 @@ int main(int argc, char** argv) {
                 for (auto& st : W.stations) DrawCircle(bx + (int)(600 * st.s / L), by + 3, 6, WHITE);
                 DrawCircle(bx + (int)(600 * ride.s / L), by + 3, 8, {255, 210, 60, 255});
             }
+            if (showList && ride.on) listH = drawPlayerList(sw - 250, listY, 230, netMe);
+            if (listH) hud.push_back({(float)sw - 250, (float)listY, 230, (float)listH});
+            hud.push_back({(float)sw - 100, (float)sh2 - 30, 100, 24});   // FPS
+            if (!picker && !showMap && !RM.empty()) drawNameTags(cam, camFwd, netMe, sw, sh2, hud);
             if (paused) textCenter("PAUSED", sw / 2, sh2 / 2 - 30, 60, WHITE);
             if (showMap) drawBigMap();
             DrawFPS(sw - 100, sh2 - 30);
         }
-        if (NET.active()) drawNetHud(16, title ? 16 : 132, netMe, GetTime());
+        if (showList && title) drawPlayerList(sw - 250, listY, 230, netMe);
         EndDrawing();
         waitForFrameSlot();
         static bool firstFrame = true;

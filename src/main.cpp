@@ -15,6 +15,7 @@
 #include "instance.h"
 #include "net_game.h"
 #include "remote.h"
+#include "traffic_sync.h"
 #include <cstdio>
 #include <chrono>
 #include <thread>
@@ -98,6 +99,8 @@ static Birds BI;
 static Net NET;   // multiplayer session (inactive unless --create / --join)
 static Remotes RM;   // the other players in it, smoothed for drawing
 static bool gFakeNet = false;   // test hook SFSKATE_NET_FAKE: scripted other players, no network
+static TrafficSync TS;   // shared traffic in a session: the session clock, and the host's snapshots waiting for their step
+static bool gTrafficRan = false;   // traffic has run this frame (it runs once a frame at most)
 
 static const Color C_COP = {255, 70, 60, 255};
 
@@ -460,6 +463,108 @@ static void syncRemotes(double now, std::vector<std::pair<std::string, Color>>& 
     (void)now;
 }
 
+// Everyone the traffic reacts to: this skater and every other player here, in player id order (the same order on
+// every machine, so the same players make the same traffic). Anyone on a train or in a seaplane is out of its way.
+static std::vector<TrafficActor> trafficActors() {
+    std::vector<std::pair<uint8_t, TrafficActor>> v{{RM.myId, TrafficActor::of(P)}};
+    for (auto& r : RM.list)
+        if (r.hasPose && !r.leaving && r.cur.vehicle != netp::PlayerState::TRAIN && r.cur.vehicle != netp::PlayerState::SEAPLANE)
+            v.push_back({r.id, actorOf(r.cur)});
+    std::stable_sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<TrafficActor> out;
+    for (auto& e : v) out.push_back(e.second);
+    return out;
+}
+
+// The traffic's frame. In a session, a machine that isn't the host runs it on the session clock, taking the host's
+// snapshots at their steps (TS); the host, and anyone on their own, on their own frames.
+static void advanceTraffic(float dt) {
+    if (gTrafficRan) return;
+    gTrafficRan = true;
+    std::vector<TrafficActor> actors = trafficActors();
+    if (NET.status == Net::IN_SESSION && !NET.isHost()) {
+        T.beginFrame();
+        float alpha;
+        if (TS.step(T, W, actors, GetTime(), &alpha) >= 0) { T.endFrame(alpha, dt, W, P); return; }
+    }
+    T.advance(dt, W, P, actors);
+}
+
+// Shared traffic, once a frame after the net client's service: the host sends its cars near the others 10 times a
+// second and a full snapshot to whoever asks; everyone else hands what came in to TS and asks for a full snapshot
+// until one comes.
+static void syncTraffic(double now) {
+    static uint8_t host = 0;
+    static Every carTimer{TrafficSync::INTERVAL};
+    static std::vector<std::pair<uint8_t, double>> lastFull;   // who was sent one, when
+    if (NET.status != Net::IN_SESSION) {
+        if (host) { TS.reset(); T.acc = 0; host = 0; }
+        return;
+    }
+    if (NET.hostId != host) {
+        if (host) {
+            if (NET.isHost()) { TS.reset(); T.acc = 0; }   // our traffic is the session's now: it runs on our frames
+            else TS.hostChanged();
+        }
+        host = NET.hostId;
+    }
+    if (NET.isHost()) {
+        if (!NET.remotes.empty() && carTimer.due(now)) {
+            carTimer.fired(now);
+            std::vector<Vector3> others;
+            for (auto& r : NET.remotes) if (r.hasState) others.push_back({r.state.x, r.state.y, r.state.z});
+            for (auto& m : TrafficSync::snapshot(T, others, NET.rttMs)) NET.sendCarSnapshot(m, now);
+        }
+        for (uint8_t id : NET.fullRequests) {
+            auto it = std::find_if(lastFull.begin(), lastFull.end(), [&](const auto& e) { return e.first == id; });
+            if (it != lastFull.end() && now - it->second < 3) continue;   // (one on its way)
+            if (it == lastFull.end()) lastFull.push_back({id, now}); else it->second = now;
+            std::vector<uint8_t> full;
+            T.serializeFull(full);
+            NET.sendFull(id, full, now);
+            TraceLog(LOG_INFO, "SFSKATE: net: full snapshot (%zu B) to player %u", full.size(), (unsigned)id);
+        }
+        NET.fullRequests.clear();
+        return;
+    }
+    for (auto& in : NET.carInbox) TS.onCarSnapshot(in.m, in.recvAt, NET.rttMs, T);
+    NET.carInbox.clear();
+    for (auto& f : NET.fullInbox) {
+        double t0 = GetTime();
+        bool ok = TS.onFull(T, W, f.data.data(), f.data.size());
+        TraceLog(LOG_INFO, "SFSKATE: net: full snapshot (%zu B) %s in %.0f ms, traffic at %.2f s", f.data.size(), ok ? "applied" : "TURNED DOWN",
+                 (GetTime() - t0) * 1000, T.simTime);
+    }
+    NET.fullInbox.clear();
+    if (TS.shouldAsk(now)) NET.requestFull(now);
+}
+
+// test hook (SFSKATE_NETLOG=file): each traffic step a frame ends on, the cars within 100 m of the skater ("step car x
+// y z"), so two machines' logs can be compared step for step
+static void netLogCars() {
+    static FILE* f = getenv("SFSKATE_NETLOG") ? fopen(getenv("SFSKATE_NETLOG"), "w") : nullptr;
+    static long long last = -1;
+    long long st = stepOf(T.simTime);
+    if (!f || st == last || NET.status != Net::IN_SESSION) return;
+    last = st;
+    for (int k = 0; k < (int)T.cars.size(); k++) {
+        const Car& c = T.cars[k];
+        if (sq(c.pos.x - P.pos.x) + sq(c.pos.z - P.pos.z) < 100 * 100)
+            fprintf(f, "%lld %d %.3f %.3f %.3f %s\n", st, k, c.pos.x, c.pos.y, c.pos.z, NET.isHost() ? "host" : TS.synced ? "synced" : "own");
+    }
+    fflush(f);
+}
+
+// test hook (SFSKATE_NETWAIT=1): the autotest tour holds at its first spot until the session's traffic is shared: on
+// the host, 10 s after someone joined; anyone else, 5 s after the host's full snapshot came in
+static bool netReady() {
+    static double since = -1;
+    bool ok = NET.status == Net::IN_SESSION && (NET.isHost() ? !NET.remotes.empty() : TS.synced);
+    if (!ok) { since = -1; return false; }
+    if (since < 0) since = GetTime();
+    return GetTime() - since > (NET.isHost() ? 10 : 5);
+}
+
 // test hook (SFSKATE_NET_FAKE=1): three scripted players and no network, so screenshots and the autotest can show
 // them: Ana circles near where you are doing kickflips and heelflips, Ben rolls back and forth 400 m west, Cy
 // stands at Menlo Park station on the Peninsula. Sent at 20 Hz on a clock 1000 s ahead of ours, 40 ms late.
@@ -783,6 +888,7 @@ int main(int argc, char** argv) {
     while (!WindowShouldClose()) {
         float dt = std::min(GetFrameTime(), 1.f / 30.f);
         float now = (float)GetTime();
+        gTrafficRan = false;
         int sw = GetScreenWidth(), sh2 = GetScreenHeight();
 
         if (autotest && getenv("SFSKATE_RIDE")) { // test hook: ride the train south and take a few shots
@@ -797,6 +903,7 @@ int main(int argc, char** argv) {
         } else
         if (autotest) {
             atFrame++;
+            if (atFrame == 64 && getenv("SFSKATE_NETWAIT") && !netReady()) atFrame = 63;   // (spot 0 is set at 62)
             if (atFrame == 60) TakeScreenshot("shot_title.png");
             if (atFrame == 61) { title = false; picker = false; }
             if (gFakeNet) { // test hook: Ana close up mid-flip (see the camera below), then the map with everyone on it
@@ -1032,7 +1139,7 @@ int main(int argc, char** argv) {
                 if (JS.dismount(P, W)) { camYaw = P.yaw; P.say("Back on land", WHITE); }
                 else P.say("Get closer to the shore to hop off", WHITE);
             }
-            if (JS.riding) { JS.update(dt, in, in.tuck, P, W); T.advance(dt, W, P); }
+            if (JS.riding) { JS.update(dt, in, in.tuck, P, W); advanceTraffic(dt); }
             if (JS.evMount) S.play(S.splash, 0.5f, 1.3f);
             if (JS.evCrash) S.play(S.splash, 0.9f, 0.7f);
             JS.evMount = JS.evCrash = false;
@@ -1063,7 +1170,7 @@ int main(int argc, char** argv) {
                     in.steer = atFrame > 450 && !land ? 0.6f : 0.f;
                 }
                 SP.update(dt, in, climb, dive, P, W);
-                T.advance(dt, W, P);
+                advanceTraffic(dt);
                 if (!SP.riding) camYaw = P.yaw;   // crashed and put back on land
             }
             if (SP.evMount) S.play(S.splash, 0.4f, 1.5f);
@@ -1077,7 +1184,7 @@ int main(int argc, char** argv) {
             ride.v += clampf(vt - ride.v, -6 * dt, 4 * dt);
             ride.v = std::max(ride.v, remain > 1 ? 2.f : 0.f);
             ride.s += ride.dir * ride.v * dt;
-            T.advance(dt, W, P);
+            advanceTraffic(dt);
             if (remain < 0.5f || IsKeyPressed(KEY_SPACE)) {
                 float yaw;
                 Vector3 p = W.caltrainDropoff(ride.dest, &yaw);
@@ -1090,7 +1197,7 @@ int main(int argc, char** argv) {
         }
         if (running) {
             P.update(dt, in, W);
-            T.advance(dt, W, P);
+            advanceTraffic(dt);
             T.interact(P);
             {
                 Jet jets[2];
@@ -1127,8 +1234,11 @@ int main(int argc, char** argv) {
                 }
             }
         } else if (title) {
-            T.advance(dt, W, P);
+            advanceTraffic(dt);
         }
+        // a session's traffic is everyone's: on a machine that follows the host it runs on whatever this one is doing
+        // (paused, on the map), or it would fall behind the session clock
+        if (NET.status == Net::IN_SESSION && !NET.isHost() && TS.synced) advanceTraffic(dt);
         // sounds
         if (P.evPop) S.play(S.pop, 0.8f, 1.0f + GetRandomValue(-10, 10) / 100.f);
         if (P.evLand) S.play(S.land, 0.9f);
@@ -1569,6 +1679,8 @@ int main(int argc, char** argv) {
             }
             std::vector<std::pair<std::string, Color>> toasts;
             syncRemotes(tn, toasts);
+            syncTraffic(tn);
+            netLogCars();
             for (auto& t : toasts) P.say(t.first, t.second, "Multiplayer");
         }
         if (gFakeNet || !RM.empty()) {

@@ -29,6 +29,7 @@ static void check(bool ok, const char* name, const char* detail) {
     if (!ok) fails++;
 }
 static void progress(const char*, float) {}
+void netSimChecks(World& w, void (*check)(bool, const char*, const char*));   // net_sim.cpp
 
 struct Sim {
     Player p;
@@ -235,6 +236,11 @@ int main() {
     W.freezeEarly = true;       // the cells the game bakes during generation: any later write to one stops the run
     W.generate(progress);
     char b[256];
+    netSimChecks(W, check);
+    if (getenv("SFSKATE_SIM_ONLY") && !strcmp(getenv("SFSKATE_SIM_ONLY"), "net")) {   // (just these, while working on them)
+        printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
+        return fails ? 1 : 0;
+    }
 
     {   // those cells were frozen at the same point and with the same cutoff as in the game, and nothing wrote to them since
         int frozen = 0;

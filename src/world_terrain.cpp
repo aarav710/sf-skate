@@ -1667,7 +1667,7 @@ static void bakeChunk(const World& w, MeshBuilder& mb, Baked& out) {
 
 // locations raylib binds by name: 0 vertexPosition, 1 vertexTexCoord (height above ground here), 2 vertexNormal,
 // 3 vertexColor; the shaders take a packed position at 10 (PACKED_LOC). Two VAOs share the buffers: the full one
-// and a slim one (position + color) for the far pass.
+// and a slim one (position, normal + color) for the far pass.
 static Chunk uploadBaked(Baked& bk) {
     Chunk ch = bk.ch;
     bool p = ch.packed;
@@ -1687,10 +1687,11 @@ static Chunk uploadBaked(Baked& bk) {
         }
         rlSetVertexAttribute(3, 4, GL_UNSIGNED_BYTE, true, sa, p ? 8 : 12);
         rlEnableVertexAttribute(3);
-        if (k == 0) {
-            ch.vboB = rlLoadVertexBuffer(bk.b.data(), (int)bk.b.size(), false);
-            rlSetVertexAttribute(2, 4, GL_BYTE, true, sb, 0);
-            rlEnableVertexAttribute(2);
+        if (k == 0) ch.vboB = rlLoadVertexBuffer(bk.b.data(), (int)bk.b.size(), false);
+        else rlEnableVertexBuffer(ch.vboB);
+        rlSetVertexAttribute(2, 4, GL_BYTE, true, sb, 0);
+        rlEnableVertexAttribute(2);
+        if (k == 0) {   // the slim VAO has the normal but not the height above the ground
             rlSetVertexAttribute(1, 1, p ? GL_HALF_FLOAT : GL_FLOAT, false, sb, 4);
             rlEnableVertexAttribute(1);
             ch.ebo = rlLoadVertexBufferElement(bk.idx.data(), (int)bk.idx.size(), false);

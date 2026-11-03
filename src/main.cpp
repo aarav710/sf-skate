@@ -1198,10 +1198,12 @@ int main() {
         // far pass
         rlSetClipPlanes(250.0, 40000.0);
         BeginMode3D(cam);
+        R.staticNormals(true);
         W.drawPass(cam, 250, 40000, R.cityFar, true);
         R.opaque(false);   // the bay is see-through: blended over the floor beneath it
         W.drawWater(R.cityFar, true);
         R.opaque(true);
+        R.staticNormals(false);
         drawMovers(false);
         inst::flush(R.cityFar);
         EndShaderMode();
@@ -1209,7 +1211,7 @@ int main() {
         rlDrawRenderBatchActive();
         glClear(GL_DEPTH_BUFFER_BIT);
         // near pass
-        rlSetClipPlanes(0.15, 270.0);
+        rlSetClipPlanes(0.3, 270.0);
         BeginMode3D(cam);
         R.staticNormals(true);
         W.drawPass(cam, 0, 270, sh, false);
@@ -1255,7 +1257,7 @@ int main() {
         rlDrawRenderBatchActive();
         rlEnableDepthMask();
         EndMode3D();
-        R.setView(cam.fovy, 0.15f, 270.f);   // the near pass's projection, for the ambient occlusion
+        R.setView(cam.fovy, 0.3f, 270.f);   // the near pass's projection, for the ambient occlusion
         R.endScene();
 
         // graded, bloomed, and blurred at speed

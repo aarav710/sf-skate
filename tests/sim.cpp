@@ -2648,6 +2648,180 @@ int main() {
         check(W.aerials.size() > 500 && !W.solidAt({GX + 15, cy, -1700}) && !W.solidAt({GX + 15, 45, sz}), "aerial obstacles are not platforms",
               "");
     }
+    {   // seaplane stunts: the plane's attitude is a quaternion, so it pitches and rolls through any angle (loops, barrel rolls,
+        // inverted flight), turns by banking, only levels itself off gently once the stick is idle, and the whole plane
+        // (wings, roof, tail) counts when it touches the ground or the sea
+        Seaplanes SP;
+        SP.place(W);
+        const float DT = 1.f / 60;
+        // a plane in the air over the bay (open water, -14 m deep) at (x, y, z), heading yaw, at the given speed with the throttle that holds it
+        auto fly = [&](float x, float y, float z, float spd, float thr, Player& q) {
+            Seaplanes t = SP;
+            t.mount(0, q);
+            t.pos = {x, y, z}; t.onWater = false; t.setPose(0, 0, 0); t.speed = spd; t.throttle = thr; t.dir = t.nose();
+            return t;
+        };
+        // the attitude poseQuat gives is the Euler composition drawPlane has always used: yaw about Y, then pitch about z, then roll about x
+        {
+            float worst = 0;
+            for (float yw : {0.f, 1.f, -2.2f}) for (float pt : {0.f, 0.4f, -0.5f}) for (float rl : {0.f, 0.7f, -1.2f}) for (Vector3 l : {Vector3{0.7f, 2.88f, 5.75f}, Vector3{-3.95f, 3.5f, 0}, Vector3{3.2f, 0.4f, -1.4f}}) {
+                float cr = cosf(rl), sr = sinf(rl), cp = cosf(pt), sp = sinf(pt), cy = cosf(yw), sy = sinf(yw);
+                float y1 = l.y * cr - l.z * sr, z1 = l.y * sr + l.z * cr, x2 = l.x * cp - y1 * sp, y2 = l.x * sp + y1 * cp;
+                Vector3 old = {x2 * cy - z1 * sy, y2, x2 * sy + z1 * cy};
+                worst = std::max(worst, Vector3Distance(old, Seaplanes::toWorld({0, 0, 0}, Seaplanes::poseQuat(yw, pt, rl), l)));
+            }
+            snprintf(b, sizeof b, "worst %.5f m", worst);
+            check(worst < 1e-4f, "seaplane attitude matches the draw order", b);
+        }
+        {   // holding Space pitches the nose up round and round, with no clamp: a loop that comes back near where it started, scored as a Loop
+            Player q;
+            Seaplanes t = fly(700, 300, -1700, 45, 1.f, q);
+            float y1 = -1, up1 = 0, maxPitch = 0;
+            for (int i = 0; i < 60 * 14 && t.riding && t.loops < 1; i++) {
+                t.update(DT, Input{}, true, false, q, W);
+                maxPitch = std::max(maxPitch, t.pitch);
+            }
+            if (t.loops >= 1) { y1 = t.pos.y; up1 = t.upY(); }
+            bool tagged = std::find(q.combo.begin(), q.combo.end(), "Loop") != q.combo.end() || std::find(q.combo.begin(), q.combo.end(), "Low Loop") != q.combo.end();
+            snprintf(b, sizeof b, "riding=%d loops=%d back at y=%.0f (from 300) upright=%.2f max nose %.2f rad, combo %zu", t.riding, t.loops, y1, up1, maxPitch, q.combo.size());
+            check(t.riding && t.loops == 1 && tagged && fabsf(y1 - 300) < 40.f && up1 > 0.9f && maxPitch > 1.5f, "seaplane: holding pull loops", b);
+            // let go: it levels off gently and the stunts bank on their own once nothing new is happening
+            long long before = q.score;
+            for (int i = 0; i < 60 * 12 && t.riding; i++) t.update(DT, Input{}, false, false, q, W);
+            snprintf(b, sizeof b, "riding=%d score +%lld combo left %zu", t.riding, q.score - before, q.combo.size());
+            check(t.riding && q.score > before && q.combo.empty(), "seaplane: stunt combo banks", b);
+        }
+        {   // pull at low speed with no power: it stalls out (the nose falls toward the ground) instead of looping
+            Player q;
+            Seaplanes t = fly(700, 300, -1700, 24, 0.f, q);
+            float minNose = 9;
+            for (int i = 0; i < 60 * 8 && t.riding; i++) { t.update(DT, Input{}, true, false, q, W); minNose = std::min(minNose, t.nose().y); }
+            snprintf(b, sizeof b, "loops=%d lowest nose %.2f speed %.1f", t.loops, minNose, t.speed);
+            check(t.loops == 0 && minNose < -0.3f, "seaplane: pulling at low speed stalls", b);
+        }
+        {   // holding a roll goes right round, scored as a barrel roll; and heading holds roughly
+            Player q;
+            Seaplanes t = fly(700, 300, -1700, 40, 0.3f, q);
+            Input in; in.steer = 1;
+            float minUp = 1;
+            for (int i = 0; i < 60 * 5 && t.riding && t.rolls < 1; i++) { t.update(DT, in, false, false, q, W); minUp = std::min(minUp, t.upY()); }
+            bool tagged = std::find(q.combo.begin(), q.combo.end(), "Barrel Roll") != q.combo.end() || std::find(q.combo.begin(), q.combo.end(), "Low Barrel Roll") != q.combo.end();
+            snprintf(b, sizeof b, "riding=%d rolls=%d went down to up.y=%.2f, y=%.0f", t.riding, t.rolls, minUp, t.pos.y);
+            check(t.riding && t.rolls == 1 && tagged && minUp < -0.95f && fabsf(t.pos.y - 300) < 30.f, "seaplane: holding roll barrel-rolls", b);
+        }
+        {   // upside down, hands off: it carries on (sinking gently), and scores for it
+            Player q;
+            Seaplanes t = fly(700, 300, -1700, 40, 0.3f, q);
+            t.setPose(0, 0, PI); t.dir = t.nose();
+            float worstUp = -1;
+            for (int i = 0; i < 60 * 5 && t.riding; i++) { t.update(DT, Input{}, false, false, q, W); worstUp = std::max(worstUp, t.upY()); }
+            snprintf(b, sizeof b, "riding=%d up.y<=%.2f after 5 s, y=%.0f, inverted scored %d", t.riding, worstUp, t.pos.y, t.inverts);
+            check(t.riding && worstUp < -0.9f && t.pos.y > 250 && t.inverts == 1, "seaplane: inverted flight is sustainable", b);
+        }
+        {   // banking turns it, and it comes back wings-level on its own once the stick is idle
+            Player q;
+            Seaplanes t = fly(700, 300, -1700, 40, 0.3f, q);
+            Input in; in.steer = 1;
+            for (int i = 0; i < 24; i++) t.update(DT, in, false, false, q, W);
+            float bank = t.roll;
+            for (int i = 0; i < 60 * 8; i++) t.update(DT, Input{}, false, false, q, W);
+            snprintf(b, sizeof b, "bank %.2f, heading turned %.2f, bank after 8 s idle %.2f", bank, t.yaw, t.roll);
+            check(bank > 0.6f && t.yaw > 0.4f && fabsf(t.roll) < 0.1f && t.riding, "seaplane: bank turns, then levels", b);
+        }
+        {   // the auto-level never fights a stunt in progress: on its side (where it pulls hardest), holding pull keeps it on its side;
+            // let go and it waits about a second before it starts to right itself
+            Player q;
+            Seaplanes t = fly(700, 300, -1700, 45, 0.5f, q);
+            t.setPose(0, 0, PI / 2); t.dir = t.nose();
+            for (int i = 0; i < 60 * 3; i++) t.update(DT, Input{}, true, false, q, W);
+            float held = t.upY(), idleHeld = t.stickIdle;
+            for (int i = 0; i < 48; i++) t.update(DT, Input{}, false, false, q, W);
+            float soon = t.upY();
+            for (int i = 0; i < 60 * 4; i++) t.update(DT, Input{}, false, false, q, W);
+            snprintf(b, sizeof b, "up.y held %.2f (idle %.1f s), 0.8 s after release %.2f, 4 s later %.2f", held, idleHeld, soon, t.upY());
+            check(fabsf(held) < 0.1f && idleHeld == 0 && fabsf(soon) < 0.1f && t.upY() > 0.5f, "seaplane: auto-level waits for the stick", b);
+        }
+        {   // takeoff from a mooring (full throttle, Space held to rotate) gets airborne and stays airborne: the floats leaving the
+            // water are not a touchdown, at 60 and 30 fps; then a whole flight like SFSKATE_FLY=2: climb, cruise, throttle back, glide in and land
+            int airOk = 0, tries = 0, cycleOk = 0, cycleTries = 0;
+            float worstAlt = 1e9f;
+            for (int m = 0; m < (int)SP.moored.size(); m++)
+                for (float dt : {1.f / 60, 1.f / 30}) {
+                    Player q;
+                    Seaplanes t = SP;
+                    t.mount(m, q);
+                    bool air = false; int splashAfter = 0;
+                    for (float tm = 0; tm < 14 && t.riding; tm += dt) {
+                        Input in; in.push = true;
+                        t.update(dt, in, tm > 1 && t.pitch < 0.3f, false, q, W);
+                        if (!t.onWater) air = true;
+                        if (t.evSplash && air) splashAfter++;
+                        t.evSplash = false;
+                    }
+                    tries++;
+                    worstAlt = std::min(worstAlt, t.altitude(W));
+                    airOk += t.riding && air && !t.onWater && splashAfter == 0 && t.altitude(W) > 20;
+                }
+            for (int m = 0; m < 2 && m < (int)SP.moored.size(); m++) {
+                Player q;
+                Seaplanes t = SP;
+                t.mount(m, q);
+                bool landed = false;
+                for (float tm = 0; tm < 150 && t.riding && !landed; tm += DT) {
+                    bool land = tm > 25;
+                    Input in; in.push = !land; in.brake = land;
+                    bool climb = t.speed > 24 && t.altitude(W) < 80 && t.pitch < 0.25f && !land, dive = false;
+                    if (land) { climb = t.pitch < -0.12f; dive = t.pitch > -0.08f && t.altitude(W) > 6; }
+                    t.update(DT, in, climb, dive, q, W);
+                    landed = land && t.onWater;
+                }
+                cycleTries++;
+                cycleOk += landed && t.riding;
+            }
+            snprintf(b, sizeof b, "%d/%d takeoffs stay up (lowest %.0f m after 14 s); %d/%d full flights land", airOk, tries, worstAlt, cycleOk, cycleTries);
+            check(tries == 6 && airOk == tries && cycleOk == cycleTries, "seaplane: takeoff, climb, glide, land", b);
+        }
+        {   // landing: upright, level and gentle works; the same touch upside down (or steeply banked) crashes
+            auto touch = [&](float pitch, float roll, float spd) {
+                Player q;
+                Seaplanes t = fly(700, 12, -1700, spd, 0.3f, q);
+                t.setPose(0, pitch, roll); t.dir = t.nose();
+                for (int i = 0; i < 60 * 6 && t.riding && !t.onWater; i++) t.update(DT, Input{}, false, false, q, W);
+                return std::make_pair(t.onWater && t.riding, !t.riding);
+            };
+            auto up = touch(-0.12f, 0, 35), inv = touch(-0.12f, PI, 35), invSlow = touch(0.f, PI, 22), bank = touch(-0.12f, 1.3f, 35);
+            snprintf(b, sizeof b, "upright landed=%d, upside down crashed=%d (slow: %d), steep bank crashed=%d", up.first, inv.second, invSlow.second, bank.second);
+            check(up.first && inv.second && invSlow.second && bank.second, "seaplane: upside-down touch crashes", b);
+        }
+        {   // any part of the plane touching the ground crashes: flying inverted a few metres over flat ground, the wing (the plane's
+            // highest part, now the lowest) hits long before the origin is near; on its side, the wingtip does. A flat stretch of
+            // park or beach with nothing over it is found first.
+            float fx = 0, fz = 0, g0 = 0;
+            bool found = false;
+            for (float z = -900; z <= 900 && !found; z += 40)
+                for (float x = -1400; x <= 1400 && !found; x += 40) {
+                    float c = W.terrain(x, z);
+                    bool ok = c > 1.f;
+                    for (float dx = 0; dx <= 30 && ok; dx += 3)
+                        for (float dz = -8; dz <= 8 && ok; dz += 4) {
+                            ok = fabsf(W.terrain(x + dx, z + dz) - c) < 0.12f;
+                            for (float hh = 0.3f; hh <= 14 && ok; hh += 1.5f) ok = !W.solidAt({x + dx, c + hh, z + dz});
+                        }
+                    if (ok) { found = true; fx = x; fz = z; g0 = c; }
+                }
+            auto skim = [&](float roll, float h) {
+                Player q;
+                Seaplanes t = fly(fx, g0 + h, fz, 25, 0.1f, q);
+                t.setPose(0, 0, roll); t.dir = t.nose();
+                for (int i = 0; i < 18 && t.riding; i++) t.update(DT, Input{}, false, false, q, W);   // 0.3 s, 7 m
+                return !t.riding;
+            };
+            bool invLow = skim(PI, 3.0f), invHigh = skim(PI, 4.6f), sideLow = skim(PI / 2, 5.2f), sideHigh = skim(PI / 2, 7.f), uprightLow = skim(0, 2.0f);
+            snprintf(b, sizeof b, "flat ground at (%.0f,%.0f) %.1f m: inverted 3.0 m up crashed=%d, 4.6 m=%d; on its side 5.2 m=%d, 7 m=%d; upright 2 m=%d",
+                     fx, fz, g0, invLow, invHigh, sideLow, sideHigh, uprightLow);
+            check(found && invLow && !invHigh && sideLow && !sideHigh && !uprightLow, "seaplane: inverted wing/wingtip hits the ground", b);
+        }
+    }
     {   // Telegraph Hill: the asphalt lies on the ground mesh all over (no grass breaking up through it on the steep
         // climb), and no street runs into Coit Tower's base
         int tris = 0, under = 0;

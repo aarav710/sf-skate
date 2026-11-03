@@ -613,7 +613,7 @@ int main() {
                 if (!SP.riding) camYaw = P.yaw;   // crashed and put back on land
             }
             if (SP.evMount) S.play(S.splash, 0.4f, 1.5f);
-            if (SP.evSplash) { S.play(S.splash, 1.0f, 0.8f); P.say("Touchdown", {200, 235, 255, 255}); }
+            if (SP.evSplash) { S.play(S.splash, 1.0f, 0.8f); if (!SP.evBanked) P.say("Touchdown", {200, 235, 255, 255}); }
             if (SP.evCrash) S.play(S.bail, 1.0f, 0.6f);
             SP.evMount = SP.evSplash = SP.evCrash = false;
         }
@@ -792,6 +792,8 @@ int main() {
         float fogUse = fogDen * (1.f + 2.2f * rainK);
 
         // ---------------- camera
+        cam.up = {0, 1, 0};
+        static bool planeCamWas = false;
         if (title) {
             float a = titleT * 0.05f + 0.6f;
             cam.position = {250 + cosf(a) * 1700, 420, -300 + sinf(a) * 1700};
@@ -809,6 +811,35 @@ int main() {
             cam.position = camPos;
             cam.target = {lead.x - f.x * 30, lead.y + 3, lead.z - f.y * 30};
             cam.fovy = lerpf(cam.fovy, 60, 1 - expf(-dt * 3));
+        } else if (SP.riding && !SP.onWater) {
+            // chasing the seaplane through any attitude (loops, rolls, upside down): sit behind along its nose and above along
+            // its up, both smoothed, and give the camera that same smoothed up. Nothing here depends on "which way is up in
+            // the world", so there is no flip when the nose passes the vertical; a loop simply rolls the world past.
+            static Vector3 cF{1, 0, 0}, cU{0, 1, 0};
+            static float pZoom = 1.f;
+            pZoom = clampf(pZoom - GetMouseWheelMove() * 0.1f, 0.5f, 3.0f);
+            Vector3 f = SP.nose(), u = SP.up();
+            if (!planeCamWas) { cF = f; cU = u; }
+            auto follow = [&](Vector3 cur, Vector3 want, float rate) {
+                Vector3 n = Vector3Add(cur, Vector3Scale(Vector3Subtract(want, cur), 1 - expf(-dt * rate)));
+                return Vector3Length(n) > 1e-3f ? Vector3Normalize(n) : want;
+            };
+            cF = follow(cF, f, 4.5f);
+            cU = follow(cU, u, 3.f);
+            cU = Vector3Normalize(Vector3Subtract(cU, Vector3Scale(cF, Vector3DotProduct(cU, cF))));   // square to the view direction
+            float dist = CAM_D[camMode] * pZoom * 3.2f, hgt = CAM_H[camMode] * pZoom * 1.8f;
+            Vector3 target = Vector3Add(P.pos, Vector3Scale(cU, 1.2f));
+            Vector3 want = Vector3Add(Vector3Subtract(P.pos, Vector3Scale(cF, dist)), Vector3Scale(cU, hgt));
+            want.y = std::max(want.y, W.terrain(want.x, want.z) + 1.0f);   // upside down, behind and "above" is below: stay out of the hill
+            camPos = Vector3Lerp(camPos, want, 1 - expf(-dt * 14));
+            camPos.y = std::max(camPos.y, W.terrain(camPos.x, camPos.z) + 1.0f);
+            cam.position = camPos;
+            cam.target = target;
+            Vector3 vd = Vector3Normalize(Vector3Subtract(target, cam.position));
+            Vector3 cu = Vector3Subtract(cU, Vector3Scale(vd, Vector3DotProduct(cU, vd)));
+            cam.up = Vector3Length(cu) > 0.1f ? Vector3Normalize(cu) : Vector3{0, 1, 0};
+            cam.fovy = lerpf(cam.fovy, 64 + clampf(SP.speed, 0, 40) * 0.5f, 1 - expf(-dt * 3));
+            camYaw = P.yaw;
         } else {
             float targetYaw = camYaw;
             if (P.state == Player::AIR) {
@@ -895,6 +926,7 @@ int main() {
             cam.target = target;
             cam.fovy = lerpf(cam.fovy, 62 + clampf(spd, 0, 30) * 0.6f, 1 - expf(-dt * 3)) + landKick * 5.f;
         }
+        planeCamWas = !title && !ride.on && SP.riding && !SP.onWater;
         if (autotest && getenv("SFSKATE_CAM")) { // test hook: free camera "x,y,z,tx,ty,tz"
             float v[6];
             if (sscanf(getenv("SFSKATE_CAM"), "%f,%f,%f,%f,%f,%f", v, v + 1, v + 2, v + 3, v + 4, v + 5) == 6) { cam.position = {v[0], v[1], v[2]}; cam.target = {v[3], v[4], v[5]}; }
@@ -1297,7 +1329,7 @@ int main() {
                 textCenter(dist, sw / 2, 40, 40, {255, 255, 255, al});
             }
             // current combo
-            if (!P.combo.empty() && (P.state == Player::AIR || P.state == Player::GRIND)) {
+            if (!P.combo.empty() && (P.state == Player::AIR || P.state == Player::GRIND || (SP.riding && !SP.onWater))) {
                 std::string s;
                 for (size_t i = 0; i < P.combo.size(); i++) { if (i) s += " + "; s += P.combo[i]; }
                 textCenter(s.c_str(), sw / 2, sh2 - 150, 26, {255, 255, 255, 255});
@@ -1331,8 +1363,8 @@ int main() {
                 // ("key|action": drawn as two aligned columns)
                 const char* skiLines[] = {"JET SKI", "W|go", "S|brake", "A D|steer", "Shift|boost", "E|hop off at the shore",
                                           "Right mouse|look around", "H|hide controls"};
-                const char* planeLines[] = {"SEAPLANE", "W / S|throttle", "A D|steer", "Space|climb (lift off past 55 mph)",
-                                            "Shift|dive", "E|climb out at the shore", "Right mouse|look around", "H|hide controls"};
+                const char* planeLines[] = {"SEAPLANE", "W / S|throttle", "A D|steer; roll in the air", "Space|nose up (lift off past 55 mph)",
+                                            "Shift|nose down", "Hold|loops, rolls, upside down", "E|climb out at the shore", "Wheel|zoom", "H|hide controls"};
                 const char** lines = JS.riding ? skiLines : SP.riding ? planeLines : skateLines;
                 const int n = JS.riding ? (int)(sizeof(skiLines) / sizeof(*skiLines))
                             : SP.riding ? (int)(sizeof(planeLines) / sizeof(*planeLines)) : (int)(sizeof(skateLines) / sizeof(*skateLines));

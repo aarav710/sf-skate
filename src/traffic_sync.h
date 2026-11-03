@@ -29,6 +29,9 @@ struct SessionClock {
     double margin = 0.05;                         // how far the traffic runs behind the snapshots arriving now
     SlewedOffset session, traffic;
     void reset() { *this = SessionClock(); }
+    // another host: its snapshots go by the same session clock (it carried on from its own estimate of it), so the
+    // offsets stay and only slew to its; the old host's arrival times go
+    void newHost() { seen.clear(); }
     // a snapshot the host took at simTime arrived at our recvAt; round trips to the relay in ms (< 0: not known yet)
     void sample(double simTime, double recvAt, double hostRttMs, double myRttMs);
     bool valid() const { return traffic.valid; }
@@ -78,13 +81,38 @@ public:
     // the backlog: the clock steps back and the others take a full snapshot again.
     int hostStep(Traffic& T, World& w, const std::vector<TrafficActor>& actors, double now, float* alpha);
     long long pedsOwed() const { return pedNext_ < pedEnd_ ? pedSteps_ : 0; }
-    void hostChanged();         // the old host's snapshots go, and the clock starts over from the new one's
+    // someone else hosts now: the old host's snapshots go, and the clock carries on toward the new one's
+    void hostChanged();
+    // we host now: the session clock carries on from where we had it (our traffic catches up to it at MAX_STEPS a
+    // frame), and any car hits of the last few seconds the old host may not have applied are applied here
+    void becomeHost(Traffic& T, double now);
     void reset() { *this = TrafficSync(); }
     size_t pending() const { return pending_.size(); }
+    // The session clock on this machine (host: its traffic time, running on between steps; anyone else: the host's
+    // as estimated from its snapshots), for everything else in the world that moves on it (planes, gondolas). False
+    // if there isn't one yet.
+    bool sessionNow(bool host, double now, double* t);
+
+    // --- car hits (plan 2.4): the skater's collisions are found on its own machine, so the bail has no lag. The
+    // host's skater stops the car itself; anyone else stops it here too (or it would drive on through them until the
+    // host's snapshots say otherwise), holds it against the snapshots, and sends the host a CAR_HIT, which stops it
+    // where the hitter saw it stop, for the rest of its stop as the hitter has it, so both end up the same.
+    static constexpr double HIT_HOLD = 2.0;       // s a hit car is held against snapshots without the host's stop
+    static constexpr double HIT_KEEP = 2.5;       // s a hit is worth applying (by the host, or whoever hosts next)
+    static constexpr float HIT_SNAP = 15;         // m: further from the host's car than this, the hitter's isn't used
+    // (not the host) we just ran into car k (Traffic::hitCar): the event to send
+    netp::MsgEvent carHit(Traffic& T, int k);
+    // (host) another player's CAR_HIT. False if it doesn't fit our traffic.
+    static bool applyCarHit(Traffic& T, const netp::MsgEvent& e);
+    // every CAR_HIT seen (sent or received), so whoever hosts next can apply the ones the old host may have missed
+    void noteHit(const netp::MsgEvent& e, const Traffic& T);
+    size_t held() const { return held_.size(); }
 
 private:
     std::map<long long, std::vector<netp::MsgCarSnapshot>> pending_;   // by the step they were taken at
     long long lastApplied_ = -1;
+    std::vector<std::pair<int, long long>> held_;     // cars stopped here, not by the host yet: until the step to give up
+    std::deque<netp::MsgEvent> hits_;                 // the latest CAR_HITs (noteHit)
     bool anchored_ = false;
     double anchor_ = 0;          // host: traffic time minus our clock
     long long pedSteps_ = 0;     // people still to catch up by this many steps: from pedNext_ to pedEnd_
@@ -99,6 +127,13 @@ TrafficActor actorOf(const netp::PlayerState& s);
 // whether a player riding this (a PlayerState::Vehicle) is in the traffic's way: not on a train or in a seaplane. The
 // same test for this player and every other one, so all machines have the same actors.
 inline bool inTraffic(uint8_t vehicle) { return vehicle != netp::PlayerState::TRAIN && vehicle != netp::PlayerState::SEAPLANE; }
+
+// a person's dodge or knock-down as an EVENT, and back (false if it isn't one, or is out of range)
+netp::MsgEvent pedEventMsg(const PedEvent& e);
+bool pedEventOf(const netp::MsgEvent& m, PedEvent* e);
+// whether a car honked (since Traffic::beginFrame) within r of `ear`: in a session cars honk at every player, and a
+// honk across town isn't heard
+bool honkNear(const Traffic& T, Vector3 ear, float r = 60);
 
 // the step a traffic time falls on (simTime is a whole number of steps, added up in doubles)
 inline long long stepOf(double simTime) { return llround(simTime / (double)Traffic::STEP); }

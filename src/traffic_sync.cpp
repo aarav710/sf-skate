@@ -7,6 +7,7 @@ TrafficActor actorOf(const netp::PlayerState& s) {
     a.vel = {s.vx, s.vz};
     a.hspeed = sqrtf(s.vx * s.vx + s.vz * s.vz);
     a.state = s.state;
+    a.local = false;   // (their own machine decides which people dodge them)
     return a;
 }
 
@@ -97,18 +98,25 @@ void TrafficSync::onCarSnapshot(const netp::MsgCarSnapshot& m, double recvAt, do
 
 void TrafficSync::applyDue(Traffic& T) {
     long long cur = stepOf(T.simTime);
+    std::vector<int> hold, released;
+    for (size_t k = 0; k < held_.size();) {
+        if (held_[k].second < cur) held_.erase(held_.begin() + k);   // (the host never stopped it: its snapshots win)
+        else hold.push_back(held_[k++].first);
+    }
     while (!pending_.empty() && pending_.begin()->first <= cur) {
         auto& e = *pending_.begin();
         if (e.first < cur) late += (int)e.second.size();   // (the clock jumped past it)
         else
             for (const netp::MsgCarSnapshot& m : e.second) {
                 bool ok = T.applyTrains(m.trains.data(), m.trains.size());
-                ok &= T.applyCars(m.cars.data(), m.cars.size(), false, true);
+                ok &= T.applyCars(m.cars.data(), m.cars.size(), false, true, hold.empty() ? nullptr : &hold, &released);
                 ok ? applied++ : bad++;
             }
         lastApplied_ = e.first;
         pending_.erase(pending_.begin());
     }
+    for (int k : released)
+        held_.erase(std::remove_if(held_.begin(), held_.end(), [&](const auto& h) { return h.first == k; }), held_.end());
 }
 
 bool TrafficSync::onFull(Traffic& T, World& w, const uint8_t* data, size_t n) {
@@ -178,6 +186,89 @@ int TrafficSync::runTo(Traffic& T, World& w, const std::vector<TrafficActor>& ac
 void TrafficSync::hostChanged() {
     pending_.clear();
     lastApplied_ = -1;
-    clock.reset();
+    clock.newHost();
+    held_.clear();   // (the new host's snapshots may never have them stopped: the hit went to the old one)
     if (!synced) askedAt = -1e18;   // ask the new host straight away
+}
+
+void TrafficSync::becomeHost(Traffic& T, double now) {
+    double s = T.simTime;
+    if (synced && clock.valid()) s = std::max(s, clock.sessionTime(now));
+    std::deque<netp::MsgEvent> hits = hits_;
+    *this = TrafficSync();
+    synced = true; wantFull = false;   // (ours is the session's traffic now)
+    anchored_ = true;
+    anchor_ = s - now;
+    T.acc = 0;
+    for (const netp::MsgEvent& e : hits) applyCarHit(T, e);
+}
+
+bool TrafficSync::sessionNow(bool host, double now, double* t) {
+    if (host) {
+        if (!anchored_) return false;
+        *t = now + anchor_;
+        return true;
+    }
+    if (!clock.valid()) return false;
+    *t = clock.sessionTime(now);
+    return true;
+}
+
+netp::MsgEvent TrafficSync::carHit(Traffic& T, int k) {
+    netp::MsgEvent e;
+    e.kind = netp::EVT_CAR_HIT;
+    e.idx = (uint32_t)k;
+    e.simTime = T.simTime;
+    T.serializeCars({k}, e.car);
+    held_.erase(std::remove_if(held_.begin(), held_.end(), [&](const auto& h) { return h.first == k; }), held_.end());
+    held_.push_back({k, stepOf(T.simTime) + (long long)(HIT_HOLD / Traffic::STEP)});
+    noteHit(e, T);
+    return e;
+}
+
+bool TrafficSync::applyCarHit(Traffic& T, const netp::MsgEvent& e) {
+    if (e.kind != netp::EVT_CAR_HIT || e.idx >= T.cars.size()) return false;
+    double age = (double)(stepOf(T.simTime) - stepOf(e.simTime)) * Traffic::STEP;
+    if (age > HIT_KEEP) return false;   // (long over, or about to be)
+    age = std::max(age, 0.0);
+    Car& c = T.cars[e.idx];
+    // the car as the hitter had it, if it's this one and near ours (anything else: just stopped where it is)
+    ByteReader r(e.car.data(), e.car.size());
+    r.u8();
+    int n = r.u16(), k = r.u16();
+    float x = r.f32(), z = r.f32();
+    if (!r.bad && n == 1 && k == (int)e.idx && std::isfinite(x) && std::isfinite(z) && sq(x - c.pos.x) + sq(z - c.pos.z) < HIT_SNAP * HIT_SNAP)
+        T.applyCars(e.car.data(), e.car.size(), true, false);
+    // stopped for the rest of the 3 s the hitter's machine gave it (Traffic::interact): the same as theirs from here on
+    if (c.stopT < 1e8f) c.stopT = std::max(c.stopT, (float)(3.0 - age));
+    c.speed = 0;
+    return true;
+}
+
+void TrafficSync::noteHit(const netp::MsgEvent& e, const Traffic& T) {
+    if (e.kind != netp::EVT_CAR_HIT) return;
+    hits_.push_back(e);
+    while (!hits_.empty() && (hits_.size() > 32 || T.simTime - hits_.front().simTime > HIT_KEEP)) hits_.pop_front();
+}
+
+netp::MsgEvent pedEventMsg(const PedEvent& e) {
+    netp::MsgEvent m;
+    m.idx = (uint32_t)e.ped;
+    if (e.kind == PedEvent::KNOCK) m.kind = netp::EVT_PED_KNOCK;
+    else { m.kind = netp::EVT_PED_EVADE; m.evade = e.kind; m.dirX = e.dir.x; m.dirZ = e.dir.y; m.dist = std::min(e.dist, netp::MsgEvent::DIST_MAX); }
+    return m;
+}
+
+bool pedEventOf(const netp::MsgEvent& m, PedEvent* e) {
+    if (m.idx > 0x7FFFFFFF) return false;
+    e->ped = (int)m.idx;
+    if (m.kind == netp::EVT_PED_KNOCK) { e->kind = PedEvent::KNOCK; e->dir = {0, 0}; e->dist = 0; return true; }
+    if (m.kind != netp::EVT_PED_EVADE || m.evade < EV_STEP || m.evade > EV_DIVE) return false;
+    e->kind = m.evade; e->dir = {m.dirX, m.dirZ}; e->dist = m.dist;
+    return true;
+}
+
+bool honkNear(const Traffic& T, Vector3 ear, float r) {
+    for (const Vector3& h : T.honks) if (sq(h.x - ear.x) + sq(h.z - ear.z) < r * r) return true;
+    return false;
 }

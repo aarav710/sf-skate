@@ -108,7 +108,19 @@ struct TrafficActor {
     Vector2 vel{};              // over the ground (m/s)
     float hspeed = 0;           // as Player::hspeed
     int state = 0;              // Player::State
+    // this machine's own skater. People only start a dodge for their local skater: in a session each player decides
+    // the dodges they cause and sends them to the others (Traffic::pedEvents), who see that skater late
+    bool local = true;
     static TrafficActor of(const Player& p);
+};
+
+// A person reacting to this machine's skater, for the other players (Traffic::logEvents)
+struct PedEvent {
+    int ped = 0;
+    uint8_t kind = 0;           // EV_STEP .. EV_DIVE (a dodge: startEvade's), or KNOCK
+    Vector2 dir{};
+    float dist = 0;
+    static constexpr uint8_t KNOCK = 255;
 };
 
 struct Traffic {
@@ -117,6 +129,11 @@ struct Traffic {
     std::vector<Cat> cats;
     std::vector<Train> trains; // Caltrain
     bool evHonk = false, evCrash = false;
+    std::vector<Vector3> honks;  // where cars honked since beginFrame (at most HONKS_MAX), for who's near enough to hear
+    static constexpr size_t HONKS_MAX = 32;
+    int hitCar = -1;            // interact: the car the skater just ran into (and stopped), else -1
+    bool logEvents = false;     // keep pedEvents (in a session)
+    std::vector<PedEvent> pedEvents;   // dodges and knock-downs this machine's skater set off, drained by the caller
     float clock = 0;            // drives the traffic signals: simTime, as a float (never accumulated on its own, so it
                                 // can't drift from simTime however long a session runs)
     double simTime = 0;         // time simulated (fixed steps of STEP, see advance); in a session, the session clock
@@ -157,6 +174,8 @@ struct Traffic {
     void interpolate(float alpha);
     int rideCar = -1;                  // the car (index) the skater was last carried on, -1 if none
     void interact(Player& p);
+    // another player's PedEvent, as they sent it: false if it doesn't fit this traffic (a person out of range)
+    bool applyPedEvent(const PedEvent& e);
     // put the roofs of the vehicles near `at` into w.vehicleTops, for the skater to land on (update does this each frame)
     void publishRoofs(World& w, Vector3 at) const;
     void carryRider(Player& pl, float dt);
@@ -177,7 +196,10 @@ struct Traffic {
     void serializeCars(const std::vector<int>& idx, std::vector<uint8_t>& out) const;
     // keepClose: a car already on the same route within a few cm and at the speed sent keeps its own state, so a
     // machine whose prediction was right stays bit-identical to the host instead of taking the rounding
-    bool applyCars(const uint8_t* data, size_t n, bool snapPos = true, bool keepClose = false);
+    // hold: cars this machine stopped itself (a skater ran into them) and the host hasn't yet: their records are
+    // skipped until one has them stopped too (then they're applied, and the car goes into *released)
+    bool applyCars(const uint8_t* data, size_t n, bool snapPos = true, bool keepClose = false, const std::vector<int>* hold = nullptr,
+                   std::vector<int>* released = nullptr);
     void serializeFull(std::vector<uint8_t>& out) const;
     bool applyFull(const uint8_t* data, size_t n);
     // the seed and the time a full snapshot was taken at, without applying it (false if it isn't one)

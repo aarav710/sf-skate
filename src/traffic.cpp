@@ -582,6 +582,7 @@ static Vector3 dogSpot(Ped& p, const World& w) {
 }
 
 void Traffic::beginFrame() {
+    honks.clear();
     for (auto& c : cars) { c.lastPos = c.vpos; c.lastYaw = c.vyaw; c.lastPitch = c.vpitch; c.lastPlaced = c.vplaced; }
 }
 
@@ -758,7 +759,10 @@ void Traffic::update(float dt, World& w, const std::vector<TrafficActor>& actors
             bool onRoof = fabsf(along) <= cm.halfLen && lat <= cm.halfWid && pp.y > c.pos.y + cm.height - 0.6f;   // its own rider
             if (along > 0 && along < look && lat < 2.3f && fabsf(pp.y - c.pos.y) < 3 && !onRoof) {
                 target = 0;
-                if (c.honkCD <= 0 && c.speed > 3 && along < 14) { evHonk = true; c.honkCD = 4; }
+                if (c.honkCD <= 0 && c.speed > 3 && along < 14) {
+                    evHonk = true; c.honkCD = 4;
+                    if (honks.size() < HONKS_MAX) honks.push_back(c.pos);
+                }
             }
         }
         c.honkCD -= dt;
@@ -1139,7 +1143,7 @@ void Traffic::update(float dt, World& w, const std::vector<TrafficActor>& actors
         float u01 = (ph % 1000) / 1000.f;
         bool distracted = p.carry == CARRY_PHONE || p.carry == CARRY_LAPTOP;
         float notice = distracted ? lerpf(3.5f, 7.f, u01) : lerpf(6.f, 14.f, u01);
-        if (p.evade == EV_NONE && dP2 < notice * notice && skSp > 3.f && pl.state != Player::BAIL) {
+        if (p.evade == EV_NONE && pl.local && dP2 < notice * notice && skSp > 3.f && pl.state != Player::BAIL) {
             Vector2 rel = {p.pos.x - pp.x, p.pos.z - pp.z};
             Vector2 perp = {-skDir.y, skDir.x};
             float along = Vector2DotProduct(rel, skDir), lat = Vector2DotProduct(rel, perp);
@@ -1174,7 +1178,9 @@ void Traffic::update(float dt, World& w, const std::vector<TrafficActor>& actors
                     off = Vector2Add(p.dodge, Vector2Scale(dir, dist));
                     if (kind == EV_DIVE && blocked(off)) kind = EV_HOP;   // nowhere to land a dive
                 }
-                startEvade(p, kind, dir, Vector2Length(Vector2Subtract(off, p.dodge)));
+                float d = Vector2Length(Vector2Subtract(off, p.dodge));
+                startEvade(p, kind, dir, d);
+                if (logEvents) pedEvents.push_back({(int)pi, (uint8_t)kind, dir, d});
             }
         }
         bool evading = p.evade != EV_NONE;
@@ -1393,8 +1399,19 @@ void Traffic::carryRider(Player& pl, float) {
 }
 
 // (against the vehicles and trains as drawn: where the skater sees them, and where their roofs are)
+bool Traffic::applyPedEvent(const PedEvent& e) {
+    if (e.ped < 0 || e.ped >= (int)peds.size()) return false;
+    Ped& p = peds[e.ped];
+    if (e.kind == PedEvent::KNOCK) { p.knock = 4.0f; return true; }
+    if (e.kind < EV_STEP || e.kind > EV_DIVE || !std::isfinite(e.dist) || !std::isfinite(e.dir.x) || !std::isfinite(e.dir.y)) return false;
+    if (p.knock > 0 || p.mode == 3) return true;   // (on the ground, or sitting: as for the sender, who'd not set them off then)
+    startEvade(p, e.kind, e.dir, e.dist);
+    return true;
+}
+
 void Traffic::interact(Player& pl) {
     evCrash = false;
+    hitCar = -1;
     if (pl.state == Player::BAIL) return;
     for (auto& t : trains) {
         for (int k = 0; k < 5; k++) {
@@ -1405,7 +1422,11 @@ void Traffic::interact(Player& pl) {
             if (dx * dx + dz * dz > 400) continue;
             float lx = dx * d.x + dz * d.y, lz = -dx * d.y + dz * d.x;
             if (fabsf(lx) > 13.3f || fabsf(lz) > 1.95f || pl.pos.y > c.y + 5.2f) continue;
-            if (t.v > 1) { pl.bail("Hit by Caltrain!"); evHonk = true; evCrash = true; return; }
+            if (t.v > 1) {
+                pl.bail("Hit by Caltrain!"); evHonk = true; evCrash = true;
+                if (honks.size() < HONKS_MAX) honks.push_back(pl.pos);
+                return;
+            }
             float push = 1.95f - fabsf(lz), sgn = lz > 0 ? 1.f : -1.f;
             pl.pos.x += -d.y * push * sgn; pl.pos.z += d.x * push * sgn;
             pl.speed *= 0.5f;
@@ -1433,6 +1454,8 @@ void Traffic::interact(Player& pl) {
             c.speed = 0;
             evHonk = true;
             evCrash = true;
+            hitCar = (int)(&c - cars.data());
+            if (honks.size() < HONKS_MAX) honks.push_back(c.pos);
             return;
         }
         // slow bump: push out
@@ -1446,6 +1469,7 @@ void Traffic::interact(Player& pl) {
         if (dx * dx + dz * dz > 0.55f * 0.55f || fabsf(pl.pos.y - p.pos.y) > 1.4f) continue;
         if (pl.hspeed() < 2.0f) continue;
         p.knock = 4.0f;
+        if (logEvents) pedEvents.push_back({(int)(&p - peds.data()), PedEvent::KNOCK, {0, 0}, 0});
         if (pl.hspeed() > 7.5f) pl.bail("Ran into a pedestrian");
         else { pl.speed *= 0.4f; pl.vel = Vector3Scale(pl.vel, 0.4f); pl.say("Sorry!", {255, 160, 120, 255}, "Watch where you're rolling"); }
         return;
@@ -2060,7 +2084,7 @@ static bool gridRouteOk(const Grid& g, int i, int j, int d, int pd, int nd) {
     return nd < 0 || g.edge(i + DI[d], j + DJ[d], nd);
 }
 
-bool Traffic::applyCars(const uint8_t* data, size_t size, bool snapPos, bool keepClose) {
+bool Traffic::applyCars(const uint8_t* data, size_t size, bool snapPos, bool keepClose, const std::vector<int>* hold, std::vector<int>* released) {
     // read and check the whole message first, so a bad one changes nothing
     struct Rec { int k, i, j, d, pd, nd; float x, y, z, yaw, speed, t, s, extra; uint8_t st, fl; uint16_t hops; };
     ByteReader b(data, size);
@@ -2095,6 +2119,10 @@ bool Traffic::applyCars(const uint8_t* data, size_t size, bool snapPos, bool kee
     }
     for (const Rec& r : recs) {
         Car& c = cars[r.k];
+        if (hold && std::find(hold->begin(), hold->end(), r.k) != hold->end()) {
+            if (r.st == 0 || r.st == 255 || r.speed > 0.01f) continue;   // (the host hasn't stopped it yet)
+            if (released) released->push_back(r.k);
+        }
         if (keepClose && c.placed && (r.fl & CF_PLACED) && (c.pdir > 0) == ((r.fl & CF_FWD) != 0) && fabsf(c.speed - r.speed) < 0.05f &&
             (c.mode == 0 ? c.i == r.i && c.j == r.j && c.d == r.d && c.pd == r.pd && c.nd == r.nd && c.hops == r.hops &&
                            fabsf(c.t - r.t) * c.g->sp < 0.03f

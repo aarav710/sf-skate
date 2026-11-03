@@ -1,6 +1,7 @@
 // Headless checks for shared traffic (traffic_sync): a host and a client Traffic joined by a simulated network link
 // (latency, jitter, loss), each with every player as an actor and the other's skater seen late, as over a real one.
 #include "../src/traffic_sync.h"
+#include "../src/gondola.h"
 #include <chrono>
 #include <cstdio>
 #include <future>
@@ -367,4 +368,348 @@ void netSimChecks(World& W, CheckFn check) {
     check(jr.fullOk && jr.atJoin.n > 5000 && jr.catchFrames > 5 && jr.catchMs < 150 && jr.near.n > 100 && jr.near.worst < 0.5f && jr.near.routeBad == 0 && jr.all.routeBad == 0 &&
           jr.atJoin.same > jr.atJoin.n * 9 / 10 && jr.atJoin.p90 < 1.f && jr.atJoinPlain.same < jr.atJoin.n / 2 && jr.atEnd.same > jr.atEnd.n * 9 / 10,
           "shared traffic: joining mid-session", b);
+
+    // ---------------------------------------------------------------- Stage 3b: events, the session clock elsewhere
+    // A reliable message (an EVENT): it always gets there, LAT + up to JIT later. to: 0 the host, 1 the client.
+    struct EvLink {
+        RNG r{31};
+        std::multimap<double, std::pair<int, netp::MsgEvent>> q;
+        void send(double t, int to, const netp::MsgEvent& m) { q.insert({t + 0.05 + 0.03 * r.f(), {to, m}}); }
+    };
+    // people near either skater at the same step on both machines: how far apart (median, 90th percentile, worst), and
+    // how many of them are mid-dodge on one machine and not the other
+    struct PedNear { int n = 0, evadeOdd = 0; std::vector<float> d; };
+    auto pedsNear = [&](const std::vector<PedRec>& h, const std::vector<uint8_t>& hEv, const Traffic& C, Vector3 a, Vector3 c2, PedNear& o) {
+        for (size_t k = 0; k < C.peds.size(); k++) {
+            const Ped& p = C.peds[k];
+            if (std::min(sq(h[k].pos.x - a.x) + sq(h[k].pos.z - a.z), sq(h[k].pos.x - c2.x) + sq(h[k].pos.z - c2.z)) > 25 * 25) continue;
+            o.n++;
+            o.d.push_back(sqrtf(sq(p.pos.x - h[k].pos.x) + sq(p.pos.z - h[k].pos.z)));
+            o.evadeOdd += (p.evade != EV_NONE) != (hEv[k] != EV_NONE);
+        }
+    };
+    auto pct = [](std::vector<float> v, float q) { if (v.empty()) return 0.f; std::sort(v.begin(), v.end()); return v[std::min(v.size() - 1, (size_t)(v.size() * q))]; };
+
+    // Host H and client C as in "client matches host". events: each machine decides the dodges its own skater causes
+    // and sends them (applied RemotePlayer::DELAY = 0.1 s after they arrive, when the sender is drawn there); without,
+    // each guesses the dodges for the other's skater too (as before). With events, the client also runs into a car at
+    // HIT_AT: stopped on the client at once and held against the snapshots, and a CAR_HIT to the host.
+    struct EvRun {
+        PedNear peds;
+        int sentH = 0, sentC = 0, appliedPed = 0;
+        bool hitDone = false;
+        int hitCar = -1;
+        double hostAge = -1, hostDelay = -1, heldFor = -1;   // the host's stop: how much later in traffic time, after how long; the hold
+        // the hit car: fastest on the client in its stop; client vs host while it settles (a stopped car eases the last
+        // metre onto its route point, the host's starting that much later) and from then on
+        float clientSpeed = 0, worstSettling = 0, worstAfter = 0, hostSpeedAt = 0;
+        int afterN = 0, applied = 0;
+    };
+    const double HIT_AT = 20;
+    auto runEvents = [&](bool events) {
+        EvRun out;
+        Traffic H, C;
+        H.init(W); C.init(W);
+        H.logEvents = C.logEvents = events;
+        TrafficSync ts, hts;
+        ts.synced = true; ts.wantFull = false;
+        Link link(LAT, JIT, LOSS, 23);
+        EvLink ev;
+        std::map<long long, std::vector<PedRec>> hostPeds;
+        std::map<long long, std::vector<uint8_t>> hostEv;
+        std::map<long long, Vector3> hostCar;
+        std::multimap<double, PedEvent> pedDue[2];
+        long long hitStep = -1, hostAppliedStep = -1;
+        double nextSend = 0;
+        // (both skate the sidewalks of the street, where the people are: on the host's side, and the other)
+        auto walker = [&](double t, int who) {
+            TrafficActor a = skater(t, who);
+            a.pos.z = n0.y + (who == 1 ? 1 : -1) * g.walkOff;
+            a.pos.y = W.terrain(a.pos.x, a.pos.z) + 0.05f;
+            return a;
+        };
+        for (int f = 0; f <= 60 * 60; f++) {
+            double t = f / 60.0;
+            std::vector<TrafficActor> ha{walker(t, 1), walker(t - SEEN_LATE, 2)}, ca{walker(t - SEEN_LATE, 1), walker(t, 2)};
+            if (events) { ha[1].local = false; ca[0].local = false; }
+            // events in: car hits to the host, people a little later
+            while (!ev.q.empty() && ev.q.begin()->first <= t) {
+                auto& e = ev.q.begin()->second;
+                PedEvent pe;
+                if (e.second.kind == netp::EVT_CAR_HIT) {
+                    if (TrafficSync::applyCarHit(H, e.second)) {
+                        hostAppliedStep = stepOf(H.simTime);
+                        out.hostAge = (hostAppliedStep - stepOf(e.second.simTime)) * (double)Traffic::STEP;
+                        out.hostDelay = t - HIT_AT;
+                    }
+                } else if (pedEventOf(e.second, &pe)) pedDue[e.first].insert({ev.q.begin()->first + 0.1, pe});
+                ev.q.erase(ev.q.begin());
+            }
+            for (int k = 0; k < 2; k++)
+                while (!pedDue[k].empty() && pedDue[k].begin()->first <= t) {
+                    out.appliedPed += (k ? C : H).applyPedEvent(pedDue[k].begin()->second);
+                    pedDue[k].erase(pedDue[k].begin());
+                }
+            float a;
+            hts.hostStep(H, W, ha, t, &a);
+            long long hs = stepOf(H.simTime);
+            if (hs % 10 == 0) {
+                hostPeds[hs] = pedsOf(H);
+                std::vector<uint8_t> e;
+                for (auto& p : H.peds) e.push_back(p.evade);
+                hostEv[hs] = e;
+            }
+            if (out.hitCar >= 0) hostCar[hs] = H.cars[out.hitCar].pos;
+            if (t >= nextSend - 1e-9) {
+                nextSend = std::max(nextSend + TrafficSync::INTERVAL, t);
+                for (auto& m : TrafficSync::snapshot(H, {skater(t - LAT - 0.015, 2).pos}, RTT)) link.send(t, m);
+            }
+            link.deliver(t, [&](const netp::MsgCarSnapshot& m) { ts.onCarSnapshot(m, t + 777, RTT, C); });
+            ts.step(C, W, ca, t + 777, &a);
+            long long cs = stepOf(C.simTime);
+            for (auto& e : H.pedEvents) { ev.send(t, 1, pedEventMsg(e)); out.sentH++; }
+            for (auto& e : C.pedEvents) { ev.send(t, 0, pedEventMsg(e)); out.sentC++; }
+            H.pedEvents.clear(); C.pedEvents.clear();
+            // the client's skater runs into the nearest car coming along the street (what interact does to it), and tells the host
+            if (events && !out.hitDone && t >= HIT_AT) {
+                Vector3 me = skater(t, 2).pos;
+                float best = 1e9f;
+                for (size_t k = 0; k < C.cars.size(); k++) {
+                    const Car& c = C.cars[k];
+                    float d2 = sq(c.pos.x - me.x) + sq(c.pos.z - me.z);
+                    if (c.placed && c.speed > 4 && d2 < 80 * 80 && d2 < best) { best = d2; out.hitCar = (int)k; }
+                }
+                if (out.hitCar >= 0) {
+                    out.hitDone = true;
+                    Car& c = C.cars[out.hitCar];
+                    c.stopT = 3; c.speed = 0;
+                    ev.send(t, 0, ts.carHit(C, out.hitCar));
+                    hitStep = cs;
+                }
+            }
+            if (hitStep >= 0) {
+                const Car& c = C.cars[out.hitCar];
+                double since = (cs - hitStep) * (double)Traffic::STEP;
+                if (since < 2.5) out.clientSpeed = std::max(out.clientSpeed, c.speed);
+                if (out.heldFor < 0 && ts.held() == 0) out.heldFor = since;
+                auto it = hostCar.find(cs);
+                if (it != hostCar.end() && hostAppliedStep >= 0 && cs > hostAppliedStep && since < 8) {
+                    float d = sqrtf(sq(c.pos.x - it->second.x) + sq(c.pos.z - it->second.z));
+                    if (since < 0.8) out.worstSettling = std::max(out.worstSettling, d);
+                    else { out.worstAfter = std::max(out.worstAfter, d); out.afterN++; }
+                    if (since > 4.5 && since < 4.6) out.hostSpeedAt = H.cars[out.hitCar].speed;
+                }
+            }
+            auto ip = hostPeds.find(cs);
+            if (ip != hostPeds.end() && t > 5) {
+                pedsNear(ip->second, hostEv[cs], C, walker(t, 1).pos, walker(t, 2).pos, out.peds);
+                hostPeds.erase(hostPeds.begin(), ip);
+                hostEv.erase(hostEv.begin(), hostEv.find(cs));
+            }
+        }
+        out.applied = ts.applied;
+        return out;
+    };
+
+    // Host handover: H hosts A and B (A's skater stands off to the side, B's skates the street). At MIG H leaves; A hosts
+    // from its own session clock on (TrafficSync::becomeHost), B carries on toward A's. 0.2 s before, B ran into a car:
+    // the CAR_HIT went to the room, but H had already stopped answering (it left by timing out); A, who hosts next,
+    // applies it.
+    struct MigRun {
+        double worstStepA = 0, worstStepB = 0, worstAB = 0, worstHB = 0;   // the session clocks: frame-to-frame steps off dt; A vs B; H vs B
+        int appliedBefore = 0, appliedAfter = 0;
+        double firstAfter = -1;
+        Cmp nearB;
+        bool hitStopped = false;
+        float hitErr = -1;
+        size_t heldAtEnd = 0;
+    };
+    const double MIG = 30;
+    auto runMigrate = [&] {
+        MigRun out;
+        Traffic H, A, B;
+        H.init(W); A.init(W); B.init(W);
+        TrafficSync hts, ats, bts;
+        ats.synced = bts.synced = true; ats.wantFull = bts.wantFull = false;
+        Link toA(LAT, JIT, LOSS, 41), toB(LAT, JIT, LOSS, 43), aToB(LAT, JIT, LOSS, 47);
+        EvLink ev;
+        Vector3 aSpot = {n0.x + 3 * g.sp, 0, n0.y + 40};
+        aSpot.y = W.terrain(aSpot.x, aSpot.z);
+        auto stand = [&](bool local) { TrafficActor x; x.pos = aSpot; x.local = local; return x; };
+        // (ids: H 1, A 2, B 3; each sees the others late)
+        auto actors = [&](double t, int me) {
+            std::vector<TrafficActor> v;
+            if (t < MIG) { TrafficActor h = skater(me == 1 ? t : t - SEEN_LATE, 1); h.local = me == 1; v.push_back(h); }
+            v.push_back(stand(me == 2));
+            TrafficActor b = skater(me == 3 ? t : t - SEEN_LATE, 2); b.local = me == 3; v.push_back(b);
+            return v;
+        };
+        std::map<long long, std::vector<CarRec>> aAt;
+        double prevA = -1, prevB = -1, prevT = -1, nextSend = 0;
+        int hitCar = -1;
+        bool hit = false, bSwitched = false;
+        for (int f = 0; f <= 60 * (int)(MIG + 15); f++) {
+            double t = f / 60.0;
+            bool hGone = t >= MIG, bKnows = t >= MIG + 0.03;   // (HOST_CHANGED reaches B a little after A)
+            float a;
+            if (!hGone) {
+                hts.hostStep(H, W, actors(t, 1), t, &a);
+                if (t >= nextSend - 1e-9) {
+                    nextSend = std::max(nextSend + TrafficSync::INTERVAL, t);
+                    for (auto& m : TrafficSync::snapshot(H, {aSpot, skater(t - LAT - 0.015, 2).pos}, RTT)) { toA.send(t, m); toB.send(t, m); }
+                }
+            } else if (f == (int)(MIG * 60)) {
+                toA.q.clear(); toB.q.clear();   // (the relay drops the old host's: it's gone)
+                ats.becomeHost(A, t + 500);
+                nextSend = t;
+            }
+            // events: B's hit goes to the room (H and A); H never gets it
+            while (!ev.q.empty() && ev.q.begin()->first <= t) {
+                const netp::MsgEvent& e = ev.q.begin()->second.second;
+                ats.noteHit(e, A);   // (H: not answering any more)
+                if (hGone) TrafficSync::applyCarHit(A, e);
+                ev.q.erase(ev.q.begin());
+            }
+            if (!hGone) {
+                toA.deliver(t, [&](const netp::MsgCarSnapshot& m) { ats.onCarSnapshot(m, t + 500, RTT, A); });
+                ats.step(A, W, actors(t, 2), t + 500, &a);
+            } else {
+                ats.hostStep(A, W, actors(t, 2), t + 500, &a);
+                if (t >= nextSend - 1e-9) {
+                    nextSend = std::max(nextSend + TrafficSync::INTERVAL, t);
+                    for (auto& m : TrafficSync::snapshot(A, {skater(t - LAT - 0.015, 2).pos}, RTT)) aToB.send(t, m);
+                }
+                long long as = stepOf(A.simTime);
+                if (as % 20 == 0) aAt[as] = carsOf(A);
+            }
+            if (bKnows && !bSwitched) { bSwitched = true; bts.hostChanged(); toB.q.clear(); out.appliedBefore = bts.applied; }
+            toB.deliver(t, [&](const netp::MsgCarSnapshot& m) { if (!bKnows) bts.onCarSnapshot(m, t + 777, RTT, B); });
+            aToB.deliver(t, [&](const netp::MsgCarSnapshot& m) { if (bKnows) bts.onCarSnapshot(m, t + 777, RTT, B); });
+            bts.step(B, W, actors(t, 3), t + 777, &a);
+            // B runs into a car 0.2 s before H leaves
+            if (!hit && t >= MIG - 0.2) {
+                hit = true;
+                Vector3 me = skater(t, 2).pos;
+                float best = 1e9f;
+                for (size_t k = 0; k < B.cars.size(); k++) {
+                    const Car& c = B.cars[k];
+                    float d2 = sq(c.pos.x - me.x) + sq(c.pos.z - me.z);
+                    if (c.placed && c.speed > 4 && d2 < 80 * 80 && d2 < best) { best = d2; hitCar = (int)k; }
+                }
+                if (hitCar >= 0) {
+                    B.cars[hitCar].stopT = 3; B.cars[hitCar].speed = 0;
+                    ev.send(t, 0, bts.carHit(B, hitCar));
+                }
+            }
+            // the session clocks, every frame (H's: its traffic time, running on)
+            double sa, sb, sh;
+            bool okA = ats.sessionNow(hGone, t + 500, &sa), okB = bts.sessionNow(false, t + 777, &sb), okH = !hGone && hts.sessionNow(true, t, &sh);
+            if (t > 10 && okA && okB) {
+                if (prevA >= 0) {
+                    out.worstStepA = std::max(out.worstStepA, fabs((sa - prevA) - (t - prevT)));
+                    out.worstStepB = std::max(out.worstStepB, fabs((sb - prevB) - (t - prevT)));
+                }
+                if (t > MIG + 5) out.worstAB = std::max(out.worstAB, fabs(sa - sb));
+                if (okH) out.worstHB = std::max(out.worstHB, fabs(sh - sb));
+                prevA = sa; prevB = sb; prevT = t;
+            }
+            if (bKnows && out.firstAfter < 0 && bts.applied > out.appliedBefore) out.firstAfter = t - MIG;
+            long long bs = stepOf(B.simTime);
+            auto it = aAt.find(bs);
+            if (it != aAt.end()) {
+                if (t > MIG + 4) compareNear(it->second, B, skater(t, 2).pos, 100, out.nearB);
+                if (hitCar >= 0 && t > MIG + 0.5 && t < MIG + 2.5) {   // (still in its 3 s stop)
+                    out.hitStopped = (out.hitErr < 0 || out.hitStopped) && A.cars[hitCar].speed == 0 && B.cars[hitCar].speed == 0;
+                    out.hitErr = std::max(out.hitErr, sqrtf(sq(it->second[hitCar].pos.x - B.cars[hitCar].pos.x) + sq(it->second[hitCar].pos.z - B.cars[hitCar].pos.z)));
+                }
+                aAt.erase(aAt.begin(), it);
+            }
+        }
+        out.appliedAfter = bts.applied - out.appliedBefore;
+        out.heldAtEnd = bts.held();
+        return out;
+    };
+
+    auto e1 = std::async(std::launch::async, runEvents, true), e2 = std::async(std::launch::async, runEvents, false);
+    auto m1 = std::async(std::launch::async, runMigrate);
+    {   // gondolas on the session clock: where they are at a time doesn't depend on how they got there (a pause, a join),
+        // and is where running them all along would have them
+        Gondolas G1, G2, G3;
+        G1.init(W); G2.init(W); G3.init(W);
+        for (int f = 0; f < 60 * 300; f++) {
+            if (f < 60 * 100 || f > 60 * 140) G1.update(1 / 60.f, W);   // (paused 40 s)
+            G3.update(1 / 60.f, W);
+        }
+        G1.setTime(300, W); G2.setTime(300, W);
+        float same = 0, along = 0;
+        for (size_t k = 0; k < G1.cabins.size(); k++) {
+            float L2 = 2 * W.gondolas[G1.cabins[k].line].len, d = fabsf(G2.cabins[k].u - G3.cabins[k].u);
+            same = std::max(same, fabsf(G1.cabins[k].u - G2.cabins[k].u));
+            along = std::max(along, std::min(d, L2 - d));
+        }
+        snprintf(b, sizeof b, "%zu cabins at 300 s: paused for 40 s or not, worst %.4f m apart; against running all along, worst %.2f m", G1.cabins.size(), same, along);
+        check(G1.cabins.size() > 10 && same == 0 && along < 0.5f, "gondolas on the session clock", b);
+    }
+    {   // a knock-down and a dodge as events: through the wire format and onto the same person; anything out of range refused
+        Traffic T1;
+        T1.init(W);
+        int walker = -1;
+        for (size_t k = 0; k < T1.peds.size() && walker < 0; k++) if (T1.peds[k].mode == 0) walker = (int)k;
+        PedEvent kn{walker, PedEvent::KNOCK, {0, 0}, 0}, dv{walker + 1, EV_DIVE, {0, 1}, 3.f}, got;
+        auto through = [&](const PedEvent& e) {
+            netp::MsgEvent m;
+            std::vector<uint8_t> bytes = netp::pack(pedEventMsg(e));
+            return netp::unpack(bytes.data(), bytes.size(), m) && pedEventOf(m, &got) && T1.applyPedEvent(got);
+        };
+        bool ok = walker >= 0 && through(kn) && T1.peds[walker].knock == 4.0f && T1.peds[walker].evade == EV_NONE;
+        bool dive = T1.peds[walker + 1].mode == 3 || (through(dv) && T1.peds[walker + 1].evade == EV_DIVE && T1.peds[walker + 1].evTo.y == T1.peds[walker + 1].evFrom.y + 3.f);
+        PedEvent out{(int)T1.peds.size(), PedEvent::KNOCK, {0, 0}, 0}, neg{-1, EV_STEP, {1, 0}, 1};
+        bool refused = !T1.applyPedEvent(out) && !T1.applyPedEvent(neg);
+        snprintf(b, sizeof b, "person %d knocked down %d, the next one dives the same way %d; person %zu and -1 refused %d", walker, (int)ok, (int)dive,
+                 T1.peds.size(), (int)refused);
+        check(ok && dive && refused, "people events applied", b);
+    }
+    {   // honks: in a session the cars honk at every player; only those near you are heard
+        Traffic T1;
+        T1.init(W);
+        int honkSteps = 0, nearHeard = 0, farHeard = 0;
+        Vector3 far = {n0.x + 1200, 0, n0.y + 900};
+        TrafficActor sk;   // (standing in a lane, mid-block: cars come up on them and honk)
+        sk.pos = {n0.x + 2.5f * g.sp, 0, n0.y + 2.4f};
+        sk.pos.y = W.terrain(sk.pos.x, sk.pos.z) + 0.05f;
+        for (int f = 0; f < 60 * 60; f++) {
+            T1.beginFrame();
+            T1.update(Traffic::STEP, W, {sk});
+            honkSteps += T1.evHonk;
+            nearHeard += T1.evHonk && honkNear(T1, sk.pos);
+            farHeard += honkNear(T1, far);
+        }
+        snprintf(b, sizeof b, "60 s standing in a lane: %d steps with a honk; heard by the skater %d, by someone 1.5 km away %d", honkSteps, nearHeard, farHeard);
+        check(honkSteps > 0 && nearHeard == honkSteps && farHeard == 0, "honks heard only nearby", b);
+    }
+    EvRun ev = e1.get(), noEv = e2.get();
+    MigRun mg = m1.get();
+    snprintf(b, sizeof b, "car %d hit by the client at %.0f s: stopped on the host %.0f ms later (%.0f ms on in traffic time), held on the client %.2f s, "
+             "fastest there in its stop %.2f m/s; settling in 0.8 s, up to %.3f m apart; then %d steps compared (stopped, and driving on), worst %.3f m; "
+             "host speed 4.5 s on %.1f; snapshot parts applied %d",
+             ev.hitCar, HIT_AT, ev.hostDelay * 1000, ev.hostAge * 1000, ev.heldFor, ev.clientSpeed, ev.worstSettling, ev.afterN, ev.worstAfter, ev.hostSpeedAt,
+             ev.applied);
+    check(ev.hitCar >= 0 && ev.hostDelay >= 0 && ev.hostDelay < 0.15 && ev.hostAge < 0.3 && ev.heldFor > 0 && ev.heldFor < 1.0 && ev.clientSpeed == 0 &&
+          ev.worstSettling < 1.f && ev.afterN > 200 && ev.worstAfter < 0.05f && ev.hostSpeedAt > 0.5f,
+          "car hit: the host stops the car where the client did", b);
+    PedNear& pe = ev.peds, &pn = noEv.peds;
+    snprintf(b, sizeof b, "people within 25 m of a skater, %d samples: with events (%d sent by the host, %d by the client, %d applied): %.2f/%.2f/%.2f m apart "
+             "(median/90%%/worst), %.2f%% mid-dodge on one side only; each guessing the other's (%d samples): %.2f/%.2f/%.2f m, %.2f%%",
+             pe.n, ev.sentH, ev.sentC, ev.appliedPed, pct(pe.d, 0.5f), pct(pe.d, 0.9f), pct(pe.d, 1.f), pe.n ? 100.0 * pe.evadeOdd / pe.n : 0,
+             pn.n, pct(pn.d, 0.5f), pct(pn.d, 0.9f), pct(pn.d, 1.f), pn.n ? 100.0 * pn.evadeOdd / pn.n : 0);
+    check(pe.n > 1000 && ev.sentH > 5 && ev.sentC > 5 && ev.appliedPed == ev.sentH + ev.sentC && pct(pe.d, 0.9f) < 0.5f &&
+          pct(pe.d, 1.f) < pct(pn.d, 1.f), "people dodge the same for everyone", b);
+    snprintf(b, sizeof b, "session clock steps off the frame time by at most %.2f ms (new host) / %.2f ms (client); old host vs client %.1f ms, new host vs client "
+             "%.1f ms; client's snapshot parts: %d before, %d after (first %.2f s after); then near the client %d samples, worst %.3f m, %d off route; "
+             "the car hit just before: stopped on both %d, %.3f m apart; cars held at the end %zu",
+             mg.worstStepA * 1000, mg.worstStepB * 1000, mg.worstHB * 1000, mg.worstAB * 1000, mg.appliedBefore, mg.appliedAfter, mg.firstAfter, mg.nearB.n,
+             mg.nearB.worst, mg.nearB.routeBad, (int)mg.hitStopped, mg.hitErr, mg.heldAtEnd);
+    check(mg.worstStepA < 0.005 && mg.worstStepB < 0.005 && mg.worstHB < 0.05 && mg.worstAB < 0.05 && mg.appliedAfter > 300 && mg.firstAfter >= 0 && mg.firstAfter < 2 &&
+          mg.nearB.n > 100 && mg.nearB.worst < 0.5f && mg.nearB.routeBad == 0 && mg.hitStopped && mg.hitErr >= 0 && mg.hitErr < 0.05f,
+          "host handover: the clock carries on", b);
 }

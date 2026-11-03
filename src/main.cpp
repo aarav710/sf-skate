@@ -465,10 +465,15 @@ static void syncRemotes(double now, std::vector<std::pair<std::string, Color>>& 
 
 // Everyone the traffic reacts to: this skater and every other player here, in player id order (the same order on
 // every machine, so the same players make the same traffic). Anyone on a train or in a seaplane is out of its way.
-static uint8_t gMyVehicle = netp::PlayerState::ON_FOOT;   // what this player rides (a PlayerState::Vehicle), as sent
+static const bool* gRideOn = nullptr;   // main's Caltrain ride (ride.on)
+// what this player rides (a PlayerState::Vehicle), as sent
+static uint8_t myVehicle() {
+    return JS.riding ? netp::PlayerState::JETSKI : SP.riding ? netp::PlayerState::SEAPLANE
+         : gRideOn && *gRideOn ? netp::PlayerState::TRAIN : netp::PlayerState::ON_FOOT;
+}
 static std::vector<TrafficActor> trafficActors() {
     std::vector<std::pair<uint8_t, TrafficActor>> v;
-    if (inTraffic(gMyVehicle)) v.push_back({RM.myId, TrafficActor::of(P)});
+    if (inTraffic(myVehicle())) v.push_back({RM.myId, TrafficActor::of(P)});
     for (auto& r : RM.list)
         if (r.hasPose && !r.leaving && inTraffic(r.cur.vehicle)) v.push_back({r.id, actorOf(r.cur)});
     std::stable_sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
@@ -493,6 +498,25 @@ static void advanceTraffic(float dt) {
     T.advance(dt, W, P, actors);
 }
 
+// Other players' events, and ours: car hits go to the host (TrafficSync), people dodging or knocked down by another
+// player do the same here, when that player is drawn there (RemotePlayer::DELAY behind what they sent).
+static void syncEvents(double now) {
+    static std::deque<std::pair<double, PedEvent>> peds;   // (when to apply it)
+    T.logEvents = true;
+    if (!NET.remotes.empty()) for (const PedEvent& e : T.pedEvents) NET.sendEvent(pedEventMsg(e), now);
+    T.pedEvents.clear();
+    for (const EventIn& in : NET.eventInbox) {
+        PedEvent pe;
+        if (in.m.kind == netp::EVT_CAR_HIT) {
+            TS.noteHit(in.m, T);
+            if (NET.isHost()) TS.applyCarHit(T, in.m);
+        } else if (pedEventOf(in.m, &pe)) peds.push_back({in.recvAt + RemotePlayer::DELAY, pe});
+    }
+    NET.eventInbox.clear();
+    while (!peds.empty() && peds.front().first <= now) { T.applyPedEvent(peds.front().second); peds.pop_front(); }
+    while (peds.size() > 256) peds.pop_front();
+}
+
 // Shared traffic, once a frame after the net client's service: the host sends its cars near the others 10 times a
 // second and a full snapshot to whoever asks; everyone else hands what came in to TS and asks for a full snapshot
 // until one comes.
@@ -503,15 +527,18 @@ static void syncTraffic(double now) {
     static std::vector<uint8_t> waiting;                        // asked again while one was on its way
     if (NET.status != Net::IN_SESSION) {   // (out of the session, or never in one): on our own again
         if (host) { TS.reset(); T.acc = 0; host = 0; lastFull.clear(); waiting.clear(); carTimer.reset(); }
+        T.logEvents = false;
+        T.pedEvents.clear();
         return;
     }
     if (NET.hostId != host) {
         if (host) {
-            if (NET.isHost()) { TS.reset(); T.acc = 0; }   // our traffic is the session's now: it runs on our frames
+            if (NET.isHost()) TS.becomeHost(T, now);   // our traffic is the session's now: it runs on our clock, from where it was
             else TS.hostChanged();
         }
         host = NET.hostId;
     }
+    syncEvents(now);
     if (NET.isHost()) {
         if (!NET.remotes.empty() && carTimer.due(now)) {
             carTimer.fired(now);
@@ -861,6 +888,7 @@ int main(int argc, char** argv) {
     bool showHelp = true, showMap = false, title = true, paused = false;
     bool picker = true;   // landmark / time-of-day chooser (start screen and Tab mid-game)
     struct Ride { bool on = false; float s = 0, target = 0, v = 0; int dir = 1, dest = 0; } ride; // Caltrain trip
+    gRideOn = &ride.on;
     const int menloStation = (int)W.stations.size() - 1;
     int pickIdx = 0;
     const char* lastDistrict = "";
@@ -898,8 +926,6 @@ int main(int argc, char** argv) {
         float dt = std::min(GetFrameTime(), 1.f / 30.f);
         float now = (float)GetTime();
         gTrafficRan = false;
-        gMyVehicle = JS.riding ? netp::PlayerState::JETSKI : SP.riding ? netp::PlayerState::SEAPLANE
-                   : ride.on ? netp::PlayerState::TRAIN : netp::PlayerState::ON_FOOT;
         int sw = GetScreenWidth(), sh2 = GetScreenHeight();
 
         if (autotest && getenv("SFSKATE_RIDE")) { // test hook: ride the train south and take a few shots
@@ -973,6 +999,14 @@ int main(int argc, char** argv) {
         }
         // ---------------- input
         bool justStarted = false;
+        // the time of day and weather, as the session has them (the host decides them; see below)
+        auto worldNow = [&] {
+            netp::MsgWorldSettings w;
+            w.preset = (uint8_t)preset;
+            w.flags = (heavyFog ? netp::MsgWorldSettings::F_FOG : 0) | (WX.raining ? netp::MsgWorldSettings::F_RAIN : 0);
+            return w;
+        };
+        const netp::MsgWorldSettings worldBefore = worldNow();
         auto setCops = [&](bool on) { // game mode: free roam (no police) or cop chase
             if (CH.on == on) return;
             CH.on = on;
@@ -1075,6 +1109,13 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // in a session only the host changes them: anyone else's key press asks the host, and they change when the
+        // host sends them back (to everyone)
+        if (NET.status == Net::IN_SESSION && !NET.isHost() && worldNow() != worldBefore) {
+            NET.setWorld(worldNow(), GetTime());
+            preset = worldBefore.preset; heavyFog = worldBefore.fog(); WX.raining = worldBefore.rain();
+            P.say("Asked the host", {255, 225, 160, 255}, "The host sets the time of day and the weather");
+        }
         if (!title && !picker && IsKeyPressed(KEY_R)) { if (JS.riding) { JS.skis[JS.cur].pos = P.pos; JS.riding = false; JS.cur = -1; } if (SP.riding) { SP.riding = false; SP.cur = -1; } P.respawnSafe(W); P.say("Reset", WHITE); }
 
         Input in;
@@ -1113,7 +1154,11 @@ int main(int argc, char** argv) {
 
         // ---------------- update
         // wrapped at 75 * 76 s, a whole number of jet (75 s) and AirTrain (76 s) loops, so nothing jumps at the wrap
-        if (!paused && !showMap && (!picker || title)) airT = fmodf(airT + dt, 75.f * 76.f);
+        // In a session they go by the session clock instead: the planes are where everyone else sees them, pause or not.
+        double sessT = 0;
+        bool sessClock = NET.status == Net::IN_SESSION && TS.sessionNow(NET.isHost(), GetTime(), &sessT);
+        if (sessClock) airT = (float)fmod(sessT, 75.0 * 76.0);
+        else if (!paused && !showMap && (!picker || title)) airT = fmodf(airT + dt, 75.f * 76.f);
         bool running = !title && !paused && !showMap && !picker && !ride.on && !JS.riding && !SP.riding;
         // Caltrain: board at a station platform with E
         int nearStation = -1;
@@ -1210,6 +1255,8 @@ int main(int argc, char** argv) {
             P.update(dt, in, W);
             advanceTraffic(dt);
             T.interact(P);
+            // a car we ran into is the session's: the host stops it (we have already, here, until its snapshots do)
+            if (T.hitCar >= 0 && NET.status == Net::IN_SESSION && !NET.isHost() && TS.synced) NET.sendEvent(TS.carHit(T, T.hitCar), GetTime());
             {
                 Jet jets[2];
                 airTraffic(airT, jets);
@@ -1256,7 +1303,8 @@ int main(int argc, char** argv) {
         if (P.evSplash) S.play(S.splash, 1.0f);
         else if (P.evBail) S.play(S.bail, 0.9f);
         if (P.evGrindStart) S.play(S.clack, 1.0f, 0.7f);
-        if (T.evHonk) S.play(S.honk, 0.6f, 1.0f + GetRandomValue(-15, 15) / 100.f);
+        // (in a session, cars honk at every player: only the ones nearby are heard)
+        if (NET.status == Net::IN_SESSION ? honkNear(T, ride.on ? cam.target : P.pos) : T.evHonk) S.play(S.honk, 0.6f, 1.0f + GetRandomValue(-15, 15) / 100.f);
         float spd = P.hspeed();
         if (ride.on) S.setLevels(0.25f + ride.v / 160.f, 0, ride.v / 200.f);
         else if (SP.riding) S.setLevels(0.2f + 0.45f * SP.throttle, 0, SP.speed / 50.f);
@@ -1350,7 +1398,8 @@ int main(int argc, char** argv) {
         }
 
         // sky & fog
-        if (!paused) GO.update(dt, W);
+        if (sessClock) GO.setTime(sessT, W);   // (the session's, as the planes)
+        else if (!paused) GO.update(dt, W);
         sky = lerpSky(sky, PRESETS[preset], skySnap ? 1.f : 1 - expf(-dt * 2.0f));
         skySnap = false;
         if (!paused) {
@@ -1683,11 +1732,20 @@ int main(int argc, char** argv) {
             }
             for (auto& l : NET.log) TraceLog(LOG_INFO, "SFSKATE: net: %s", l.c_str());
             NET.log.clear();
-            if (NET.stateDue(tn)) {
-                uint8_t veh = JS.riding ? netp::PlayerState::JETSKI : SP.riding ? netp::PlayerState::SEAPLANE
-                            : ride.on ? netp::PlayerState::TRAIN : netp::PlayerState::ON_FOOT;
-                NET.sendState(captureState(P, netMe, veh), tn);
+            if (NET.stateDue(tn)) NET.sendState(captureState(P, netMe, myVehicle()), tn);
+            // the session's time of day and weather: the host's came in (or, hosting, someone's request we took), or
+            // we host and ours changed
+            if (NET.worldIn) {
+                NET.worldIn = false;
+                netp::MsgWorldSettings was = worldNow(), w = NET.world;
+                preset = w.preset; heavyFog = w.fog(); WX.raining = w.rain();
+                const RemotePlayer* who = RM.find(NET.worldFrom);
+                std::string by = who && NET.worldFrom != NET.hostId ? " (asked by " + who->name + ")" : "";
+                if (w.preset != was.preset) P.say(PRESET_NAMES[w.preset], {255, 225, 160, 255}, "Time of day" + by);
+                else if (w.rain() != was.rain()) P.say(w.rain() ? "Rain" : "Clearing up", {190, 210, 235, 255}, "Weather" + by);
+                else if (w.fog() != was.fog()) P.say(w.fog() ? "Fog rolling in" : "Fog lifting", {190, 210, 235, 255}, "Weather" + by);
             }
+            if (NET.isHost() && (!NET.worldSet || NET.world != worldNow())) NET.setWorld(worldNow(), tn);
             std::vector<std::pair<std::string, Color>> toasts;
             syncRemotes(tn, toasts);
             netLogCars();

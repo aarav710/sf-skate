@@ -373,6 +373,7 @@ void Traffic::init(World& w, uint32_t seed) {
         trains.push_back({w.stations[0].s, 1, 0, 8});
         trains.push_back({w.stations.back().s, -1, 0, 20});
         trains.push_back({w.stations[2].s, 1, 0, 2});
+        for (Train& t : trains) t.prevS = t.vs = t.s;
     }
     for (int pi = 0; pi < (int)w.pedPaths.size(); pi++) {
         const Path& P = w.pedPaths[pi];
@@ -581,12 +582,26 @@ static Vector3 dogSpot(Ped& p, const World& w) {
 }
 
 void Traffic::beginFrame() {
-    for (auto& c : cars) { c.lastPos = c.pos; c.lastYaw = c.yaw; c.lastPitch = c.pitch; c.lastPlaced = c.placed; }
+    for (auto& c : cars) { c.lastPos = c.vpos; c.lastYaw = c.vyaw; c.lastPitch = c.vpitch; c.lastPlaced = c.vplaced; }
+}
+
+void Traffic::interpolate(float alpha) {
+    for (auto& c : cars) {
+        if (alpha >= 1 || !c.prevPlaced) { c.vpos = c.pos; c.vyaw = c.yaw; c.vpitch = c.pitch; }
+        else {
+            c.vpos = Vector3Lerp(c.prevPos, c.pos, alpha);
+            c.vyaw = wrapPi(lerpAngle(c.prevYaw, c.yaw, alpha));
+            c.vpitch = lerpf(c.prevPitch, c.pitch, alpha);
+        }
+        c.vplaced = c.placed;
+    }
+    for (auto& t : trains) t.vs = alpha >= 1 ? t.s : lerpf(t.prevS, t.s, alpha);
 }
 
 void Traffic::update(float dt, World& w, Player& pl) {
     beginFrame();
     update(dt, w, std::vector<TrafficActor>{TrafficActor::of(pl)});
+    interpolate(1);   // (drawn where they are: one step a frame)
     carryRider(pl, dt);
     publishRoofs(w, pl.pos);
 }
@@ -606,7 +621,10 @@ int Traffic::advance(float frameDt, World& w, Player& pl) {
     bool honk = false;
     for (int k = 0; k < n; k++) { update(STEP, w, actors); honk |= evHonk; }
     evHonk = honk;
-    carryRider(pl, frameDt);   // (no steps: the cars haven't moved, and neither does the skater on one)
+    // drawn between the last two steps, so they move smoothly every frame however many steps the frame ran (none,
+    // at 144 Hz, most frames); the roofs, the roof ride and the collisions all go by the same drawn places
+    interpolate((float)(acc / STEP));
+    carryRider(pl, frameDt);
     publishRoofs(w, pl.pos);
     return n;
 }
@@ -615,6 +633,8 @@ void Traffic::update(float dt, World& w, const std::vector<TrafficActor>& actors
     evHonk = false;
     clock += dt;
     simTime += dt;
+    for (auto& c : cars) { c.prevPos = c.pos; c.prevYaw = c.yaw; c.prevPitch = c.pitch; c.prevPlaced = c.placed; }
+    for (auto& t : trains) t.prevS = t.s;
     // the actor nearest a spot (on the ground plan), or null if there's nobody
     auto nearest = [&](Vector3 at, float* d2) -> const TrafficActor* {
         const TrafficActor* best = nullptr;
@@ -1309,26 +1329,26 @@ static VehicleTop roofAt(int type, Vector3 pos, float yaw, float pitch) {
     float cp = cosf(pitch);
     return {pos.x, pos.z, cosf(yaw), sinf(yaw), m.halfLen * cp, m.halfWid, pos.y + (m.height - 0.1f) * cp, tanf(pitch)};
 }
-static VehicleTop roofOf(const Car& c) { return roofAt(c.type, c.pos, c.yaw, c.pitch); }
+static VehicleTop roofOf(const Car& c) { return roofAt(c.type, c.vpos, c.vyaw, c.vpitch); }   // (as drawn)
 static VehicleTop roofBefore(const Car& c) { return roofAt(c.type, c.lastPos, c.lastYaw, c.lastPitch); }   // (at the start of this update)
 
 void Traffic::publishRoofs(World& w, Vector3 at) const {
     w.vehicleTops.clear();
     for (const Car& c : cars) {
-        if (!c.placed) continue;
+        if (!c.vplaced) continue;
         const CarModel& m = carModel(c.type);
-        if (sq(c.pos.x - at.x) + sq(c.pos.z - at.z) > sq(40 + m.halfLen)) continue;   // the skater covers < 1 m a frame
+        if (sq(c.vpos.x - at.x) + sq(c.vpos.z - at.z) > sq(40 + m.halfLen)) continue;   // the skater covers < 1 m a frame
         w.vehicleTops.push_back(roofOf(c));
     }
 }
 
 // A skater riding on a car's roof goes where the car goes. The roofs the skater rode on were published at the end of
-// the last update, i.e. at each car's lastPos/lastYaw/lastPitch; the car has since moved on, so take the skater's spot
+// the last frame, i.e. at each car's lastPos/lastYaw/lastPitch; the car has since moved on, so take the skater's spot
 // on the old roof (in the car's frame) to the same spot on the new one, turning with the car about its centre. Speed
 // stays relative to the car: landing on a moving roof takes the car's velocity off the skater's, and riding along
 // adds nothing to it. Done after the cars move and before the roofs are republished (the player updates first, on
 // last frame's roofs), so the roof is under the skater's feet next frame: no lag to jitter or slide off at speed.
-void Traffic::carryRider(Player& pl, float dt) {
+void Traffic::carryRider(Player& pl, float) {
     int was = rideCar;
     rideCar = -1;
     if (pl.state != Player::RIDE) return;
@@ -1350,25 +1370,28 @@ void Traffic::carryRider(Player& pl, float dt) {
     rideCar = on;
     if (on < 0) return;
     const Car& c = cars[on];
-    float dyaw = wrapPi(c.yaw - c.lastYaw);
-    Vector3 d = Vector3Subtract(c.pos, c.lastPos);
-    if (!c.placed || fabsf(dyaw) > 0.5f || d.x * d.x + d.z * d.z > 6 * 6) return;   // (jumped, not driven)
+    float dyaw = wrapPi(c.vyaw - c.lastYaw);
+    Vector3 d = Vector3Subtract(c.vpos, c.lastPos);
+    if (!c.vplaced || fabsf(dyaw) > 0.5f || d.x * d.x + d.z * d.z > 6 * 6) return;   // (jumped, not driven)
     VehicleTop r0 = roofBefore(c), r1 = roofOf(c);
     float dx = pl.pos.x - r0.x, dz = pl.pos.z - r0.z;
     float lx = dx * r0.fx + dz * r0.fz, lz = -dx * r0.fz + dz * r0.fx;
-    if (was != on) pl.speed -= (d.x * cosf(pl.yaw) + d.z * sinf(pl.yaw)) / std::max(dt, 1e-4f);   // just landed
+    // just landed: the car's own velocity (not how far it went this frame, which depends on how many steps the frame
+    // happened to run), along the skater's heading
+    if (was != on) pl.speed -= c.speed * cosf(c.vpitch) * cosf(c.vyaw - pl.yaw);
     pl.pos.x = r1.x + lx * r1.fx - lz * r1.fz;
     pl.pos.z = r1.z + lx * r1.fz + lz * r1.fx;
     pl.pos.y += (r1.y + lx * r1.slope) - (r0.y + lx * r0.slope);
     pl.yaw = wrapPi(pl.yaw + dyaw);
 }
 
+// (against the vehicles and trains as drawn: where the skater sees them, and where their roofs are)
 void Traffic::interact(Player& pl) {
     evCrash = false;
     if (pl.state == Player::BAIL) return;
     for (auto& t : trains) {
         for (int k = 0; k < 5; k++) {
-            float sc = t.s - t.dir * (k * 25.8f + 12.9f);
+            float sc = t.vs - t.dir * (k * 25.8f + 12.9f);
             Vector2 d;
             Vector3 c = gTrainWorld->trackPoint(sc, 2.4f * t.dir, &d);
             float dx = pl.pos.x - c.x, dz = pl.pos.z - c.z;
@@ -1382,17 +1405,18 @@ void Traffic::interact(Player& pl) {
         }
     }
     for (auto& c : cars) {
-        float dx = pl.pos.x - c.pos.x, dz = pl.pos.z - c.pos.z;
+        if (!c.vplaced) continue;
+        float dx = pl.pos.x - c.vpos.x, dz = pl.pos.z - c.vpos.z;
         const CarModel& m = carModel(c.type);
         if (dx * dx + dz * dz > sq(m.halfLen + m.halfWid + 1)) continue;   // the whole body, corners too (an LRV is 22 m long)
-        float f0 = cosf(c.yaw), f1 = sinf(c.yaw);
+        float f0 = cosf(c.vyaw), f1 = sinf(c.vyaw);
         float lx = dx * f0 + dz * f1, lz = -dx * f1 + dz * f0;
         float px = m.halfLen + 0.35f - fabsf(lx), pz = m.halfWid + 0.35f - fabsf(lz);
         if (px <= 0 || pz <= 0) continue;
         // on (or over) the roof: riding on top, not into the side. The roof is ground for the skater (see
         // World::skaterGround), so a drop onto it lands there rather than sinking into the body
         VehicleTop roof = roofOf(c);
-        if (pl.pos.y > roof.y + clampf(lx, -roof.halfLen, roof.halfLen) * roof.slope - 0.2f || pl.pos.y < c.pos.y - 1.5f) continue;
+        if (pl.pos.y > roof.y + clampf(lx, -roof.halfLen, roof.halfLen) * roof.slope - 0.2f || pl.pos.y < c.vpos.y - 1.5f) continue;
         Vector2 pv = pl.state == Player::AIR ? Vector2{pl.vel.x, pl.vel.z} : Vector2{cosf(pl.yaw) * pl.speed, sinf(pl.yaw) * pl.speed};
         Vector2 cv = {f0 * c.speed, f1 * c.speed};
         float rel = Vector2Length(Vector2Subtract(pv, cv));
@@ -1431,9 +1455,9 @@ static void drawPedalRiders(const Car& c, int seed) {
                                   {150, 80, 160, 255}, {230, 120, 40, 255}, {30, 30, 35, 255}};
     Color pants = {50, 56, 80, 255}, shoe = {35, 35, 38, 255};
     inst::push();
-    inst::translate(c.pos.x, c.pos.y, c.pos.z);
-    inst::rotate(-c.yaw * RAD2DEG, 0, 1, 0);
-    inst::rotate(c.pitch * RAD2DEG, 0, 0, 1);
+    inst::translate(c.vpos.x, c.vpos.y, c.vpos.z);
+    inst::rotate(-c.vyaw * RAD2DEG, 0, 1, 0);
+    inst::rotate(c.vpitch * RAD2DEG, 0, 0, 1);
     auto limb = [](Vector3 a, Vector3 b, float r, Color k) { inst::cylinder(a, b, r, r * 0.85f, 5, k); };
     for (int k = 0; k < 10; k++) {
         uint32_t h = hashu(seed, k, 5);
@@ -1834,9 +1858,9 @@ static void drawCableRiders(const Car& c, int idx) {
     RNG r(9137 + idx * 7919);
     float t = (float)GetTime();
     inst::push();
-    inst::translate(c.pos.x, c.pos.y, c.pos.z);
-    inst::rotate(-c.yaw * RAD2DEG, 0, 1, 0);
-    inst::rotate(c.pitch * RAD2DEG, 0, 0, 1);
+    inst::translate(c.vpos.x, c.vpos.y, c.vpos.z);
+    inst::rotate(-c.vyaw * RAD2DEG, 0, 1, 0);
+    inst::rotate(c.vpitch * RAD2DEG, 0, 0, 1);
     auto place = [&](float x, float y, float z, float face, int pose, int side) {
         Ped p; colorPed(p, r);
         inst::push();
@@ -1861,12 +1885,12 @@ static void drawCableRiders(const Car& c, int idx) {
 
 void Traffic::drawShadows(Vector3 cam) const {
     for (auto& c : cars) {
-        if (sq(c.pos.x - cam.x) + sq(c.pos.z - cam.z) > 140 * 140) continue;
+        if (sq(c.vpos.x - cam.x) + sq(c.vpos.z - cam.z) > 140 * 140) continue;
         const CarModel& m = carModel(c.type);
         rlPushMatrix();
-        rlTranslatef(c.pos.x, c.pos.y + 0.05f, c.pos.z);
-        rlRotatef(-c.yaw * RAD2DEG, 0, 1, 0);
-        rlRotatef(c.pitch * RAD2DEG, 0, 0, 1);
+        rlTranslatef(c.vpos.x, c.vpos.y + 0.05f, c.vpos.z);
+        rlRotatef(-c.vyaw * RAD2DEG, 0, 1, 0);
+        rlRotatef(c.vpitch * RAD2DEG, 0, 0, 1);
         DrawCube({0, 0, 0}, m.halfLen * 2 + 0.4f, 0.02f, m.halfWid * 2 + 0.4f, {0, 0, 0, 55});
         rlPopMatrix();
     }
@@ -1878,12 +1902,12 @@ void Traffic::drawShadows(Vector3 cam) const {
 
 void Traffic::draw(Vector3 cam, Vector3 camFwd, bool nearPass) const {
     for (auto& c : cars) {
-        Vector3 d = Vector3Subtract(c.pos, cam);
+        Vector3 d = Vector3Subtract(c.vpos, cam);
         float dist2 = d.x * d.x + d.z * d.z;
         if (dist2 > 420 * 420) continue;
         if (!nearPass && dist2 < 235 * 235) continue;   // wholly inside the near pass: drawn there
         if (Vector3DotProduct(d, camFwd) < -15) continue;
-        drawCarModel(c.type, c.body, c.pos, c.yaw, c.pitch, c.braking);
+        drawCarModel(c.type, c.body, c.vpos, c.vyaw, c.vpitch, c.braking);
         if (c.type == CT_CABLECAR && dist2 < 170 * 170) drawCableRiders(c, (int)(&c - cars.data()));
         if (c.type == CT_PEDALBUS && dist2 < 140 * 140) drawPedalRiders(c, (int)(&c - cars.data()));
     }
@@ -1906,9 +1930,9 @@ void Traffic::draw(Vector3 cam, Vector3 camFwd, bool nearPass) const {
 
 void Traffic::drawCasters(Vector3 c, float rCars, float rPeds) const {
     for (auto& k : cars) {
-        float dist2 = sq(k.pos.x - c.x) + sq(k.pos.z - c.z);
+        float dist2 = sq(k.vpos.x - c.x) + sq(k.vpos.z - c.z);
         if (dist2 > rCars * rCars) continue;
-        drawCarModel(k.type, k.body, k.pos, k.yaw, k.pitch, false);
+        drawCarModel(k.type, k.body, k.vpos, k.vyaw, k.vpitch, false);
         if (k.type == CT_PEDALBUS && dist2 < 60 * 60) drawPedalRiders(k, (int)(&k - cars.data()));
     }
     if (rPeds <= 0) return;
@@ -1952,7 +1976,7 @@ void Traffic::drawSignals(const World& w, Vector3 cam) const {
 }
 
 void Traffic::drawTrains(const World& w, Vector3 cam) const {
-    for (auto& t : trains) drawTrain(w, t.s, t.dir, cam);
+    for (auto& t : trains) drawTrain(w, t.vs, t.dir, cam);
 }
 
 // ---- snapshots
@@ -2014,54 +2038,77 @@ void Traffic::serializeCars(const std::vector<int>& idx, std::vector<uint8_t>& o
     }
 }
 
+// a car's road or line, and whether s is on it (snapshots come off the network: nothing in one is trusted)
+static bool onPath(const Car& c, float s) {
+    const World& w = *gTrainWorld;
+    const std::vector<Path>& v = c.mode == 1 ? w.carPaths : c.mode == 2 ? w.cablePaths : w.tramPaths;
+    return c.path >= 0 && c.path < (int)v.size() && std::isfinite(s) && s >= 0 && s <= v[c.path].len;
+}
+
 bool Traffic::applyCars(const uint8_t* data, size_t size, bool snapPos) {
+    // read and check the whole message first, so a bad one changes nothing
+    struct Rec { int k, i, j, d, pd, nd; float x, y, z, yaw, speed, t, s, extra; uint8_t st, fl; uint16_t hops; };
     ByteReader b(data, size);
     if (b.u8() != CARS_VERSION) return false;
     int n = b.u16();
-    for (int q = 0; q < n && !b.bad; q++) {
-        int k = b.u16();
-        if (k >= (int)cars.size()) return false;
-        Car& c = cars[k];
-        float x = b.f32(), z = b.f32(), y = b.i16() / 64.f;
-        float yaw = b.u16() / 65536.f * TAU_F - PI;
-        float speed = b.u16() / 256.f;
-        uint8_t st = b.u8(), fl = b.u8();
+    if (b.bad || b.left() < (size_t)n * 24) return false;   // (24: the shortest record)
+    std::vector<Rec> recs(n);
+    std::vector<uint8_t> seen(cars.size(), 0);
+    for (Rec& r : recs) {
+        r.k = b.u16();
+        if (b.bad || r.k >= (int)cars.size() || seen[r.k]++) return false;
+        const Car& c = cars[r.k];
+        r.x = b.f32(); r.z = b.f32(); r.y = b.i16() / 64.f;
+        r.yaw = b.u16() / 65536.f * TAU_F - PI;
+        r.speed = b.u16() / 256.f;
+        r.st = b.u8(); r.fl = b.u8();
+        if (!std::isfinite(r.x) || !std::isfinite(r.z) || fabsf(r.x) > 1e6f || fabsf(r.z) > 1e6f) return false;
         if (c.mode == 0) {
-            int i = b.u16(), j = b.u16(), dirs = b.u8();
-            float t = b.u16() / 65536.f;
-            uint16_t hops = b.u16();
-            if (b.bad) return false;
-            int d = dirs & 3, pd = fl & CF_PD ? dirs >> 2 & 3 : -1, nd = fl & CF_ND ? dirs >> 4 & 3 : -1;
-            if (!c.g->in(i, j)) return false;
-            // on another block, or turning another way: its turn at the intersections it had is gone
-            if (i != c.i || j != c.j || d != c.d || nd != c.nd) unbox(k);
-            c.i = i; c.j = j; c.d = d; c.pd = pd; c.nd = nd; c.t = t; c.hops = hops;
+            r.i = b.u16(); r.j = b.u16();
+            int dirs = b.u8();
+            r.t = b.u16() / 65536.f;
+            r.hops = b.u16();
+            r.d = dirs & 3; r.pd = r.fl & CF_PD ? dirs >> 2 & 3 : -1; r.nd = r.fl & CF_ND ? dirs >> 4 & 3 : -1;
+            if (!c.g->in(r.i, r.j)) return false;
         } else {
-            float s = b.f32();
-            uint16_t extra = b.u16();
-            if (b.bad) return false;
-            c.s = s;
-            if (c.mode == 1) c.uturn = fl & CF_UTURN ? extra / 64.f : -1;
-            else c.xover = extra == 65535 ? 1e9f : extra / 16.f;
+            r.s = b.f32();
+            uint16_t e = b.u16();
+            if (!onPath(c, r.s)) return false;
+            r.extra = c.mode == 1 ? (r.fl & CF_UTURN ? e / 64.f : -1) : (e == 65535 ? 1e9f : e / 16.f);
         }
-        c.pdir = fl & CF_FWD ? 1 : -1;
-        c.speed = speed;
-        c.stopT = st == 255 ? 1e9f : st / 8.f;
-        c.braking = fl & CF_BRAKING;
-        c.passing = fl & CF_PASSING;
-        c.queued = fl & CF_QUEUED;
+        if (b.bad) return false;
+    }
+    for (const Rec& r : recs) {
+        Car& c = cars[r.k];
+        if (c.mode == 0) {
+            // on another block, or turning another way: its turn at the intersections it had is gone
+            if (r.i != c.i || r.j != c.j || r.d != c.d || r.nd != c.nd) unbox(r.k);
+            c.i = r.i; c.j = r.j; c.d = r.d; c.pd = r.pd; c.nd = r.nd; c.t = r.t; c.hops = r.hops;
+        } else {
+            c.s = r.s;
+            if (c.mode == 1) c.uturn = r.extra;
+            else c.xover = r.extra;
+        }
+        c.pdir = r.fl & CF_FWD ? 1 : -1;
+        c.speed = r.speed;
+        c.stopT = r.st == 255 ? 1e9f : r.st / 8.f;
+        c.braking = r.fl & CF_BRAKING;
+        c.passing = r.fl & CF_PASSING;
+        c.queued = r.fl & CF_QUEUED;
         // the hook for smoothing: without snapPos the car keeps its spot and eases over to its new route point as it
         // drives (update pulls a placed car's position toward that point every step)
         if (snapPos || !c.placed) {
-            c.pos = {x, y, z};
-            c.yaw = yaw;
-            c.placed = fl & CF_PLACED;
+            c.pos = {r.x, r.y, r.z};
+            c.yaw = r.yaw;
+            c.placed = r.fl & CF_PLACED;
+            c.prevPos = c.pos; c.prevYaw = c.yaw; c.prevPitch = c.pitch; c.prevPlaced = c.placed;   // (drawn there at once)
         }
     }
-    return !b.bad;
+    return true;
 }
 
-static const uint32_t FULL_MAGIC = 0x31544653;   // "SFT1"
+static const uint32_t FULL_MAGIC = 0x32544653;   // "SFT2"
+static const size_t FULL_CAR_BYTES = 106;         // (what serializeFull writes for each car)
 
 void Traffic::serializeFull(std::vector<uint8_t>& out) const {
     ByteWriter b(out);
@@ -2071,7 +2118,7 @@ void Traffic::serializeFull(std::vector<uint8_t>& out) const {
     b.u32((uint32_t)cars.size());
     for (const Car& c : cars) {
         b.u8((uint8_t)c.type); b.u8(c.body.r); b.u8(c.body.g); b.u8(c.body.b); b.u8(c.body.a);
-        b.u8((uint8_t)c.mode); b.u8((uint8_t)gridOf(c));
+        b.u8((uint8_t)c.mode); b.u8(c.g ? (uint8_t)gridOf(c) : 255);
         b.i32(c.i); b.i32(c.j); b.u8((uint8_t)c.d); b.u8((uint8_t)c.pd); b.u8((uint8_t)c.nd);
         b.f32(c.t); b.f32(c.uturn); b.f32(c.xover);
         b.i32(c.path); b.f32(c.s); b.u8((uint8_t)c.pdir); b.f32(c.lane);
@@ -2093,34 +2140,55 @@ bool Traffic::applyFull(const uint8_t* data, size_t size) {
     float clk = b.f32();
     double st = b.f64();
     int ft = b.u8();
-    if (b.u32() != cars.size() || b.bad) return false;   // (another city, or another version of it)
+    // another city or another version of it, or not all there: nothing changes
+    if (b.u32() != cars.size() || b.bad || b.left() < cars.size() * FULL_CAR_BYTES + 4) return false;
+    if (!std::isfinite(clk) || !std::isfinite(st)) return false;
     std::vector<Car> next = cars;
     for (Car& c : next) {
-        c.type = b.u8(); c.body.r = b.u8(); c.body.g = b.u8(); c.body.b = b.u8(); c.body.a = b.u8();
-        c.mode = b.u8();
-        c.g = grids[std::min<int>(b.u8(), 2)];
+        auto fin = [&](float v) { if (!std::isfinite(v)) b.bad = true; return v; };
+        int type = b.u8();
+        c.body.r = b.u8(); c.body.g = b.u8(); c.body.b = b.u8(); c.body.a = b.u8();
+        int mode = b.u8(), gi = b.u8();
+        // which kind of vehicle it is, and its grid or road, are the city's: they have to match this one's
+        if (type != c.type || mode != c.mode || (c.g ? gi != gridOf(c) : gi != 255)) return false;
         c.i = b.i32(); c.j = b.i32(); c.d = (int8_t)b.u8(); c.pd = (int8_t)b.u8(); c.nd = (int8_t)b.u8();
-        c.t = b.f32(); c.uturn = b.f32(); c.xover = b.f32();
-        c.path = b.i32(); c.s = b.f32(); c.pdir = (int8_t)b.u8(); c.lane = b.f32();
-        c.speed = b.f32(); c.maxSpeed = b.f32(); c.stopT = b.f32(); c.honkCD = b.f32();
-        c.pos.x = b.f32(); c.pos.y = b.f32(); c.pos.z = b.f32(); c.yaw = b.f32(); c.pitch = b.f32();
+        c.t = fin(b.f32()); c.uturn = fin(b.f32()); c.xover = fin(b.f32());
+        int path = b.i32();
+        c.s = fin(b.f32()); c.pdir = (int8_t)b.u8(); c.lane = fin(b.f32());
+        c.speed = fin(b.f32()); c.maxSpeed = fin(b.f32()); c.stopT = fin(b.f32()); c.honkCD = fin(b.f32());
+        c.pos.x = fin(b.f32()); c.pos.y = fin(b.f32()); c.pos.z = fin(b.f32()); c.yaw = fin(b.f32()); c.pitch = fin(b.f32());
         uint8_t fl = b.u8();
         c.braking = fl & 1; c.placed = fl & 2; c.queued = fl & 4; c.passing = fl & 8;
-        c.pedal = b.f32(); c.acrossT = b.f32();
-        c.box = b.i32(); c.wantBox = b.i32(); c.boxSince = b.f32(); c.still = b.f32();
+        c.pedal = fin(b.f32()); c.acrossT = fin(b.f32());
+        c.box = b.i32(); c.wantBox = b.i32(); c.boxSince = fin(b.f32()); c.still = fin(b.f32());
         c.hops = b.u16();
-        // (where the roofs were last published is this machine's own business: as if published here)
-        c.lastPos = c.pos; c.lastYaw = c.yaw; c.lastPitch = c.pitch; c.lastPlaced = c.placed;
+        if (b.bad || (c.pdir != 1 && c.pdir != -1)) return false;
+        if (c.mode == 0) {
+            int nodes = c.g->ni * c.g->nj;
+            if (!c.g->in(c.i, c.j) || c.d < 0 || c.d > 3 || c.pd < -1 || c.pd > 3 || c.nd < -1 || c.nd > 3 ||
+                c.box < -1 || c.box >= nodes || c.wantBox < -1 || c.wantBox >= nodes || c.t < 0 || c.t > 1)
+                return false;
+        } else if (path != c.path || !onPath(c, c.s)) return false;
+        // (where it's drawn, and the roof published, are this machine's own business: as if just placed here)
+        c.prevPos = c.vpos = c.lastPos = c.pos;
+        c.prevYaw = c.vyaw = c.lastYaw = c.yaw;
+        c.prevPitch = c.vpitch = c.lastPitch = c.pitch;
+        c.prevPlaced = c.vplaced = c.lastPlaced = c.placed;
     }
-    std::vector<Train> tr(b.u32());
-    if (b.bad || tr.size() > 64) return false;
-    for (Train& t : tr) { t.s = b.f32(); t.dir = (int8_t)b.u8(); t.v = b.f32(); t.dwell = b.f32(); }
+    uint32_t nt = b.u32();
+    if (b.bad || nt > 16 || b.left() < nt * 13) return false;
+    std::vector<Train> tr(nt);
+    for (Train& t : tr) {
+        t.s = b.f32(); t.dir = (int8_t)b.u8(); t.v = b.f32(); t.dwell = b.f32();
+        if (!std::isfinite(t.s) || !std::isfinite(t.v) || !std::isfinite(t.dwell) || (t.dir != 1 && t.dir != -1)) return false;
+        t.prevS = t.vs = t.s;
+    }
     if (b.bad) return false;
     cars.swap(next);
     trains.swap(tr);
     seed = sd;
     seedMix = hashu((int)seed, 0, 99);
-    clock = clk; simTime = st; farTurn = ft;
+    clock = clk; simTime = st; farTurn = ft % 16;
     rebuildBoxUsers();
     return true;
 }

@@ -32,7 +32,12 @@ struct Car {
                                 // to pull out across a main road whatever its traffic does
     float still = 0;            // how long it's been stood still (s)
     bool passing = false;       // main-road cars: given up waiting for grid cars stood in the way, easing past them
-    Vector3 lastPos{};          // where it was at the start of the last update (to carry a skater riding on its roof)
+    // where it's drawn (and its roof is): between where it was at the start of its latest step (prev) and where it is
+    // now, by how far the frame has got toward the next step (see Traffic::advance). The simulation never reads these.
+    Vector3 prevPos{}, vpos{};
+    float prevYaw = 0, prevPitch = 0, vyaw = 0, vpitch = 0;
+    bool prevPlaced = false, vplaced = false;
+    Vector3 lastPos{};          // where it was drawn last frame, i.e. the roof the skater stood on (see carryRider)
     float lastYaw = 0, lastPitch = 0;
     bool lastPlaced = false;
     uint16_t hops = 0;          // grid cars: turns picked so far (each pick is hashed from the car, the node and this)
@@ -88,7 +93,10 @@ struct Cat {
     Color c{}, patch{};
 };
 
-struct Train { float s; int dir; float v; float dwell; };
+struct Train {
+    float s; int dir; float v; float dwell;
+    float prevS = 0, vs = 0;    // drawn: as Car::vpos (prevS: at the start of the latest step)
+};
 // Where a grid street's lane crosses the Caltrain tracks at grade, in m along the block from its node: the line a car's
 // front stops at short of them, and where the lane is clear of them on the far side; s: along the line, at the crossing
 struct RailCrossing { float stop = 1e9f, clear = 0, s = 0; };   // stop 1e9: no crossing
@@ -139,6 +147,8 @@ struct Traffic {
     int advance(float frameDt, World& w, Player& p);
     int takeSteps(float frameDt);      // the accumulator: steps owed for a frame of frameDt
     void beginFrame();                 // remember where the roofs are (as published), for carryRider after the steps
+    // place everything where it's drawn: alpha of the way from the start of the latest step to its end (1: at the end)
+    void interpolate(float alpha);
     int rideCar = -1;                  // the car (index) the skater was last carried on, -1 if none
     void interact(Player& p);
     // put the roofs of the vehicles near `at` into w.vehicleTops, for the skater to land on (update does this each frame)

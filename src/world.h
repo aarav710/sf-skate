@@ -262,7 +262,7 @@ struct World {
     std::vector<Platform> plats;
     std::vector<std::vector<int>> pgrid; int pgW = 0, pgH = 0;
     std::vector<Rail> rails;
-    std::vector<VehicleTop> vehicleTops;   // the traffic near the skater, as of the last Traffic::update
+    std::vector<VehicleTop> vehicleTops;   // the traffic near the skater as drawn this frame (Traffic::publishRoofs)
     std::vector<Pond> ponds;
     Grid sf, oak, mp;
     std::vector<Path> carPaths;      // bridges, Market St

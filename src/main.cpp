@@ -371,12 +371,6 @@ static void drawNameTags(const Camera3D& cam, Vector3 camFwd, Vector3 me, int sw
     }
 }
 
-// Net's messages as players read them: the panel calls the relay "the server"
-static std::string plainError(std::string e) {
-    for (size_t i; (i = e.find("relay")) != std::string::npos;) e.replace(i, 5, "server");
-    return e;
-}
-
 // The session panel under the minimap: the code (small, to read out to friends), then everyone with their colour,
 // distance and who hosts. Returns its height. (showCode false: "PLAYERS" in its place, the code being on show already.)
 static int drawPlayerList(int x, int y, int w, Vector3 me, bool showCode = true) {
@@ -398,8 +392,7 @@ static int drawPlayerList(int x, int y, int w, Vector3 me, bool showCode = true)
         }
     } else {
         bool bad = NET.status == Net::FAILED;
-        std::string stx = plainError(NET.statusText());
-        const char* st = stx.c_str();
+        const char* st = NET.statusText();
         int fs = 16;
         while (fs > 10 && MeasureText(st, fs) > w - 20) fs--;
         textShadow(st, x + 10, y + 9, fs, bad ? Color{255, 110, 90, 255} : Color{200, 210, 230, 255});
@@ -545,13 +538,26 @@ static void netJoin(const std::string& code) { NetConfig c = gNetCfg; c.create =
 static void netLeave() { NET.leave(); }
 
 // ---------------------------------------------------------------- PLAY WITH FRIENDS
-// The start screen's picker and the Tab picker are one box: landmarks and time of day in its left 660 px, this
-// column (create, join, the code, who's in) in its right 260.
-struct PickerBox { int x, y, w, h; };
+// The start screen's picker and the Tab picker are one box: landmarks (lw wide), time of day (at tx, tw wide) and
+// this column (create, join, the code, who's in; at fx, fw wide). Under 976 px the columns narrow, down to ~800.
+struct PickerBox { int x, y, w, h, lw, tx, tw, fx, fw; bool narrow; };
 
 static PickerBox pickerBox(int sw, int sh, int nSpots) {
-    int h = std::max(120 + nSpots * 34, 500);
-    return {sw / 2 - 480, std::max(16, std::min(sh / 2 - 230, sh - h - 44)), 960, h};   // (short windows: up, so "Press ENTER" fits below)
+    PickerBox b;
+    b.h = std::max(120 + nSpots * 34, 500);
+    b.y = std::max(16, std::min(sh / 2 - 230, sh - b.h - 44));   // (short windows: up, so "Press ENTER" fits below)
+    b.narrow = sw < 976;
+    if (!b.narrow) { b.lw = 380; b.tx = 430; b.tw = 210; b.fx = 680; b.fw = 260; }
+    else { b.lw = 310; b.tx = 346; b.tw = 180; b.fx = 550; b.fw = std::max(200, std::min(260, sw - 16 - 550 - 20)); }
+    b.w = b.fx + b.fw + 20;
+    b.x = std::max(8, sw / 2 - b.w / 2);
+    return b;
+}
+
+// the largest size up to fs (down to 10) at which t fits in w
+static int fitFont(const char* t, int fs, int w) {
+    while (fs > 10 && MeasureText(t, fs) > w) fs--;
+    return fs;
 }
 
 struct FriendsPanel {
@@ -565,16 +571,16 @@ struct FriendsPanel {
     // where everything goes, from the column's top left
     struct Layout { Rectangle name, create, code, join, relay, copy, leave; int x, y; };
     static Layout layout(const PickerBox& b) {
-        float x = b.x + 680.f, y = (float)b.y;
+        float x = (float)(b.x + b.fx), y = (float)b.y, w = (float)b.fw;
         Layout L;
         L.x = (int)x; L.y = (int)y;
-        L.name = {x, y + 108, 260, 34};
-        L.create = {x, y + 154, 260, 40};
-        L.code = {x, y + 232, 164, 40};
-        L.join = {x + 172, y + 232, 88, 40};
-        L.relay = {x, y + 372, 260, 28};
-        L.copy = {x + 178, y + 110, 82, 36};
-        L.leave = {x, y + 446, 260, 40};
+        L.name = {x, y + 108, w, 34};
+        L.create = {x, y + 154, w, 40};
+        L.code = {x, y + 232, w - 96, 40};
+        L.join = {x + w - 88, y + 232, 88, 40};
+        L.relay = {x, y + 372, w, 28};
+        L.copy = {x + w - 82, y + 110, 82, 36};
+        L.leave = {x, y + 446, w, 40};
         return L;
     }
     // the name and relay as typed into what the next session uses, and into ~/.sfskate if the player changed them
@@ -700,20 +706,20 @@ static void drawFriends(const PickerBox& b, Vector3 me) {
     FriendsPanel& F = gFriends;
     auto L = FriendsPanel::layout(b);
     const Color HEAD = {255, 210, 60, 255}, MUTED = {170, 178, 195, 255};
-    int x = L.x, y = L.y;
+    int x = L.x, y = L.y, w = b.fw;
     DrawLine(x - 14, y + 60, x - 14, y + b.h - 20, {255, 255, 255, 40});
     textShadow("PLAY WITH FRIENDS", x, y + 60, 18, HEAD);
     bool in = NET.inSession() || gFakeNet, busy = NET.status == Net::CONNECTING || NET.status == Net::JOINING;
     if (in) {
         const char* code = gFakeNet ? "TEST00" : NET.code.c_str();
         DrawText("SESSION CODE", x, y + 90, 15, MUTED);
-        textShadow(code, x, y + 108, 40, HEAD);
+        textShadow(code, x, y + 108 + (40 - fitFont(code, 40, w - 90)) / 2, fitFont(code, 40, w - 90), HEAD);
         bool copied = GetTime() - F.copiedAt < 2;
         drawButton(L.copy, copied ? "Copied" : "Copy", copied ? Color{70, 170, 110, 255} : Color{60, 90, 150, 255}, true, 20);
         sui::place("copy", L.copy);
         int ty = drawWrapped("Send friends the code. They open PLAY WITH FRIENDS here, paste it (Ctrl/Cmd+V) and click Join.",
-                             x, y + 158, 260, 15, {215, 220, 232, 255});
-        int lh = drawPlayerList(x, std::max(ty + 6, y + 222), 260, me, false);
+                             x, y + 158, w, 15, {215, 220, 232, 255}, b.narrow ? 4 : 3);
+        int lh = drawPlayerList(x, std::max(ty + 6, y + 222), w, me, false);
         (void)lh;
         drawButton(L.leave, "Leave session", {190, 60, 55, 255});
         sui::place("leave", L.leave);
@@ -724,7 +730,8 @@ static void drawFriends(const PickerBox& b, Vector3 me) {
     sui::place("name", L.name);
     drawButton(L.create, busy ? "Cancel" : "Create session  (K)", busy ? Color{150, 70, 60, 255} : Color{245, 95, 60, 255});
     sui::place("create", L.create);
-    DrawText("JOIN A FRIEND  (J, or paste a code)", x, y + 212, 15, MUTED);
+    const char* jl = b.narrow ? "JOIN A FRIEND  (J)" : "JOIN A FRIEND  (J, or paste a code)";
+    DrawText(jl, x, y + 212, fitFont(jl, 15, w), MUTED);
     drawField(L.code, F.code, "CODE", 26);
     sui::place("code", L.code);
     drawButton(L.join, "Join", {60, 90, 150, 255}, !busy);
@@ -734,15 +741,16 @@ static void drawFriends(const PickerBox& b, Vector3 me) {
     Color sc = {215, 220, 232, 255};
     if (busy) st = NET.status == Net::CONNECTING ? "Connecting to the server..." : NET.statusText();
     else if (!F.note.empty()) { st = F.note; sc = {255, 120, 100, 255}; }
-    else if (NET.status == Net::FAILED && !F.failSeen) { st = plainError(NET.error); sc = {255, 120, 100, 255}; }
+    else if (NET.status == Net::FAILED && !F.failSeen) { st = NET.error; sc = {255, 120, 100, 255}; }
     else st = "Create a session and share its code, or type a friend's code and Join.";
     if (busy) st[0] = (char)toupper((unsigned char)st[0]);
-    drawWrapped(st, x, y + 284, 260, 16, sc);
+    drawWrapped(st, x, y + 284, w, b.narrow ? 15 : 16, sc);
     DrawText("SERVER", x, y + 354, 14, MUTED);
     drawField(L.relay, F.relay, defaultRelay(), 16);
     sui::place("relay", L.relay);
-    const char* hints[] = {"Click a box to type in it", "Tab  next box    Enter  done"};
-    for (int k = 0; k < 2; k++) DrawText(hints[k], x, y + 416 + k * 24, 17, {200, 205, 215, 255});
+    // (Tab only moves between boxes while one is typed in: otherwise, in the game, it closes the picker)
+    const char* hint = sui::focused() ? "Tab  next box    Enter  done" : "Click a box to type in it";
+    DrawText(hint, x, y + 416, fitFont(hint, 17, w), {200, 205, 215, 255});
 }
 
 // Other players' events, and ours: car hits go to the host (TrafficSync), people dodging or knocked down by another
@@ -1370,18 +1378,18 @@ int main(int argc, char** argv) {
             Vector2 m = sui::mouse();
             int px = box.x, py = box.y;
             for (int i = 0; i < n; i++) {
-                Rectangle r = {(float)px + 20, (float)py + 90 + i * 34, 380, 30};
+                Rectangle r = {(float)px + 20, (float)py + 90 + i * 34, (float)box.lw, 30};
                 if (CheckCollisionPointRec(m, r) && sui::mousePressed()) {
                     if (pickIdx == i) { title = false; picker = false; startAt(i); }
                     pickIdx = i;
                 }
             }
             for (int t = 0; t < 3; t++) {
-                Rectangle r = {(float)px + 430, (float)py + 120 + t * 50, 210, 40};
+                Rectangle r = {(float)(px + box.tx), (float)py + 120 + t * 50, (float)box.tw, 40};
                 if (CheckCollisionPointRec(m, r) && sui::mousePressed()) preset = t;
             }
             for (int md = 0; md < 2; md++) { // game mode: 0 free roam, 1 cop chase
-                Rectangle r = {(float)px + 430, (float)py + 316 + md * 44, 210, 40};
+                Rectangle r = {(float)(px + box.tx), (float)py + 316 + md * 44, (float)box.tw, 40};
                 if (CheckCollisionPointRec(m, r) && sui::mousePressed()) setCops(md == 1);
             }
             if (sui::gameKeyPressed(KEY_ENTER) || sui::gameKeyPressed(KEY_SPACE)) { title = false; picker = false; startAt(pickIdx); }
@@ -2113,8 +2121,8 @@ int main(int argc, char** argv) {
                 if (NET.status == Net::RECONNECTING) P.say("Connection lost", {255, 150, 110, 255}, "Reconnecting...");
                 else if (NET.status == Net::IN_SESSION && lastSt == Net::RECONNECTING) P.say("Reconnected", {255, 210, 60, 255}, "Multiplayer");
                 else if (NET.status == Net::FAILED && (lastSt == Net::IN_SESSION || lastSt == Net::RECONNECTING))
-                    P.say("Session over", {255, 110, 90, 255}, plainError(NET.error) + " - skating on your own");
-                else if (NET.status == Net::FAILED) P.say("Couldn't connect", {255, 110, 90, 255}, plainError(NET.error));
+                    P.say("Session over", {255, 110, 90, 255}, NET.error + " - skating on your own");
+                else if (NET.status == Net::FAILED) P.say("Couldn't connect", {255, 110, 90, 255}, NET.error);
                 else if (NET.status == Net::OFF && (lastSt == Net::IN_SESSION || lastSt == Net::RECONNECTING)) P.say("Left the session", WHITE, "Skating on your own");
                 lastSt = NET.status;
             }
@@ -2355,7 +2363,7 @@ int main(int argc, char** argv) {
         }
 
         // ---------------- HUD
-        if (title) textCenter("SF SKATE", sw / 2, 30, 80, {245, 95, 60, 255});
+        if (title && (!picker || pickerBox(sw, sh2, (int)W.spots.size()).y >= 112)) textCenter("SF SKATE", sw / 2, 30, 80, {245, 95, 60, 255});   // (unless the picker is over it)
         if (picker) {
             int n = (int)W.spots.size();
             int px = box.x, py = box.y;
@@ -2363,11 +2371,12 @@ int main(int argc, char** argv) {
             DrawRectangleLines(px, py, box.w, box.h, {255, 255, 255, 60});
             textShadow(title ? "WHERE DO YOU WANT TO START?" : "CHANGE LOCATION / TIME", px + 20, py + 18, 28, WHITE);
             textShadow("LANDMARK", px + 20, py + 60, 18, {255, 210, 60, 255});
-            textShadow("TIME OF DAY", px + 430, py + 60, 18, {255, 210, 60, 255});
+            const int tx = px + box.tx;
+            textShadow("TIME OF DAY", tx, py + 60, 18, {255, 210, 60, 255});
             for (int i = 0; i < n; i++) {
                 int y = py + 90 + i * 34;
                 bool sel = i == pickIdx;
-                if (sel) DrawRectangle(px + 16, y - 2, 388, 32, {245, 95, 60, 220});
+                if (sel) DrawRectangle(px + 16, y - 2, box.lw + 8, 32, {245, 95, 60, 220});
                 if (i < 10) DrawText(TextFormat("%d", (i + 1) % 10), px + 28, y + 4, 20, sel ? WHITE : Color{150, 160, 180, 255});
                 DrawText(W.spots[i].name, px + 60, y + 4, 22, WHITE);
             }
@@ -2375,25 +2384,25 @@ int main(int argc, char** argv) {
             for (int t = 0; t < 3; t++) {
                 int y = py + 120 + t * 50;
                 bool sel = t == preset;
-                DrawRectangle(px + 430, y, 210, 40, sel ? TOD[t] : Color{40, 45, 60, 255});
-                if (sel) DrawRectangleLines(px + 430, y, 210, 40, WHITE);
-                DrawText(PRESET_NAMES[t], px + 445, y + 10, 22, WHITE);
+                DrawRectangle(tx, y, box.tw, 40, sel ? TOD[t] : Color{40, 45, 60, 255});
+                if (sel) DrawRectangleLines(tx, y, box.tw, 40, WHITE);
+                DrawText(PRESET_NAMES[t], tx + 15, y + 10, 22, WHITE);
             }
-            textShadow("GAME MODE  (B)", px + 430, py + 290, 18, {255, 210, 60, 255});
+            textShadow("GAME MODE  (B)", tx, py + 290, 18, {255, 210, 60, 255});
             const char* MODES[2] = {"Free roam", "Cop chase"};
             const Color MODE_C[2] = {{70, 170, 110, 255}, C_COP};
             for (int md = 0; md < 2; md++) {
                 int y = py + 316 + md * 44;
                 bool sel = (md == 1) == CH.on;
-                DrawRectangle(px + 430, y, 210, 40, sel ? MODE_C[md] : Color{40, 45, 60, 255});
-                if (sel) DrawRectangleLines(px + 430, y, 210, 40, WHITE);
-                DrawText(MODES[md], px + 445, y + 10, 22, WHITE);
+                DrawRectangle(tx, y, box.tw, 40, sel ? MODE_C[md] : Color{40, 45, 60, 255});
+                if (sel) DrawRectangleLines(tx, y, box.tw, 40, WHITE);
+                DrawText(MODES[md], tx + 15, y + 10, 22, WHITE);
             }
             const char* hints[] = {"Up / Down   pick a landmark", "Left / Right  time of day", "1-0   jump to a landmark",
                                    "Click twice or ENTER  to go", title ? "Esc  quit" : "Tab  back to skating"};
-            for (int k = 0; k < 5; k++) DrawText(hints[k], px + 430, py + 416 + k * 24, 17, {200, 205, 215, 255});
+            for (int k = 0; k < 5; k++) DrawText(hints[k], tx, py + 416 + k * 24, box.narrow ? fitFont(hints[k], 17, box.fx - box.tx - 24) : 17, {200, 205, 215, 255});
             float a = 0.6f + 0.4f * sinf((float)GetTime() * 4);
-            textCenter(title ? "Press ENTER to drop in" : "Press ENTER to go there", sw / 2, py + box.h + 10, 28,
+            textCenter(title ? "Press ENTER to drop in" : "Press ENTER to go there", sw / 2, std::min(py + box.h + 10, sh2 - 30), 28,
                        {255, 230, 120, (unsigned char)(255 * a)});
             drawFriends(box, netMe);
         }

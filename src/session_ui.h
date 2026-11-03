@@ -68,7 +68,7 @@ void place(const std::string& id, Rectangle r);
 // Steps separated by ';' or newlines:
 //   wait N (frames)  sleep S (seconds)  key NAME (ENTER, TAB, ESCAPE, BACKSPACE, a letter or digit)
 //   type TEXT (one character a frame, with its key pressed too, as a keyboard does)  paste (Ctrl+V)
-//   clipboard TEXT  click ID  shot FILE  until COND [SECS] (COND is up to the game; gives up after SECS, default 60)
+//   clipboard TEXT  click ID  shot FILE (any path)  until COND [SECS] (COND is up to the game; gives up after SECS, default 60)
 //   do WHAT (the game does something by name)  quit
 // The game answers `until` and `do` through `game` (cond/what, true = met/known).
 void startScript(const std::string& script, std::function<bool(const std::string& cmd, const std::string& arg)> game);

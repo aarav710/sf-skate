@@ -242,7 +242,15 @@ void stepScript() {
             gClickAt = {it->second.x + it->second.width / 2, it->second.y + it->second.height / 2};
             return;
         }
-        if (cmd == "shot") { TakeScreenshot(arg.c_str()); return; }
+        if (cmd == "shot") {   // (raylib writes it to the working directory by its bare name: moved to where it was asked for)
+            TakeScreenshot(arg.c_str());
+            std::string bare = GetFileName(arg.c_str());
+            if (bare != arg) {
+                std::string at = std::string(GetWorkingDirectory()) + "/" + bare;
+                if (rename(at.c_str(), arg.c_str()) != 0) TraceLog(LOG_WARNING, "SFSKATE: ui script: couldn't move %s to %s", at.c_str(), arg.c_str());
+            }
+            return;
+        }
         if (cmd == "quit") { s.quit = true; s.running = false; return; }
         if (cmd == "do") { if (!(s.game && s.game("do", arg))) TraceLog(LOG_WARNING, "SFSKATE: ui script: can't do \"%s\"", arg.c_str()); continue; }
         TraceLog(LOG_WARNING, "SFSKATE: ui script: unknown step \"%s\"", st.c_str());

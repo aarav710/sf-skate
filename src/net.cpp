@@ -75,7 +75,7 @@ bool Net::start(const NetConfig& cfg, double now) {
     if (!cfg.create && netp::normalizeCode(cfg.joinCode).empty()) { fail("Session codes are 6 letters and digits"); return false; }
     std::string h;
     uint16_t port;
-    if (!parseHostPort(cfg.relay, h, port)) { fail("Bad relay address \"" + cfg.relay + "\""); return false; }
+    if (!parseHostPort(cfg.relay, h, port)) { fail("Bad server address \"" + cfg.relay + "\""); return false; }
     if (!enetInit_) {
         if (enet_initialize() != 0) { fail("Network setup failed"); return false; }
         enetInit_ = true;
@@ -244,10 +244,10 @@ void Net::service(double now) {
     if (lookup_) {
         int st = lookup_->state;
         if (st == 0) {
-            if (now - startedAt_ > CONNECT_TIMEOUT) fail("Can't find relay \"" + lookup_->name + "\"");
+            if (now - startedAt_ > CONNECT_TIMEOUT) fail("Can't find server \"" + lookup_->name + "\"");
             return;
         }
-        if (st == 2) { fail("Can't find relay \"" + lookup_->name + "\""); return; }
+        if (st == 2) { fail("Can't find server \"" + lookup_->name + "\""); return; }
         addrHost_ = lookup_->addr.host;
         haveAddr_ = true;
         lookup_.reset();
@@ -273,7 +273,7 @@ void Net::service(double now) {
             connected_ = false;
             if (status == IN_SESSION) lost(now);
             else if (status != RECONNECTING)   // (a try that didn't connect: the next one goes at nextTry_)
-                fail(status == CONNECTING ? "Can't reach the relay at " + cfg_.relay : "Lost connection to the relay");
+                fail(status == CONNECTING ? "Can't reach the server at " + cfg_.relay : "Lost connection to the server");
             break;
         default: break;
         }
@@ -283,13 +283,13 @@ void Net::service(double now) {
     case CONNECTING:
     case JOINING:
         if (now - startedAt_ > CONNECT_TIMEOUT)
-            fail(status == CONNECTING ? "Can't reach the relay at " + cfg_.relay : std::string("The relay didn't answer"));
+            fail(status == CONNECTING ? "Can't reach the server at " + cfg_.relay : std::string("The server didn't answer"));
         break;
     case IN_SESSION:
         if (now - lastRecv_ > SILENCE) lost(now);   // (the relay pongs every second: it can't hear us, or we it)
         break;
     case RECONNECTING:
-        if (now - droppedAt_ > REJOIN_BUDGET) { fail("Lost connection to the relay"); break; }
+        if (now - droppedAt_ > REJOIN_BUDGET) { fail("Lost connection to the server"); break; }
         if (peer_ && now - tryAt_ > ATTEMPT_TIMEOUT) closeConnection(false);   // (this try is going nowhere)
         if (!peer_ && now >= nextTry_) {
             tries_++;
@@ -323,7 +323,7 @@ const RemoteInfo* Net::remote(uint8_t id) const {
 const char* Net::statusText() const {
     switch (status) {
     case OFF: return "offline";
-    case CONNECTING: return "connecting to relay...";
+    case CONNECTING: return "connecting to server...";
     case JOINING: return cfg_.create ? "creating session..." : "joining session...";
     case IN_SESSION: return isHost() ? "in session (host)" : "in session";
     case RECONNECTING: return "reconnecting...";
@@ -374,7 +374,7 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
     }
     case netp::MSG_ERROR: {
         netp::MsgError m;
-        if (!netp::unpack(data, n, m)) { fail("Relay error"); return; }
+        if (!netp::unpack(data, n, m)) { fail("Server error"); return; }
         if (status == RECONNECTING && m.code == netp::ERR_NO_SESSION) { fail("The session has ended"); return; }
         if (status == RECONNECTING && m.code == netp::ERR_SLOW_DOWN) { closeConnection(false); return; }   // (busy: the next try goes at nextTry_)
         fail(m.text.empty() ? netp::errorText(m.code) : m.text);

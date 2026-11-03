@@ -1173,7 +1173,7 @@ static void sessionChecks() {
     nets.pop_back();
     snprintf(b, sizeof b, "\"localhost\": start() took %.2f ms, in session %d (%s); unknown name: start() took %.2f ms, \"%s\" after %.1fs",
              took * 1000, (int)aIn, A.code.c_str(), took2 * 1000, bad.error.c_str(), tBad);
-    check(started && took < 0.02 && aIn && started2 && took2 < 0.02 && tBad >= 0 && bad.error.rfind("Can't find relay", 0) == 0,
+    check(started && took < 0.02 && aIn && started2 && took2 < 0.02 && tBad >= 0 && bad.error.rfind("Can't find server", 0) == 0,
           "session: relay looked up without blocking", b);
     if (!aIn) return;
 

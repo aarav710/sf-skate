@@ -270,7 +270,7 @@ int main() {
         bool ok = ride.first && air.first && ride.second.state == Player::RIDE && fabsf(rv - 8) < 0.05f;
         ok = ok && s.p.state == Player::AIR && s.p.flipT > 0 && r.state == Player::AIR && r.x == s.p.pos.x && r.y == s.p.pos.y && r.z == s.p.pos.z;
         ok = ok && ang(r.yaw, s.p.yaw) < 1e-3f && fabsf(r.vx - s.p.vel.x) < 0.006f && fabsf(r.vy - s.p.vy) < 0.006f && fabsf(r.vz - s.p.vel.z) < 0.006f;
-        ok = ok && ang(r.flipAngle, s.p.flipAngle) < 1e-3f && fabsf(r.flipProg - s.p.flipT / s.p.flipDur) < 0.004f && r.shoveProg == -1;
+        ok = ok && fabsf(r.flipAngle - s.p.flipAngle) < 0.011f && fabsf(r.flipProg - s.p.flipT / s.p.flipDur) < 0.004f && r.shoveProg == -1;
         ok = ok && fabsf(r.crouch - s.p.crouch) < 0.003f && fabsf(r.pitch - s.p.pitch) < 0.006f && r.score == (uint32_t)s.p.score;
         snprintf(b, sizeof b, "riding %.2f m/s; mid-flip angle %.2f/%.2f prog %.2f/%.2f vy %.2f/%.2f", rv, r.flipAngle, s.p.flipAngle,
                  r.flipProg, s.p.flipT / s.p.flipDur, r.vy, s.p.vy);

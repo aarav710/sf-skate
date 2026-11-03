@@ -102,7 +102,7 @@ static void protocolChecks() {
         s.x = 4689.123f; s.y = -12.5f; s.z = 10449.75f; s.yaw = 3.1f; s.vx = 12.34f; s.vy = -5.67f; s.vz = 0.01f;
         s.state = 2; s.vehicle = PlayerState::SEAPLANE; s.flags = 0x1F; s.rail = 65534; s.railT = 0.3333f;
         s.crouch = 0.42f; s.lean = -0.77f; s.pushPhase = 20.0f; s.pushAmt = 1; s.pitch = -0.35f; s.balance = 0.5f;
-        s.flipAngle = -2.5f; s.shoveAngle = 7.0f; s.flipProg = 0.5f; s.shoveProg = -1; s.bailT = 0.37f;
+        s.flipAngle = -271.3f; s.shoveAngle = 179.99f; s.flipProg = 0.5f; s.shoveProg = -1; s.bailT = 0.37f;
         s.boardDx = 1.23f; s.boardDy = -0.4f; s.boardDz = -300.f; s.boardYaw = -3.14f; s.score = 4000000000u;
         size_t sz = 0;
         bool ok = roundTrip(a, o, &sz);
@@ -113,7 +113,7 @@ static void protocolChecks() {
         ok = ok && r.state == 2 && r.vehicle == PlayerState::SEAPLANE && r.flags == 0x1F && r.rail == 65534 && near(r.railT, s.railT, 1e-4f);
         ok = ok && near(r.crouch, s.crouch, 0.003f) && near(r.lean, s.lean, 0.005f) && angDiff(r.pushPhase, s.pushPhase) < 0.025f;
         ok = ok && near(r.pushAmt, 1, 0) && near(r.pitch, s.pitch, 0.006f) && near(r.balance, s.balance, 0.005f);
-        ok = ok && angDiff(r.flipAngle, s.flipAngle) < 1e-4f && angDiff(r.shoveAngle, s.shoveAngle) < 1e-4f;
+        ok = ok && near(r.flipAngle, s.flipAngle, 0.011f) && near(r.shoveAngle, s.shoveAngle, 0.011f);   // degrees, unwrapped
         ok = ok && near(r.flipProg, 0.5f, 0.003f) && r.shoveProg == -1 && near(r.bailT, 0.37f, 0.006f);
         ok = ok && near(r.boardDx, 1.23f, 0.006f) && near(r.boardDz, -300.f, 0.006f) && angDiff(r.boardYaw, s.boardYaw) < 1e-4f;
         ok = ok && r.score == 4000000000u;
@@ -123,12 +123,13 @@ static void protocolChecks() {
         // out of range values saturate instead of wrapping; NaN goes out as 0
         PlayerState t;
         t.vx = 1000; t.vy = -1000; t.vz = NAN; t.rail = 70000; t.railT = 2; t.crouch = -1; t.lean = 5; t.pitch = -9;
-        t.flipProg = 3; t.bailT = 100; t.x = NAN;
+        t.flipProg = 3; t.bailT = 100; t.x = NAN; t.flipAngle = -360; t.shoveAngle = 1000;
         MsgPlayerState tm, to; tm.s = t;
         ok = roundTrip(tm, to);
         const PlayerState& u = to.s;
         ok = ok && u.vx > 327 && u.vy < -327 && u.vz == 0 && u.rail == -1 && u.railT == 1 && u.crouch == 0 && u.lean == 1;
         ok = ok && near(u.pitch, -1.27f, 1e-4f) && u.flipProg == 1 && near(u.bailT, 2.55f, 1e-4f) && u.x == 0;
+        ok = ok && u.flipAngle == -360 && near(u.shoveAngle, 655.34f, 1e-3f);
         // a NaN position or an unknown state in the bytes is refused
         auto bytes = pack(tm);
         float nan = NAN; memcpy(&bytes[HEADER_SIZE], &nan, 4);
@@ -159,6 +160,23 @@ static void protocolChecks() {
         ok = ok && parseHostPort("10.0.0.2", h, p) && h == "10.0.0.2" && p == 7777;
         ok = ok && !parseHostPort("x:0", h, p) && !parseHostPort("x:70000", h, p) && !parseHostPort(":7777", h, p) && !parseHostPort("x:7a", h, p);
         check(ok, "net: relay address parsing", "host:port, default port 7777, bad ports refused");
+    }
+    {   // 20 Hz state sends at 60 fps, at 144 fps with jitter, and after a stall
+        auto count = [](double fps, double jitter, double secs, bool stall) {
+            Every e(Net::STATE_INTERVAL);
+            uint32_t r = 12345;
+            int n = 0;
+            for (double t = 100; t < 100 + secs;) {
+                if (e.due(t)) { e.fired(t); n++; }
+                r = r * 1664525u + 1013904223u;
+                t += (1 / fps) * (1 + jitter * ((r >> 8) / 16777216.0 - 0.5));
+                if (stall && t > 105 && t < 105.02) t += 3;   // a 3 s hitch: no burst afterwards
+            }
+            return n;
+        };
+        int a = count(60, 0, 10, false), c = count(144, 0.6, 10, false), d = count(60, 0, 10, true);
+        snprintf(b, sizeof b, "10 s: %d sends at 60 fps, %d at jittery 144 fps; %d with a 3 s stall (want ~140)", a, c, d);
+        check(abs(a - 200) <= 1 && abs(c - 200) <= 1 && abs(d - 140) <= 2, "net: state send cadence 20 Hz", b);
     }
     {   // session options: env first, flags win; nothing asked = no session
         setenv("USER", "aarav", 1);
@@ -275,16 +293,19 @@ struct RawClient {
     ENetPeer* peer = nullptr;
     bool connected = false;
     std::vector<std::vector<uint8_t>> got;
-    bool start(uint16_t port) {
+    bool dropped = false;
+    bool start(uint16_t port, bool quickTimeout = false) {
         host = enet_host_create(nullptr, 1, CH_COUNT, 0, 0);
         ENetAddress a; enet_address_set_host(&a, "127.0.0.1"); a.port = port;
         peer = host ? enet_host_connect(host, &a, CH_COUNT, 0) : nullptr;
+        if (peer && quickTimeout) enet_peer_timeout(peer, 32, 300, 1500);
         return peer != nullptr;
     }
     void service() {
         ENetEvent ev;
         while (host && enet_host_service(host, &ev, 0) > 0) {
             if (ev.type == ENET_EVENT_TYPE_CONNECT) connected = true;
+            if (ev.type == ENET_EVENT_TYPE_DISCONNECT) { dropped = true; peer = nullptr; }
             if (ev.type == ENET_EVENT_TYPE_RECEIVE) {
                 got.emplace_back(ev.packet->data, ev.packet->data + ev.packet->dataLength);
                 enet_packet_destroy(ev.packet);
@@ -297,6 +318,57 @@ struct RawClient {
     }
     ~RawClient() { if (peer) enet_peer_disconnect_now(peer, 0); if (host) enet_host_destroy(host); }
 };
+
+// The relay's ENet limits, on a relay of their own: an oversized packet is never taken in (its sender gets
+// dropped) while everyone else carries on, and one address can't open more than MAX_PEERS_PER_IP connections.
+static void limitChecks() {
+    char b[320];
+    relay::Relay rel;
+    rel.log = getenv("NET_TEST_LOG") != nullptr;
+    if (!rel.start(0)) { check(false, "limits: relay starts", "can't bind UDP"); return; }
+    std::vector<std::unique_ptr<RawClient>> rc;
+    auto pump = [&](std::function<bool()> cond, double timeout) -> double {
+        double t0 = nowSec();
+        while (nowSec() - t0 < timeout) {
+            rel.service(1);
+            for (auto& c : rc) c->service();
+            if (cond()) return nowSec() - t0;
+        }
+        return -1;
+    };
+    for (int i = 0; i < 3; i++) { rc.push_back(std::make_unique<RawClient>()); rc.back()->start(rel.port(), true); }
+    pump([&] { return rc[0]->connected && rc[1]->connected && rc[2]->connected; }, 10);
+    MsgCreate cr; cr.name = "big";
+    rc[0]->send(pack(cr), CH_RELIABLE);
+    pump([&] { return !rc[0]->got.empty(); }, 10);
+    MsgCreated made;
+    bool created = !rc[0]->got.empty() && unpack(rc[0]->got[0].data(), rc[0]->got[0].size(), made);
+    std::vector<uint8_t> fits(relay::MAX_PACKET, 0xEE), huge(256 * 1024, 0xEE);   // unknown type: ignored if it arrives
+    rc[1]->send(fits, CH_RELIABLE);
+    rc[0]->send(huge, CH_RELIABLE);
+    double tDrop = pump([&] { return rc[0]->dropped; }, 20);
+    // the relay still works for others: rc[1] (which sent a packet right at the limit) joins the room after all that
+    MsgJoin j; j.code = made.code; j.name = "after";
+    rc[1]->send(pack(j), CH_RELIABLE);
+    double tJoin = pump([&] { return !rc[1]->got.empty(); }, 10);
+    MsgWelcome w;
+    bool joined = tJoin >= 0 && unpack(rc[1]->got[0].data(), rc[1]->got[0].size(), w) && !rc[1]->dropped;
+    snprintf(b, sizeof b, "%zu KB packet: sender dropped after %.1fs; a %zu B one is fine and its sender then joins (%.2fs), room has %zu",
+             huge.size() / 1024, tDrop, relay::MAX_PACKET, tJoin, created ? rel.rooms.playerCount() : (size_t)0);
+    check(created && tDrop >= 0 && joined && !rc[2]->dropped, "limits: oversized packet refused", b);
+
+    // (the oversized sender is still a peer on that relay until its timeout, so count on a fresh one)
+    rc.clear();
+    rel.stop();
+    if (!rel.start(0)) { check(false, "limits: connections per address", "can't bind UDP"); return; }
+    for (size_t i = 0; i < relay::MAX_PEERS_PER_IP + 1; i++) { rc.push_back(std::make_unique<RawClient>()); rc.back()->start(rel.port(), true); }
+    auto settled = [&] { for (auto& c : rc) if (!c->connected && !c->dropped) return false; return true; };
+    pump(settled, 20);
+    int conn = 0, refused = 0;
+    for (auto& c : rc) { conn += c->connected && !c->dropped; refused += !c->connected; }
+    snprintf(b, sizeof b, "%zu tries from one address: %d connected, %d refused", rc.size(), conn, refused);
+    check(conn == (int)relay::MAX_PEERS_PER_IP && refused == 1, "limits: connections per address", b);
+}
 
 static void liveChecks() {
     char b[320];
@@ -464,6 +536,7 @@ int main() {
     protocolChecks();
     roomChecks();
     liveChecks();
+    limitChecks();
     printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
     return fails ? 1 : 0;
 }

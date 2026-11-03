@@ -9,6 +9,7 @@ uint32_t worldFingerprint(const World& w) {
     };
     auto n = [&](size_t v) { mix((uint32_t)v); };
     auto at = [&](float x, float z) { mix((uint32_t)(int32_t)lrintf(x)); mix((uint32_t)(int32_t)lrintf(z)); };
+    mix(netp::GAME_BUILD);
     n(w.plats.size()); n(w.rails.size()); n(w.houses.size()); n(w.chunks.size()); n(w.ponds.size()); n(w.lamps.size());
     n(w.signals.size()); n(w.signalHeads.size()); n(w.seats.size()); n(w.carPaths.size()); n(w.tramPaths.size());
     n(w.cablePaths.size()); n(w.pedPaths.size()); n(w.gondolas.size()); n(w.stations.size());

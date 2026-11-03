@@ -16,6 +16,17 @@ struct NetConfig {
     uint32_t fingerprint = 0;
 };
 
+// Fires every `interval` on average at whatever frame rate it is polled: the next time is advanced by the
+// interval, not reset to the poll time (that would drift down to e.g. 15 Hz at 60 fps). After a long stall it
+// starts afresh instead of firing a burst.
+struct Every {
+    double interval, next = -1e18;
+    explicit Every(double i) : interval(i) {}
+    bool due(double now) const { return now >= next; }
+    void fired(double now) { next = now - next > interval ? now + interval : next + interval; }
+    void reset() { next = -1e18; }
+};
+
 struct RemoteInfo {
     uint8_t id = 0;
     std::string name;
@@ -34,7 +45,7 @@ public:
     bool start(const NetConfig& cfg, double now);   // false (and FAILED) if the relay address is bad
     void stop();                                    // leaves the session and disconnects
     void service(double now);                       // once a frame: never blocks
-    bool stateDue(double now) const { return status == IN_SESSION && now - lastStateSent_ >= STATE_INTERVAL; }
+    bool stateDue(double now) const { return status == IN_SESSION && stateTimer_.due(now); }
     void sendState(const netp::PlayerState& s, double now);
 
     bool active() const { return status != OFF; }
@@ -56,7 +67,8 @@ private:
     _ENetHost* host_ = nullptr;
     _ENetPeer* peer_ = nullptr;
     NetConfig cfg_;
-    double startedAt_ = 0, lastStateSent_ = -1e9, lastPing_ = -1e9;
+    double startedAt_ = 0, lastPing_ = -1e9;
+    Every stateTimer_{STATE_INTERVAL};
     uint16_t seq_ = 0;
     bool enetInit_ = false;
 

@@ -14,6 +14,9 @@
 namespace netp {
 
 constexpr uint16_t PROTOCOL_VERSION = 1;
+// Bump when gameplay or world generation changes, so mismatched builds are refused even if the world counts happen
+// to agree (it goes into the world fingerprint, net_game.cpp). PROTOCOL_VERSION is for wire format changes.
+constexpr uint32_t GAME_BUILD = 1;
 constexpr int MAX_PLAYERS = 8;
 constexpr int NAME_MAX = 16;          // bytes of UTF-8
 constexpr int CODE_LEN = 6;
@@ -259,7 +262,7 @@ struct PlayerState {
     float pushAmt = 0;                // 0..1
     float pitch = 0;                  // radians, +-1.27
     float balance = 0;                // -1..1
-    float flipAngle = 0, shoveAngle = 0;   // radians, sent mod 2 pi
+    float flipAngle = 0, shoveAngle = 0;   // DEGREES, as Player keeps them (flip -360..360: the sign tells a heelflip; shove 0..180), 0.02 deg steps, +-655
     float flipProg = -1, shoveProg = -1;   // flipT / flipDur, or -1 when not flipping
     float bailT = 0;                  // seconds, 0..2.55
     float boardDx = 0, boardDy = 0, boardDz = 0;   // board position relative to the rider (bails), +-327 m
@@ -290,7 +293,7 @@ struct PlayerState {
         w.u16((uint16_t)lrintf(std::fmax(0.f, std::fmin(1.f, fin(railT))) * 65535.f));
         w.u8(unit8(crouch)); w.u8((uint8_t)sunit8(lean, 127)); w.u8((uint8_t)(angle16(pushPhase) >> 8)); w.u8(unit8(pushAmt));
         w.u8((uint8_t)sunit8(pitch, 100)); w.u8((uint8_t)sunit8(balance, 127));
-        w.u16(angle16(flipAngle)); w.u16(angle16(shoveAngle));
+        w.i16(fix16(flipAngle, 50)); w.i16(fix16(shoveAngle, 50));
         w.u8(prog8(flipProg)); w.u8(prog8(shoveProg));
         w.u8((uint8_t)lrintf(std::fmax(0.f, std::fmin(2.55f, fin(bailT))) * 100.f));
         w.i16(fix16(boardDx, 100)); w.i16(fix16(boardDy, 100)); w.i16(fix16(boardDz, 100));
@@ -308,7 +311,7 @@ struct PlayerState {
         railT = r.u16() / 65535.f;
         crouch = r.u8() / 255.f; lean = (int8_t)r.u8() / 127.f; pushPhase = unangle16((uint16_t)(r.u8() << 8)); pushAmt = r.u8() / 255.f;
         pitch = (int8_t)r.u8() / 100.f; balance = (int8_t)r.u8() / 127.f;
-        flipAngle = unangle16(r.u16()); shoveAngle = unangle16(r.u16());
+        flipAngle = r.i16() / 50.f; shoveAngle = r.i16() / 50.f;
         flipProg = unprog8(r.u8()); shoveProg = unprog8(r.u8());
         bailT = r.u8() / 100.f;
         boardDx = r.i16() / 100.f; boardDy = r.i16() / 100.f; boardDz = r.i16() / 100.f;

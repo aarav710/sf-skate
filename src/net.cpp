@@ -51,6 +51,8 @@ bool Net::start(const NetConfig& cfg, double now) {
     cfg_ = cfg;
     myName = netp::sanitizeName(cfg.name);
     startedAt_ = now;
+    stateTimer_.reset();
+    lastPing_ = -1e9;
     status = CONNECTING;
     error.clear();
     if (!cfg.create && netp::normalizeCode(cfg.joinCode).empty()) { fail("Session codes are 6 letters and digits"); return false; }
@@ -144,7 +146,7 @@ void Net::service(double now) {
 
 void Net::sendState(const netp::PlayerState& s, double now) {
     if (status != IN_SESSION) return;
-    lastStateSent_ = now;
+    stateTimer_.fired(now);
     netp::MsgPlayerState m; m.s = s;
     send(netp::pack(m, myId, seq_++, clock(now)), netp::CH_STATE);
     if (host_) enet_host_flush(host_);

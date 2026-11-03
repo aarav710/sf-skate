@@ -39,6 +39,9 @@ bool Relay::start(uint16_t port, int maxPeers) {
     addr.port = port;
     host_ = enet_host_create(&addr, (size_t)maxPeers, netp::CH_COUNT, 0, 0);
     if (!host_) return false;
+    host_->maximumPacketSize = MAX_PACKET;
+    host_->maximumWaitingData = MAX_WAITING_DATA;
+    host_->duplicatePeers = MAX_PEERS_PER_IP;
     logf("relay listening on UDP %u (protocol %u, %d rooms max)", (unsigned)host_->address.port, (unsigned)netp::PROTOCOL_VERSION, rooms.maxRooms);
     return true;
 }
@@ -50,6 +53,7 @@ void Relay::stop() {
     }
     if (enetInit_) { enet_deinitialize(); enetInit_ = false; }
     peers_.clear();
+    rooms = Rooms();   // every session went with the host
 }
 
 void Relay::send(ENetPeer* peer, const std::vector<uint8_t>& bytes, uint8_t channel) {

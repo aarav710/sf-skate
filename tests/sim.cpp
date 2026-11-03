@@ -12,6 +12,9 @@
 #include "../src/birds.h"
 #include "../src/net_game.h"
 #include "../src/remote.h"
+#include "../src/session_ui.h"
+#include <sys/stat.h>
+#include <unistd.h>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -229,8 +232,117 @@ static void remoteChecks() {
     }
 }
 
+// The "play with friends" panel's pieces: ~/.sfskate, the text boxes, and game keys going quiet while one is typed in.
+static void uiChecks() {
+    char b[512];
+    {   // settings: round trip under a temporary HOME, a missing file, a garbled one, odd characters
+        char dir[] = "/tmp/sfskate_ui_XXXXXX";
+        bool made = mkdtemp(dir) != nullptr;
+        std::string oldHome = getenv("HOME") ? getenv("HOME") : "";
+        setenv("HOME", dir, 1);
+        std::string path = sui::settingsPath();
+        bool pathOk = path == std::string(dir) + "/.sfskate";
+        sui::Settings none = sui::loadSettings(path);   // (missing)
+        bool missingOk = none.name.empty() && none.relay.empty() && none.other.empty();
+        sui::Settings s;
+        s.name = "Zoë = #1 \xF0\x9F\x9B\xB9";   // '=', '#', a 4-byte emoji: 16 bytes at most
+        s.relay = "relay.example.com:7777";
+        s.other.push_back({"volume", "0.5"});
+        bool saved = sui::saveSettings(path, s);
+        sui::Settings back = sui::loadSettings(path);
+        bool rt = back.name == netp::sanitizeName(s.name) && back.relay == s.relay && back.other.size() == 1 && back.other[0].second == "0.5";
+        // garbled: binary junk, no '=', control characters in the name, an over-long name, CRLF, a bare '='
+        FILE* f = fopen(path.c_str(), "wb");
+        const char junk[] = "\x01\x02\xff\xfe garbage\r\n=\r\nname=\x07\x1b[31mBob\x7f the skater with a long name\r\nrelay= bad host :12 \r\n\x00\x00name\n";
+        if (f) { fwrite(junk, 1, sizeof junk - 1, f); fclose(f); }
+        sui::Settings g = sui::loadSettings(path);
+        bool garbled = g.name.size() <= 16 && g.name.find('\x1b') == std::string::npos && g.name.find('\x07') == std::string::npos &&
+                       g.name.compare(0, 3, "[31") == 0 && g.relay == "badhost:12";
+        // a name that is nothing but junk is no name (not "skater")
+        f = fopen(path.c_str(), "wb");
+        if (f) { fputs("name=\x01\x02\n", f); fclose(f); }
+        bool junkName = sui::loadSettings(path).name.empty();
+        // a directory where the file goes: no crash, nothing read, saving says no
+        remove(path.c_str());
+        mkdir(path.c_str(), 0700);
+        sui::Settings d = sui::loadSettings(path);
+        bool dirOk = d.name.empty() && !sui::saveSettings(path, s);
+        rmdir(path.c_str());
+        remove((path + ".tmp").c_str());
+        rmdir(dir);
+        if (oldHome.empty()) unsetenv("HOME"); else setenv("HOME", oldHome.c_str(), 1);
+        snprintf(b, sizeof b, "temp dir %d, path %d, missing %d, saved %d, round trip %d (\"%s\"), garbled %d (\"%s\" / \"%s\"), junk name %d, dir %d",
+                 made, pathOk, missingOk, saved, rt, back.name.c_str(), garbled, g.name.c_str(), g.relay.c_str(), junkName, dirOk);
+        check(made && pathOk && missingOk && saved && rt && garbled && junkName && dirOk, "ui: ~/.sfskate load/save", b);
+    }
+    {   // the join box: lower case, spaces and dashes like the relay's sanitizer; pasting a message or a link
+        sui::TextField c(sui::TextField::CODE);
+        for (char ch : std::string("ab c-2d 3e9")) c.type((uint8_t)ch);
+        bool typed = c.text == "ABC2D3" && netp::normalizeCode(c.text) == "ABC2D3";   // (6 at most: the 9 didn't fit)
+        sui::TextField p(sui::TextField::CODE);
+        p.paste("Code xk4-m5v  ");
+        std::string a = p.text;
+        p.paste("sfskate://join/HQ7RT2\n");
+        std::string link = p.text;
+        p.paste("!!!");   // nothing usable: what was there stays
+        bool pasted = a == "XK4M5V" && link == "HQ7RT2" && p.text == "HQ7RT2";
+        sui::TextField bad(sui::TextField::CODE);
+        for (char ch : std::string("I0O1AB")) bad.type((uint8_t)ch);
+        bool rejected = bad.text == "I0O1AB" && netp::normalizeCode(bad.text).empty();   // (typed as is; Join says why)
+        // the name box: 16 bytes of whole characters, no control characters, select-all on focus
+        sui::TextField n(sui::TextField::NAME);
+        n.text = "skater";
+        n.fresh = true;
+        for (uint32_t cp : {(uint32_t)'Z', 0xEBu, 0x1F6F9u, 7u, (uint32_t)'a', (uint32_t)'b', (uint32_t)'c', (uint32_t)'d', (uint32_t)'e',
+                            (uint32_t)'f', (uint32_t)'g', (uint32_t)'h', (uint32_t)'i', (uint32_t)'j', (uint32_t)'k'})
+            n.type(cp);
+        bool name = n.text.size() <= 16 && n.text.compare(0, 3, "Z\xC3\xAB") == 0 && n.text.find('\x07') == std::string::npos &&
+                    netp::sanitizeName(n.text) == n.text && n.edited;
+        n.backspace();
+        bool bs = n.text.size() < 16 && netp::sanitizeName(n.text) == n.text;
+        n.text = "Zo\xC3\xAB";
+        n.backspace();
+        bool bsUtf = n.text == "Zo";
+        sui::TextField q(sui::TextField::NAME);
+        q.paste("Ana\xff\x01 Lee\nsecond line");
+        bool namePaste = q.text == "Ana Lee";
+        snprintf(b, sizeof b, "typed %d (\"%s\"), pasted %d (\"%s\", \"%s\"), I/O/0/1 refused at Join %d, name %d (\"%s\"), backspace %d %d, paste %d (\"%s\")",
+                 typed, c.text.c_str(), pasted, a.c_str(), link.c_str(), rejected, name, n.text.c_str(), bs, bsUtf, namePaste, q.text.c_str());
+        check(typed && pasted && rejected && name && bs && bsUtf && namePaste, "ui: code and name boxes", b);
+    }
+    {   // game keys: a T typed into a box is not the time-of-day key (nor M the map) the frame it's typed, the frame
+        // focus comes or goes, or while it's held; without a box focused they work
+        sui::TextField n(sui::TextField::NAME);
+        sui::focus(nullptr);
+        sui::beginFrame();
+        sui::injectKey(KEY_T);
+        bool free = sui::gameKeyPressed(KEY_T) && sui::keyPressed(KEY_T);
+        sui::beginFrame();
+        sui::focus(&n);   // (focus taken mid-frame: the rest of the frame is the box's)
+        sui::injectKey(KEY_T);
+        bool takenMid = !sui::gameKeyPressed(KEY_T) && sui::keyPressed(KEY_T);
+        sui::beginFrame();
+        sui::injectKey(KEY_M);
+        bool held = !sui::gameKeyPressed(KEY_M) && !sui::gameKeyDown(KEY_M) && sui::keyPressed(KEY_M);
+        sui::injectKey(KEY_ENTER);
+        sui::focus(nullptr);   // (Enter leaves the box: the same Enter mustn't also drop the player in)
+        bool leaving = !sui::gameKeyPressed(KEY_ENTER);
+        sui::beginFrame();
+        sui::injectKey(KEY_T);
+        bool after = sui::gameKeyPressed(KEY_T);
+        sui::beginFrame();
+        snprintf(b, sizeof b, "unfocused %d, focused mid-frame %d, focused %d, frame focus left %d, next frame %d", free, takenMid, held, leaving, after);
+        check(free && takenMid && held && leaving && after, "ui: game keys quiet while typing", b);
+    }
+}
+
 int main() {
     SetTraceLogLevel(LOG_WARNING);
+    uiChecks();
+    if (getenv("SFSKATE_SIM_ONLY") && !strcmp(getenv("SFSKATE_SIM_ONLY"), "ui")) {
+        printf("\n%s (%d failed)\n", fails ? "SOME CHECKS FAILED" : "ALL CHECKS PASSED", fails);
+        return fails ? 1 : 0;
+    }
     remoteChecks();
     W.keepFoliageMesh = true;   // leaves meshed in place too, to check the sources against
     W.freezeEarly = true;       // the cells the game bakes during generation: any later write to one stops the run

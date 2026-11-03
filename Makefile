@@ -43,7 +43,7 @@ clean:
 .PHONY: run clean
 
 # headless gameplay checks
-SIM_SRC := tests/sim.cpp src/world_terrain.cpp src/world_city.cpp src/world_landmarks.cpp src/world_towers.cpp src/world_transit.cpp src/world_peninsula.cpp src/gondola.cpp src/mesh.cpp src/models.cpp src/instance.cpp src/player.cpp src/chase.cpp src/traffic.cpp src/jetski.cpp src/seaplane.cpp src/birds.cpp src/net_game.cpp src/remote.cpp src/traffic_sync.cpp tests/net_sim.cpp
+SIM_SRC := tests/sim.cpp src/world_terrain.cpp src/world_city.cpp src/world_landmarks.cpp src/world_towers.cpp src/world_transit.cpp src/world_peninsula.cpp src/gondola.cpp src/mesh.cpp src/models.cpp src/instance.cpp src/player.cpp src/chase.cpp src/traffic.cpp src/jetski.cpp src/seaplane.cpp src/birds.cpp src/net_game.cpp src/remote.cpp src/traffic_sync.cpp src/session_ui.cpp tests/net_sim.cpp
 build/sim: $(SIM_SRC) $(wildcard src/*.h) | build
 	$(CXX) $(CXXFLAGS) -o $@ $(SIM_SRC) $(LDFLAGS)
 

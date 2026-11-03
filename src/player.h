@@ -14,6 +14,30 @@ struct Input {
 
 struct Sfx; // audio hooks
 
+// What drawSkater needs to pose a skater: the local Player, or another player from what they last sent.
+struct SkaterPose {
+    int state = 0;              // Player::State
+    Vector3 pos{};
+    float yaw = 0;
+    float crouch = 0, lean = 0, pushPhase = 0, pushAmt = 0, pitch = 0;
+    float flipProg = -1, shoveProg = -1;   // 0..1 through the flip / shove-it, -1 when not doing one
+    float flipAngle = 0, shoveAngle = 0;   // degrees
+    bool grabbing = false;
+    float bailT = 0;
+    bool splashed = false;
+    Vector3 boardPos{};         // the board on its own while bailing
+    float boardYaw = 0;
+};
+// Clothes and board colours (alpha is the material code, so M_PLAIN).
+struct SkaterLook {
+    Color skin = {214, 170, 134, 255}, shirt = {40, 110, 190, 255}, pants = {50, 52, 60, 255};
+    Color shoe = {235, 235, 235, 255}, cap = {200, 40, 40, 255};
+    Color deck = {30, 30, 32, 255}, deckBottom = {210, 120, 40, 255}, wheel = {240, 238, 225, 255}, truck = {150, 150, 155, 255};
+    float wavePhase = 0;        // so a crowd of skaters doesn't wave their arms in step
+};
+// Draws a skater with immediate-mode raylib calls: in the city shader pass, or the depth shader for sun shadows.
+void drawSkater(const SkaterPose& p, const SkaterLook& look);
+
 struct Player {
     enum State { RIDE, AIR, GRIND, BAIL };
     State state = RIDE;
@@ -70,7 +94,8 @@ struct Player {
     void bail(const char* why);
     Vector3 fwd() const { return {cosf(yaw), 0, sinf(yaw)}; }
     float hspeed() const { return state == AIR ? sqrtf(vel.x * vel.x + vel.z * vel.z) : fabsf(speed); }
-    void draw() const;
+    SkaterPose pose() const;
+    void draw() const { drawSkater(pose(), SkaterLook{}); }
     void say(const std::string& s, Color c, const std::string& sub = "") { popup = s; subPopup = sub; popupT = 2.2f; popupCol = c; }
 
     // events for sound effects, read and cleared by main each frame

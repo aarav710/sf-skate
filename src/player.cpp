@@ -631,10 +631,32 @@ void Player::bailUpdate(float dt, World& w) {
 // ---------------------------------------------------------------- drawing
 static void limb(Vector3 a, Vector3 b, float r, Color c) { DrawCylinderEx(a, b, r, r * 0.9f, 6, c); }
 
-void Player::draw() const {
-    Color skin = {214, 170, 134, 255}, shirt = {40, 110, 190, 255}, pants = {50, 52, 60, 255};
-    Color shoe = {235, 235, 235, 255}, cap = {200, 40, 40, 255};
-    Color deck = {30, 30, 32, 255}, deckBottom = {210, 120, 40, 255}, wheel = {240, 238, 225, 255}, truck = {150, 150, 155, 255};
+SkaterPose Player::pose() const {
+    SkaterPose p;
+    p.state = state;
+    p.pos = pos;
+    p.yaw = yaw;
+    p.crouch = crouch; p.lean = lean; p.pushPhase = pushPhase; p.pushAmt = pushAmt; p.pitch = pitch;
+    p.flipProg = flipT >= 0 ? flipT / flipDur : -1;
+    p.shoveProg = shoveT >= 0 ? shoveT / shoveDur : -1;
+    p.flipAngle = flipAngle; p.shoveAngle = shoveAngle;
+    p.grabbing = grabbing;
+    p.bailT = bailT;
+    p.splashed = splashed;
+    p.boardPos = boardPos;
+    p.boardYaw = boardYaw;
+    return p;
+}
+
+void drawSkater(const SkaterPose& p, const SkaterLook& look) {
+    const Color skin = look.skin, shirt = look.shirt, pants = look.pants, shoe = look.shoe, cap = look.cap;
+    const Color deck = look.deck, deckBottom = look.deckBottom, wheel = look.wheel, truck = look.truck;
+    const int state = p.state;
+    const Vector3 pos = p.pos, boardPos = p.boardPos;
+    const float yaw = p.yaw, lean = p.lean, pitch = p.pitch, crouch = p.crouch, pushAmt = p.pushAmt, pushPhase = p.pushPhase;
+    const float flipAngle = p.flipAngle, shoveAngle = p.shoveAngle, bailT = p.bailT, boardYaw = p.boardYaw;
+    const bool splashed = p.splashed, grabbing = p.grabbing;
+    using St = Player::State;
 
     auto drawBoard = [&]() {
         DrawCube({0, 0.11f, 0}, 0.82f, 0.03f, 0.21f, deck);
@@ -647,7 +669,7 @@ void Player::draw() const {
         }
     };
 
-    if (state == BAIL) {
+    if (state == St::BAIL) {
         // board on its own
         rlPushMatrix();
         rlTranslatef(boardPos.x, boardPos.y + 0.03f, boardPos.z);
@@ -678,7 +700,7 @@ void Player::draw() const {
     rlRotatef(-yaw * RAD2DEG, 0, 1, 0);
     rlRotatef(lean * -10.f, 1, 0, 0);
 
-    float lift = (flipT >= 0 || shoveT >= 0) ? 0.25f * sinf(PI * clampf((flipT >= 0 ? flipT / flipDur : shoveT / shoveDur), 0, 1)) : 0.f;
+    float lift = (p.flipProg >= 0 || p.shoveProg >= 0) ? 0.25f * sinf(PI * clampf((p.flipProg >= 0 ? p.flipProg : p.shoveProg), 0, 1)) : 0.f;
     // board (with flip / shove-it rotation)
     rlPushMatrix();
     rlRotatef(pitch * RAD2DEG, 0, 0, 1);   // the board lies along the slope; the rider stays upright over it
@@ -695,7 +717,7 @@ void Player::draw() const {
     float footY = 0.13f + lift;
     Vector3 hipF = {0.1f, hipY, 0}, hipB = {-0.1f, hipY, 0};
     Vector3 footF = {0.24f, footY, 0.0f}, footB = {-0.22f, footY, 0.0f};
-    if (pushAmt > 0.05f && state == RIDE) {
+    if (pushAmt > 0.05f && state == St::RIDE) {
         // back foot pushes along the ground
         float ph = sinf(pushPhase);
         footB = {lerpf(-0.22f, -0.35f + ph * 0.35f, pushAmt), lerpf(footY, 0.02f + std::max(0.f, -ph) * 0.12f, pushAmt), lerpf(0.f, 0.18f, pushAmt)};
@@ -730,12 +752,12 @@ void Player::draw() const {
     DrawCube({chest.x + 0.04f, chest.y + 0.31f, chest.z + 0.02f}, 0.25f, 0.07f, 0.25f, cap);
     DrawCube({chest.x + 0.17f, chest.y + 0.29f, chest.z + 0.02f}, 0.12f, 0.02f, 0.2f, cap); // brim points forward
     // arms out for balance, or grabbing the board
-    float armWave = sinf((float)GetTime() * 2.f) * 0.05f;
+    float armWave = sinf((float)GetTime() * 2.f + look.wavePhase) * 0.05f;
     Vector3 shF = {chest.x + 0.16f, chest.y - 0.02f, chest.z}, shB = {chest.x - 0.16f, chest.y - 0.02f, chest.z};
     Vector3 handF = {0.55f, chest.y - 0.3f + armWave + lean * 0.2f, 0.12f};
     Vector3 handB = {-0.55f, chest.y - 0.25f - armWave - lean * 0.2f, 0.05f};
-    if (state == AIR && grabbing && flipT < 0 && shoveT < 0) handF = {0.08f, 0.16f + lift, 0.11f};
-    if (pushAmt > 0.05f && state == RIDE) handB = {-0.35f, chest.y - 0.45f, 0.25f};
+    if (state == St::AIR && grabbing && p.flipProg < 0 && p.shoveProg < 0) handF = {0.08f, 0.16f + lift, 0.11f};
+    if (pushAmt > 0.05f && state == St::RIDE) handB = {-0.35f, chest.y - 0.45f, 0.25f};
     limb(shF, handF, 0.05f, shirt);
     limb(shB, handB, 0.05f, shirt);
     rlPopMatrix();

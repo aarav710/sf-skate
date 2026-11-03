@@ -13,10 +13,10 @@
 
 namespace netp {
 
-constexpr uint16_t PROTOCOL_VERSION = 3;
+constexpr uint16_t PROTOCOL_VERSION = 4;
 // Bump when gameplay or world generation changes, so mismatched builds are refused even if the world counts happen
 // to agree (it goes into the world fingerprint, net_game.cpp). PROTOCOL_VERSION is for wire format changes.
-constexpr uint32_t GAME_BUILD = 3;
+constexpr uint32_t GAME_BUILD = 4;
 constexpr int MAX_PLAYERS = 8;
 constexpr int NAME_MAX = 16;          // bytes of UTF-8
 constexpr int CODE_LEN = 6;
@@ -27,6 +27,13 @@ static_assert(sizeof(CODE_ALPHABET) == 33, "32 symbols");
 
 // ENet channels
 enum Channel : uint8_t { CH_RELIABLE = 0, CH_STATE = 1, CH_COUNT = 2 };
+
+// the biggest message either side takes (ENet's maximumPacketSize): a full snapshot goes in chunks of FULL_CHUNK
+constexpr size_t MAX_MESSAGE = 64 * 1024 + 256;
+// the data of a clean leave's ENet disconnect: anything else (a timeout) holds the player's place for a rejoin
+constexpr uint32_t DISCONNECT_LEAVE = 0x4C454156;   // "LEAV"
+constexpr double REJOIN_HOLD = 30;    // s the relay keeps a dropped player's place (id, colour) for them
+constexpr double SESSION_MAX = 6 * 3600;   // s a session lasts at most
 
 constexpr uint8_t FROM_RELAY = 0;     // header.from of messages the relay makes itself; player ids start at 1
 constexpr uint8_t NO_PLAYER = 0;
@@ -44,12 +51,14 @@ enum MsgType : uint8_t {
     MSG_PLAYER_STATE = 9,  // client -> relay -> room, 20 Hz, unreliable sequenced
     MSG_PING = 10,         // client -> relay, 1 Hz
     MSG_PONG = 11,         // relay -> client, echoes the ping
-    MSG_REJOIN = 12,       // reserved for later stages (plan section 4); not encoded yet
+    MSG_REJOIN = 12,       // client -> relay: back after a dropped connection (code, id and the secret from WELCOME)
     MSG_CAR_SNAPSHOT = 13, // host -> relay -> room, 10 Hz, unreliable sequenced: the cars near the other players
     MSG_FULL_SNAPSHOT = 14,// host -> relay -> one player who asked, reliable: all of the traffic
     MSG_WORLD_SETTINGS = 15,   // host -> relay -> room: time of day and weather; anyone else -> relay -> host: a request
     MSG_EVENT = 16,        // client -> relay -> room, reliable: something one player did to the shared world
     MSG_FULL_REQUEST = 17, // client -> relay -> host: send me a full snapshot (on joining, or when out of step)
+    MSG_AWAY = 18,         // relay -> room: a player's connection dropped (their place is held), or they're back
+    MSG_SESSION_ENDING = 19,   // relay -> room: the session hits its time limit soon
     MSG_TYPE_COUNT
 };
 
@@ -61,6 +70,10 @@ enum ErrorCode : uint8_t {
     ERR_NO_SESSION = 4,
     ERR_SERVER_FULL = 5,    // relay is at its room limit
     ERR_BAD_REQUEST = 6,    // malformed message, or create/join while already in a session
+    ERR_TOO_MANY_ROOMS = 7, // this address has made as many sessions as it may
+    ERR_SLOW_DOWN = 8,      // too many wrong codes from this address
+    ERR_REJOIN_EXPIRED = 9, // the place held for a rejoin is gone (or the secret is wrong)
+    ERR_SESSION_OVER = 10,  // the session reached its time limit
 };
 
 inline const char* errorText(uint8_t code) {
@@ -71,6 +84,10 @@ inline const char* errorText(uint8_t code) {
     case ERR_NO_SESSION: return "No session with that code";
     case ERR_SERVER_FULL: return "Server is full, try again later";
     case ERR_BAD_REQUEST: return "Bad request";
+    case ERR_TOO_MANY_ROOMS: return "Too many sessions from your network";
+    case ERR_SLOW_DOWN: return "Too many tries, wait a minute";
+    case ERR_REJOIN_EXPIRED: return "Your place in the session expired";
+    case ERR_SESSION_OVER: return "The session reached its 6 hour limit";
     default: return "Error";
     }
 }
@@ -176,8 +193,9 @@ struct MsgCreated {
     static constexpr uint8_t TYPE = MSG_CREATED;
     std::string code;
     uint8_t playerId = 0;
-    void encode(ByteWriter& w) const { writeCode(w, code); w.u8(playerId); }
-    void decode(ByteReader& r) { code = readCode(r); playerId = r.u8(); }
+    uint64_t secret = 0;              // proves it's us on a REJOIN
+    void encode(ByteWriter& w) const { writeCode(w, code); w.u8(playerId); w.u64(secret); }
+    void decode(ByteReader& r) { code = readCode(r); playerId = r.u8(); secret = r.u64(); }
 };
 
 struct MsgJoin {
@@ -190,30 +208,68 @@ struct MsgJoin {
     void decode(ByteReader& r) { version = r.u16(); fingerprint = r.u32(); code = readCode(r); name = readStr(r, NAME_MAX); }
 };
 
+// Back after the connection dropped: the session, our id in it and the secret it came with. Answered with a WELCOME
+// (the same id), or an ERROR (the place expired, the session ended).
+struct MsgRejoin {
+    static constexpr uint8_t TYPE = MSG_REJOIN;
+    uint16_t version = PROTOCOL_VERSION;
+    uint32_t fingerprint = 0;
+    std::string code;
+    uint8_t playerId = 0;
+    uint64_t secret = 0;
+    void encode(ByteWriter& w) const { w.u16(version); w.u32(fingerprint); writeCode(w, code); w.u8(playerId); w.u64(secret); }
+    void decode(ByteReader& r) { version = r.u16(); fingerprint = r.u32(); code = readCode(r); playerId = r.u8(); secret = r.u64(); }
+};
+
 struct RosterEntry {
     uint8_t id = 0;
     std::string name;
-    bool operator==(const RosterEntry& o) const { return id == o.id && name == o.name; }
+    bool away = false;                // dropped, their place held for a rejoin
+    bool operator==(const RosterEntry& o) const { return id == o.id && name == o.name && away == o.away; }
 };
 
 struct MsgWelcome {
     static constexpr uint8_t TYPE = MSG_WELCOME;
     std::string code;
     uint8_t playerId = 0, hostId = 0;
+    uint64_t secret = 0;               // proves it's us on a REJOIN
     std::vector<RosterEntry> roster;   // everyone else already in the session
     void encode(ByteWriter& w) const {
-        writeCode(w, code); w.u8(playerId); w.u8(hostId);
+        writeCode(w, code); w.u8(playerId); w.u8(hostId); w.u64(secret);
         size_t n = std::min(roster.size(), (size_t)MAX_PLAYERS);
         w.u8((uint8_t)n);
-        for (size_t i = 0; i < n; i++) { w.u8(roster[i].id); writeStr(w, roster[i].name, NAME_MAX); }
+        for (size_t i = 0; i < n; i++) { w.u8(roster[i].id); w.u8(roster[i].away ? 1 : 0); writeStr(w, roster[i].name, NAME_MAX); }
     }
     void decode(ByteReader& r) {
-        code = readCode(r); playerId = r.u8(); hostId = r.u8();
+        code = readCode(r); playerId = r.u8(); hostId = r.u8(); secret = r.u64();
         int n = r.u8();
         if (n > MAX_PLAYERS) { r.bad = true; return; }
         roster.resize(n);
-        for (auto& e : roster) { e.id = r.u8(); e.name = readStr(r, NAME_MAX); }
+        for (auto& e : roster) {
+            e.id = r.u8();
+            uint8_t a = r.u8();
+            if (a > 1) r.bad = true;
+            e.away = a == 1;
+            e.name = readStr(r, NAME_MAX);
+        }
     }
+};
+
+// A player's connection dropped (away: the relay holds their place for REJOIN_HOLD, then they're LEFT), or they're back.
+struct MsgAway {
+    static constexpr uint8_t TYPE = MSG_AWAY;
+    uint8_t id = 0;
+    bool away = true;
+    void encode(ByteWriter& w) const { w.u8(id); w.u8(away ? 1 : 0); }
+    void decode(ByteReader& r) { id = r.u8(); uint8_t a = r.u8(); if (a > 1) r.bad = true; away = a == 1; }
+};
+
+// The session closes in this many seconds (it hit SESSION_MAX).
+struct MsgSessionEnding {
+    static constexpr uint8_t TYPE = MSG_SESSION_ENDING;
+    uint16_t secondsLeft = 0;
+    void encode(ByteWriter& w) const { w.u16(secondsLeft); }
+    void decode(ByteReader& r) { secondsLeft = r.u16(); }
 };
 
 struct MsgPlayerJoined {
@@ -378,18 +434,75 @@ struct MsgFullRequest {
     void decode(ByteReader&) {}
 };
 
-// All of the host's traffic (Traffic::serializeFull, ~220 KB), for the one player who asked: the relay passes it
-// on only from the host and only to someone waiting for one.
+// One chunk of all of the host's traffic (Traffic::serializeFull, ~220 KB), for the one player who asked: the relay
+// passes them on only from the host and only to someone waiting for one. The snapshot goes as `count` chunks of
+// FULL_CHUNK bytes (the last one the rest), so no message is over MAX_MESSAGE; FullAssembler puts them back together.
 struct MsgFullSnapshot {
     static constexpr uint8_t TYPE = MSG_FULL_SNAPSHOT;
-    static constexpr size_t MAX_SIZE = 480 * 1024;
+    static constexpr size_t MAX_SIZE = 480 * 1024;     // the whole snapshot
+    static constexpr size_t FULL_CHUNK = 60 * 1024;
+    static constexpr int MAX_CHUNKS = (int)((MAX_SIZE + FULL_CHUNK - 1) / FULL_CHUNK);
     uint8_t to = NO_PLAYER;
-    std::vector<uint8_t> data;
-    void encode(ByteWriter& w) const { w.u8(to); for (uint8_t b : data) w.u8(b); }
+    uint16_t snapId = 0;              // which snapshot (the sender counts them): chunks of different ones never mix
+    uint8_t index = 0, count = 1;
+    uint32_t total = 0;               // bytes in the whole snapshot
+    std::vector<uint8_t> data;        // this chunk's
+    static size_t chunkSize(uint32_t total, int index, int count) {
+        return index < count - 1 ? FULL_CHUNK : total - FULL_CHUNK * (size_t)(count - 1);
+    }
+    void encode(ByteWriter& w) const {
+        w.u8(to); w.u16(snapId); w.u8(index); w.u8(count); w.u32(total);
+        for (uint8_t b : data) w.u8(b);
+    }
     void decode(ByteReader& r) {
-        to = r.u8();
-        if (r.bad || r.left() > MAX_SIZE) { r.bad = true; return; }
+        to = r.u8(); snapId = r.u16(); index = r.u8(); count = r.u8(); total = r.u32();
+        // every chunk tells the whole layout, and must be exactly its own share of it
+        if (r.bad || total == 0 || total > MAX_SIZE || count < 1 || count > MAX_CHUNKS || index >= count ||
+            count != (total + FULL_CHUNK - 1) / FULL_CHUNK || r.left() != chunkSize(total, index, count)) { r.bad = true; return; }
         data.assign(r.p + r.at, r.p + r.n); r.at = r.n;
+    }
+    // the chunks of `all` (at most MAX_SIZE bytes; nothing if it's empty or bigger)
+    static std::vector<MsgFullSnapshot> split(uint8_t to, uint16_t snapId, const std::vector<uint8_t>& all) {
+        std::vector<MsgFullSnapshot> out;
+        if (all.empty() || all.size() > MAX_SIZE) return out;
+        int count = (int)((all.size() + FULL_CHUNK - 1) / FULL_CHUNK);
+        for (int i = 0; i < count; i++) {
+            MsgFullSnapshot m;
+            m.to = to; m.snapId = snapId; m.index = (uint8_t)i; m.count = (uint8_t)count; m.total = (uint32_t)all.size();
+            size_t at = FULL_CHUNK * (size_t)i;
+            m.data.assign(all.begin() + at, all.begin() + at + chunkSize(m.total, i, count));
+            out.push_back(std::move(m));
+        }
+        return out;
+    }
+};
+
+// Puts a full snapshot back together from its chunks, in any order. A chunk of another snapshot (a newer one) starts
+// over; repeats are ignored; the size is capped by MsgFullSnapshot::decode (MAX_SIZE).
+struct FullAssembler {
+    bool active = false;
+    uint16_t snapId = 0;
+    uint8_t count = 0;
+    uint32_t total = 0;
+    int got = 0;
+    std::vector<uint8_t> buf, have;
+    void reset() { *this = FullAssembler(); }
+    // true when `m` completes the snapshot: then `out` has it, and the assembler is empty again
+    bool add(const MsgFullSnapshot& m, std::vector<uint8_t>& out) {
+        if (m.total == 0 || m.total > MsgFullSnapshot::MAX_SIZE || m.index >= m.count ||
+            m.data.size() != MsgFullSnapshot::chunkSize(m.total, m.index, m.count)) return false;
+        if (!active || m.snapId != snapId || m.count != count || m.total != total) {
+            reset();
+            active = true; snapId = m.snapId; count = m.count; total = m.total;
+            buf.assign(total, 0); have.assign(count, 0);
+        }
+        if (have[m.index]) return false;
+        have[m.index] = 1;
+        std::copy(m.data.begin(), m.data.end(), buf.begin() + MsgFullSnapshot::FULL_CHUNK * (size_t)m.index);
+        if (++got < count) return false;
+        out.swap(buf);
+        reset();
+        return true;
     }
 };
 

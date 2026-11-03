@@ -11,13 +11,15 @@ ENET_CFLAGS := $(shell pkg-config --cflags libenet 2>/dev/null || pkg-config --c
 ENET_LIBS   := $(shell pkg-config --libs libenet 2>/dev/null || pkg-config --libs enet 2>/dev/null || echo -lenet)
 CXXFLAGS += $(ENET_CFLAGS)
 LDFLAGS  += $(ENET_LIBS)
-# the relay players connect to by default, e.g. make SFSKATE_RELAY=relay.example.com:7777
-ifdef SFSKATE_RELAY
+# the relay players connect to by default, e.g. make SFSKATE_RELAY=relay.example.com:7777 (only from the command line:
+# an SFSKATE_RELAY in the environment is the game's run-time override, and mustn't end up compiled in by accident)
+ifeq ($(origin SFSKATE_RELAY),command line)
 CXXFLAGS += -DSFSKATE_RELAY='"$(SFSKATE_RELAY)"'
+RELAY_BUILT := $(SFSKATE_RELAY)
 endif
 # net.o is rebuilt when the compiled-in relay changes (the stamp file is only rewritten when it differs)
 RELAY_STAMP := build/relay-address.txt
-$(shell mkdir -p build && (echo '$(SFSKATE_RELAY)' | cmp -s - $(RELAY_STAMP) || echo '$(SFSKATE_RELAY)' > $(RELAY_STAMP)))
+$(shell mkdir -p build && (echo '$(RELAY_BUILT)' | cmp -s - $(RELAY_STAMP) || echo '$(RELAY_BUILT)' > $(RELAY_STAMP)))
 build/net.o: $(RELAY_STAMP)
 
 SRC := $(wildcard src/*.cpp)
@@ -51,7 +53,7 @@ test: build/sim
 .PHONY: test
 
 # multiplayer relay server (no raylib): ./build/relay --port 7777
-NET_CXXFLAGS := -std=c++17 -O2 -ffp-contract=off -Wall -Wextra -Isrc -Iserver $(ENET_CFLAGS)
+NET_CXXFLAGS := -std=c++17 -O2 -ffp-contract=off -Wall -Wextra -pthread -Isrc -Iserver $(ENET_CFLAGS)
 RELAY_SRC := server/rooms.cpp server/relay.cpp
 relay: build/relay
 build/relay: $(RELAY_SRC) server/relay_main.cpp $(wildcard server/*.h) src/net_protocol.h src/bytes.h | build

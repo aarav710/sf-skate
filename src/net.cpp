@@ -3,6 +3,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <algorithm>
+#include <atomic>
+#include <thread>
 
 // the relay players use unless told otherwise: set it at build time with -DSFSKATE_RELAY='"host:port"'
 #ifndef SFSKATE_RELAY
@@ -47,11 +49,22 @@ bool parseHostPort(const std::string& s, std::string& host, uint16_t& port) {
     return !host.empty() && host.find(':') == std::string::npos;
 }
 
+struct Net::Lookup {
+    std::string name;
+    std::atomic<int> state{0};   // 0 looking, 1 found (addr), 2 not found
+    ENetAddress addr{};
+};
+
+Net::~Net() {
+    leave();
+    if (enetInit_) { enet_deinitialize(); enetInit_ = false; }
+}
+
 bool Net::start(const NetConfig& cfg, double now) {
-    stop();
+    leave();
     cfg_ = cfg;
     myName = netp::sanitizeName(cfg.name);
-    startedAt_ = now;
+    startedAt_ = clockBase_ = lastService_ = lastRecv_ = now;
     stateTimer_.reset();
     lastPing_ = -1e9;
     status = CONNECTING;
@@ -60,49 +73,105 @@ bool Net::start(const NetConfig& cfg, double now) {
     std::string h;
     uint16_t port;
     if (!parseHostPort(cfg.relay, h, port)) { fail("Bad relay address \"" + cfg.relay + "\""); return false; }
-    if (enet_initialize() != 0) { fail("Network setup failed"); return false; }
-    enetInit_ = true;
+    if (!enetInit_) {
+        if (enet_initialize() != 0) { fail("Network setup failed"); return false; }
+        enetInit_ = true;
+    }
+    addrPort_ = port;
     ENetAddress addr;
-    if (enet_address_set_host(&addr, h.c_str()) != 0) { fail("Can't find relay \"" + h + "\""); return false; }
-    addr.port = port;
-    host_ = enet_host_create(nullptr, 1, netp::CH_COUNT, 0, 0);
-    if (!host_) { fail("Network setup failed"); return false; }
-    host_->maximumPacketSize = netp::MsgFullSnapshot::MAX_SIZE + 1024;   // (ENet's own default is 32 MB)
-    peer_ = enet_host_connect(host_, &addr, netp::CH_COUNT, 0);
-    if (!peer_) { fail("Network setup failed"); return false; }
-    enet_peer_timeout(peer_, 32, 5000, 10000);
+    if (enet_address_set_host_ip(&addr, h.c_str()) == 0) {   // a plain IP address: nothing to look up
+        addrHost_ = addr.host;
+        haveAddr_ = true;
+        if (!openConnection(now)) { fail("Network setup failed"); return false; }
+        return true;
+    }
+    // a name: looked up on a worker thread (a DNS lookup can take seconds), picked up by service()
+    auto lk = std::make_shared<Lookup>();
+    lk->name = h;
+    lookup_ = lk;
+    std::thread([lk] {
+        ENetAddress a;
+        bool ok = enet_address_set_host(&a, lk->name.c_str()) == 0;
+        if (ok) lk->addr = a;
+        lk->state = ok ? 1 : 2;
+    }).detach();
     return true;
 }
 
-void Net::stop() {
+bool Net::openConnection(double now) {
+    if (!host_) {
+        host_ = enet_host_create(nullptr, 1, netp::CH_COUNT, 0, 0);
+        if (!host_) return false;
+        host_->maximumPacketSize = netp::MAX_MESSAGE;   // (ENet's own default is 32 MB)
+    }
+    ENetAddress addr;
+    addr.host = addrHost_;
+    addr.port = addrPort_;
+    peer_ = enet_host_connect(host_, &addr, netp::CH_COUNT, 0);
+    if (!peer_) return false;
+    // (a stall of the game longer than this is caught up by a rejoin)
+    enet_peer_timeout(peer_, 32, 5000, 15000);
+    connected_ = false;
+    tryAt_ = now;
+    return true;
+}
+
+void Net::closeConnection(bool tell) {
     if (peer_) {
-        // tell the relay right away instead of letting it time us out
-        enet_peer_disconnect_now(peer_, 0);
+        // a leave tells the relay right away (others see LEFT at once) instead of letting it time us out
+        if (tell && connected_) enet_peer_disconnect_now(peer_, netp::DISCONNECT_LEAVE);
+        else enet_peer_reset(peer_);
         peer_ = nullptr;
     }
+    connected_ = false;
     if (host_) {
         enet_host_flush(host_);
         enet_host_destroy(host_);
         host_ = nullptr;
     }
-    if (enetInit_) { enet_deinitialize(); enetInit_ = false; }
-    if (status != FAILED) status = OFF;
+}
+
+void Net::endSession() {
     remotes.clear();
     inbox.clear();
     carInbox.clear(); fullInbox.clear(); fullRequests.clear(); eventInbox.clear();
+    full_.reset();
     worldSet = worldIn = false;
     code.clear();
     myId = hostId = 0;
+    secret_ = 0;
+    justCreated = rejoined = false;
+    endsIn = endsAt = -1;
+}
+
+void Net::leave() {
+    closeConnection(true);
+    lookup_.reset();
+    haveAddr_ = false;
+    endSession();
+    status = OFF;
 }
 
 void Net::fail(const std::string& why) {
     error = why;
-    if (peer_) { enet_peer_disconnect_now(peer_, 0); peer_ = nullptr; }
+    closeConnection(true);
+    lookup_.reset();
+    endSession();
     status = FAILED;
-    remotes.clear();
-    inbox.clear();
-    carInbox.clear(); fullInbox.clear(); fullRequests.clear(); eventInbox.clear();
-    worldSet = worldIn = false;
+}
+
+void Net::lost(double now) {
+    closeConnection(false);
+    status = RECONNECTING;
+    droppedAt_ = now;
+    tries_ = 0;
+    nextTry_ = now + firstRetry;
+    full_.reset();
+    log.push_back("Connection lost, reconnecting");
+}
+
+void Net::dropConnection() {
+    if (status == IN_SESSION) lost(lastService_);
 }
 
 void Net::sendCarSnapshot(const netp::MsgCarSnapshot& m, double now) {
@@ -111,9 +180,9 @@ void Net::sendCarSnapshot(const netp::MsgCarSnapshot& m, double now) {
 }
 
 void Net::sendFull(uint8_t to, const std::vector<uint8_t>& data, double now) {
-    if (!isHost() || data.size() > netp::MsgFullSnapshot::MAX_SIZE) return;
-    netp::MsgFullSnapshot m; m.to = to; m.data = data;
-    send(netp::pack(m, myId, seq_++, clock(now)), netp::CH_RELIABLE);
+    if (!isHost()) return;
+    fullSeq_++;
+    for (auto& c : netp::MsgFullSnapshot::split(to, fullSeq_, data)) send(netp::pack(c, myId, seq_++, clock(now)), netp::CH_RELIABLE);
 }
 
 void Net::requestFull(double now) {
@@ -132,44 +201,99 @@ void Net::setWorld(const netp::MsgWorldSettings& w, double now) {
     send(netp::pack(w, myId, seq_++, clock(now)), netp::CH_RELIABLE);   // (the relay passes a request to the host only)
 }
 
-void Net::send(const std::vector<uint8_t>& bytes, uint8_t channel) {
+void Net::sendRaw(const std::vector<uint8_t>& bytes, uint8_t channel) {
     if (!peer_) return;
     ENetPacket* pk = enet_packet_create(bytes.data(), bytes.size(), channel == netp::CH_RELIABLE ? ENET_PACKET_FLAG_RELIABLE : 0);
     if (enet_peer_send(peer_, channel, pk) < 0) enet_packet_destroy(pk);
 }
 
+void Net::send(const std::vector<uint8_t>& bytes, uint8_t channel) {
+    if (status == IN_SESSION) sendRaw(bytes, channel);   // (not while getting back in: nothing would take it)
+}
+
 void Net::onConnect() {
+    if (status == RECONNECTING) {
+        netp::MsgRejoin m; m.fingerprint = cfg_.fingerprint; m.code = code; m.playerId = myId; m.secret = secret_;
+        sendRaw(netp::pack(m, 0, seq_++, 0), netp::CH_RELIABLE);
+        return;
+    }
     status = JOINING;
     if (cfg_.create) {
         netp::MsgCreate m; m.fingerprint = cfg_.fingerprint; m.name = myName;
-        send(netp::pack(m, 0, seq_++, 0), netp::CH_RELIABLE);
+        sendRaw(netp::pack(m, 0, seq_++, 0), netp::CH_RELIABLE);
     } else {
         netp::MsgJoin m; m.fingerprint = cfg_.fingerprint; m.code = netp::normalizeCode(cfg_.joinCode); m.name = myName;
-        send(netp::pack(m, 0, seq_++, 0), netp::CH_RELIABLE);
+        sendRaw(netp::pack(m, 0, seq_++, 0), netp::CH_RELIABLE);
     }
 }
 
 void Net::service(double now) {
-    if (!host_ || status == FAILED) return;
-    if ((status == CONNECTING || status == JOINING) && now - startedAt_ > CONNECT_TIMEOUT) {
-        fail(status == CONNECTING ? "Can't reach the relay at " + cfg_.relay : std::string("The relay didn't answer"));
-        return;
+    if (status == OFF || status == FAILED) return;
+    if (lastService_ >= 0 && now - lastService_ > STALL) {
+        // we were stalled (a long frame, loading): the network had no chance to answer meanwhile
+        double gap = now - lastService_;
+        startedAt_ += gap;
+        tryAt_ += gap;
+        lastRecv_ = now;
+    }
+    lastService_ = now;
+    if (lookup_) {
+        int st = lookup_->state;
+        if (st == 0) {
+            if (now - startedAt_ > CONNECT_TIMEOUT) fail("Can't find relay \"" + lookup_->name + "\"");
+            return;
+        }
+        if (st == 2) { fail("Can't find relay \"" + lookup_->name + "\""); return; }
+        addrHost_ = lookup_->addr.host;
+        haveAddr_ = true;
+        lookup_.reset();
+        if (!openConnection(now)) { fail("Network setup failed"); return; }
     }
     ENetEvent ev;
     while (host_ && enet_host_service(host_, &ev, 0) > 0) {
+        ENetHost* h = host_;
+        Status was = status;
         switch (ev.type) {
-        case ENET_EVENT_TYPE_CONNECT: onConnect(); break;
+        case ENET_EVENT_TYPE_CONNECT:
+            connected_ = true;
+            lastRecv_ = now;
+            onConnect();
+            break;
         case ENET_EVENT_TYPE_RECEIVE:
+            lastRecv_ = now;
             onPacket(ev.packet->data, ev.packet->dataLength, now);
             enet_packet_destroy(ev.packet);
             break;
         case ENET_EVENT_TYPE_DISCONNECT:
             peer_ = nullptr;
-            fail(status == CONNECTING ? "Can't reach the relay at " + cfg_.relay : "Lost connection to the relay");
+            connected_ = false;
+            if (status == IN_SESSION) lost(now);
+            else if (status != RECONNECTING)   // (a try that didn't connect: the next one goes at nextTry_)
+                fail(status == CONNECTING ? "Can't reach the relay at " + cfg_.relay : "Lost connection to the relay");
             break;
         default: break;
         }
-        if (status == FAILED) break;
+        if (host_ != h || status != was) break;   // (the connection went, or changed: what's left is for the next frame)
+    }
+    switch (status) {
+    case CONNECTING:
+    case JOINING:
+        if (now - startedAt_ > CONNECT_TIMEOUT)
+            fail(status == CONNECTING ? "Can't reach the relay at " + cfg_.relay : std::string("The relay didn't answer"));
+        break;
+    case IN_SESSION:
+        if (now - lastRecv_ > SILENCE) lost(now);   // (the relay pongs every second: it can't hear us, or we it)
+        break;
+    case RECONNECTING:
+        if (now - droppedAt_ > REJOIN_BUDGET) { fail("Lost connection to the relay"); break; }
+        if (peer_ && now - tryAt_ > ATTEMPT_TIMEOUT) closeConnection(false);   // (this try is going nowhere)
+        if (!peer_ && now >= nextTry_) {
+            tries_++;
+            nextTry_ = now + std::min(8.0, firstRetry * (1 << std::min(tries_, 5)));
+            if (!openConnection(now)) closeConnection(false);
+        }
+        break;
+    default: break;
     }
     if (status == IN_SESSION && now - lastPing_ >= PING_INTERVAL) {
         lastPing_ = now;
@@ -198,6 +322,7 @@ const char* Net::statusText() const {
     case CONNECTING: return "connecting to relay...";
     case JOINING: return cfg_.create ? "creating session..." : "joining session...";
     case IN_SESSION: return isHost() ? "in session (host)" : "in session";
+    case RECONNECTING: return "reconnecting...";
     case FAILED: return error.c_str();
     }
     return "";
@@ -209,26 +334,60 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
     case netp::MSG_CREATED: {
         netp::MsgCreated m;
         if (status != JOINING || !netp::unpack(data, n, m)) return;
-        code = m.code; myId = hostId = m.playerId;
+        code = m.code; myId = hostId = m.playerId; secret_ = m.secret;
         status = IN_SESSION;
+        session++;
         justCreated = true;
         log.push_back("Session " + code + " created");
         return;
     }
     case netp::MSG_WELCOME: {
         netp::MsgWelcome m;
-        if (status != JOINING || !netp::unpack(data, n, m)) return;
-        code = m.code; myId = m.playerId; hostId = m.hostId;
+        if ((status != JOINING && status != RECONNECTING) || !netp::unpack(data, n, m)) return;
+        if (status == RECONNECTING) {   // back in: the same id, and the roster as it is now (keeping what we had of them)
+            if (m.playerId != myId || m.code != code) { fail("Couldn't get back into the session"); return; }
+            std::vector<RemoteInfo> was;
+            was.swap(remotes);
+            for (auto& e : m.roster) {
+                RemoteInfo r;
+                for (auto& o : was) if (o.id == e.id) r = o;
+                r.id = e.id; r.name = e.name; r.away = e.away;
+                remotes.push_back(r);
+            }
+            hostId = m.hostId; secret_ = m.secret;
+            status = IN_SESSION;
+            rejoined = true;
+            log.push_back("Reconnected");
+            return;
+        }
+        code = m.code; myId = m.playerId; hostId = m.hostId; secret_ = m.secret;
         remotes.clear();
-        for (auto& e : m.roster) { RemoteInfo r; r.id = e.id; r.name = e.name; remotes.push_back(r); }
+        for (auto& e : m.roster) { RemoteInfo r; r.id = e.id; r.name = e.name; r.away = e.away; remotes.push_back(r); }
         status = IN_SESSION;
+        session++;
         log.push_back("Joined session " + code);
         return;
     }
     case netp::MSG_ERROR: {
         netp::MsgError m;
         if (!netp::unpack(data, n, m)) { fail("Relay error"); return; }
+        if (status == RECONNECTING && m.code == netp::ERR_NO_SESSION) { fail("The session has ended"); return; }
         fail(m.text.empty() ? netp::errorText(m.code) : m.text);
+        return;
+    }
+    case netp::MSG_AWAY: {
+        netp::MsgAway m;
+        if (status != IN_SESSION || !netp::unpack(data, n, m)) return;
+        for (auto& r : remotes)
+            if (r.id == m.id && r.away != m.away) { r.away = m.away; log.push_back(r.name + (m.away ? " lost connection" : " is back")); }
+        return;
+    }
+    case netp::MSG_SESSION_ENDING: {
+        netp::MsgSessionEnding m;
+        if (status != IN_SESSION || !netp::unpack(data, n, m)) return;
+        endsIn = m.secondsLeft;
+        endsAt = now + m.secondsLeft;
+        log.push_back("The session closes in " + std::to_string((m.secondsLeft + 59) / 60) + " min");
         return;
     }
     case netp::MSG_PLAYER_JOINED: {
@@ -251,7 +410,7 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
         netp::MsgHostChanged m;
         if (status != IN_SESSION || !netp::unpack(data, n, m)) return;
         hostId = m.id;
-        carInbox.clear(); fullInbox.clear(); fullRequests.clear();   // (the old host's, or asked of it)
+        carInbox.clear(); fullInbox.clear(); fullRequests.clear(); full_.reset();   // (the old host's, or asked of it)
         // the session's weather is ours to keep now (what the old host last sent, which we show): everyone gets it
         // again, in case one of the old host's never got there
         if (m.id == myId && worldSet) send(netp::pack(world, myId, seq_++, clock(now)), netp::CH_RELIABLE);
@@ -282,8 +441,10 @@ void Net::onPacket(const uint8_t* data, size_t n, double now) {
     case netp::MSG_FULL_SNAPSHOT: {
         netp::MsgFullSnapshot m;
         if (status != IN_SESSION || isHost() || !netp::unpack(data, n, m, &h) || h.from != hostId || m.to != myId) return;
+        std::vector<uint8_t> all;
+        if (!full_.add(m, all)) return;   // (more chunks to come)
         fullInbox.clear();
-        fullInbox.push_back({now, std::move(m.data)});
+        fullInbox.push_back({now, std::move(all)});
         return;
     }
     case netp::MSG_FULL_REQUEST: {

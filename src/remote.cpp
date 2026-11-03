@@ -57,6 +57,7 @@ std::vector<int> assignSlots(const std::vector<std::pair<uint8_t, std::string>>&
 
 // ---------------------------------------------------------------- smoothing
 void RemotePlayer::addSample(float sentAt, double recvAt, const netp::PlayerState& s) {
+    if (!std::isfinite(sentAt) || !std::isfinite(recvAt) || std::fabs(sentAt) > netp::MAX_HOST_TIME) return;   // a bad clock would stick in the offset
     double o = recvAt - sentAt;
     if (!synced || fabs(o - offset) > 1.0) {
         // first state, or the sender's clock jumped (or a stall of over a second): start over from this one
@@ -120,6 +121,7 @@ static netp::PlayerState blend(const netp::PlayerState& a, const netp::PlayerSta
 bool RemotePlayer::stateAt(double t, netp::PlayerState& out, bool* frozenOut) const {
     if (frozenOut) *frozenOut = false;
     if (samples.empty()) return false;
+    if (!std::isfinite(t)) { out = samples.back().s; return true; }   // (and every comparison below needs a real t)
     if (t <= samples.front().t) { out = samples.front().s; return true; }
     const Sample& last = samples.back();
     if (t >= last.t) {
@@ -145,7 +147,7 @@ bool RemotePlayer::stateAt(double t, netp::PlayerState& out, bool* frozenOut) co
         return true;
     }
     size_t i = 1;
-    while (samples[i].t < t) i++;   // samples[i-1].t < t <= samples[i].t
+    while (i + 1 < samples.size() && samples[i].t < t) i++;   // samples[i-1].t < t <= samples[i].t
     const Sample &a = samples[i - 1], &b = samples[i];
     double span = b.t - a.t;
     out = blend(a.s, b.s, (float)((t - a.t) / span), (float)span);

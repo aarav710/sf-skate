@@ -82,11 +82,14 @@ struct Header {
     float hostTime = 0;   // the sender's clock (session clock once Stage 3 syncs it)
 };
 constexpr size_t HEADER_SIZE = 8;
+constexpr float MAX_HOST_TIME = 1e7f;   // seconds
 
 inline void writeHeader(ByteWriter& w, const Header& h) { w.u8(h.type); w.u8(h.from); w.u16(h.seq); w.f32(h.hostTime); }
 inline Header readHeader(ByteReader& r) {
     Header h;
     h.type = r.u8(); h.from = r.u8(); h.seq = r.u16(); h.hostTime = r.f32();
+    // a clock is finite and sane (~4 months of seconds): a NaN would poison the receiver's clock offset for good
+    if (!std::isfinite(h.hostTime) || std::fabs(h.hostTime) > MAX_HOST_TIME) r.bad = true;
     return h;
 }
 

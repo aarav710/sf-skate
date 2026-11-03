@@ -139,6 +139,19 @@ static void protocolChecks() {
         ok = ok && !unpack(bytes.data(), bytes.size(), v);
         check(ok, "proto: PLAYER_STATE saturates", "speeds +-327 m/s, rail out of range = none, NaN refused");
     }
+    {   // a header clock that is NaN, infinite or absurd is refused, whatever the message (it feeds remote smoothing)
+        MsgPlayerState m; MsgPing pg;
+        bool ok = true;
+        for (float bad : {(float)NAN, (float)INFINITY, -(float)INFINITY, 2e7f}) {
+            auto b1 = pack(m, 1, 1, bad), b2 = pack(pg, 1, 1, bad);
+            MsgPlayerState o; MsgPing po;
+            ok = ok && !unpack(b1.data(), b1.size(), o) && !unpack(b2.data(), b2.size(), po);
+        }
+        auto good = pack(m, 1, 1, 9.9e6f);
+        MsgPlayerState o;
+        ok = ok && unpack(good.data(), good.size(), o);
+        check(ok, "proto: header clock must be finite", "NaN, +-inf, 2e7 s refused; 9.9e6 s fine");
+    }
     {   // names and codes
         bool ok = sanitizeName("Ana") == "Ana" && sanitizeName("") == "skater" && sanitizeName("   ") == "skater";
         ok = ok && sanitizeName("  Bo  ") == "Bo" && sanitizeName("a\nb\tc\x7f") == "abc";

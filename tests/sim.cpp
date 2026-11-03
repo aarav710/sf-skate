@@ -164,6 +164,18 @@ static void remoteChecks() {
                  snap, wrapYaw, sweepOk, mid);
         check(snap && fabsf(wrapYaw) > 3.1f && sweepOk && fabsf(mid - 108) < 0.01f, "remote: snaps and angles", b);
     }
+    {   // a broken sender clock (NaN, infinite, absurd) is ignored instead of poisoning the offset; a NaN time reads safely
+        RemotePlayer r;
+        PS s; s.x = 3; s.vx = 1;
+        r.addSample(1.0f, 5.0, s);
+        PS t2 = s; t2.x = 99;
+        r.addSample(NAN, 5.05, t2); r.addSample(INFINITY, 5.06, t2); r.addSample(3e7f, 5.07, t2);
+        r.advance(5.1, 1 / 60.f);
+        PS o; bool ok = r.stateAt(NAN, o);
+        snprintf(b, sizeof b, "%zu sample(s) kept, offset %.2f, drawn at %.3f, x %.2f; state at NaN x %.1f", r.samples.size(), r.offset, r.drawnAt, r.cur.x, o.x);
+        check(r.samples.size() == 1 && r.offset == 4 && std::isfinite(r.drawnAt) && fabsf(r.cur.x - 3) < 1e-4f && ok && o.x == 3,
+              "remote: bad sender clocks ignored", b);
+    }
     {   // join fades in once a state arrives, leave fades out over about a second and then drops them
         Remotes rm;
         rm.myId = 1; rm.myName = "me";

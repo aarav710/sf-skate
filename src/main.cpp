@@ -268,23 +268,58 @@ static void drawEdgeMarker(float ang, const char* label, Color c, int sw, int sh
     float tx = fabsf(d.x) > 1e-4f ? (sw * 0.5f - M) / fabsf(d.x) : 1e9f, ty = fabsf(d.y) > 1e-4f ? (sh * 0.5f - M) / fabsf(d.y) : 1e9f;
     float t = std::min(tx, ty);
     Vector2 p = {ctr.x + d.x * t, ctr.y + d.y * t};
-    for (int pass = 0; pass < 2; pass++)   // slide out of a panel to its nearest side (twice: panels can touch)
+    // on a panel: move to the nearest spot just past a panel side (along the edge, normally, past the panel;
+    // inward only if that is nearer) that is on screen and clear of every panel; panels touch, so all are checked
+    auto pad = [](Rectangle r) { return Rectangle{r.x - 18, r.y - 18, r.width + 36, r.height + 36}; };
+    auto clear = [&](Vector2 q) {
+        if (q.x < M || q.x > sw - M || q.y < M || q.y > sh - M) return false;
+        for (const Rectangle& r : avoid) if (inRect(q, pad(r))) return false;
+        return true;
+    };
+    if (!clear(p)) {
+        float best = 1e9f;
+        Vector2 to = p;
         for (const Rectangle& r0 : avoid) {
-            Rectangle r = {r0.x - 18, r0.y - 18, r0.width + 36, r0.height + 36};
-            if (!inRect(p, r)) continue;
-            float l = p.x - r.x, rr = r.x + r.width - p.x, u = p.y - r.y, dn = r.y + r.height - p.y;
-            float m = std::min(std::min(l, rr), std::min(u, dn));
-            if (m == l) p.x = r.x; else if (m == rr) p.x = r.x + r.width; else if (m == u) p.y = r.y; else p.y = r.y + r.height;
-            p.x = clampf(p.x, M, sw - M); p.y = clampf(p.y, M, sh - M);
+            Rectangle r = pad(r0);
+            Vector2 cand[4] = {{r.x - 1, p.y}, {r.x + r.width + 1, p.y}, {p.x, r.y - 1}, {p.x, r.y + r.height + 1}};
+            for (const Vector2& q : cand) {
+                float dd = fabsf(q.x - p.x) + fabsf(q.y - p.y);
+                if (dd < best && clear(q)) { best = dd; to = q; }
+            }
         }
+        p = to;   // (nowhere free: stays put)
+    }
     drawPlayerArrow(p, ang, 16, {0, 0, 0, (unsigned char)(c.a * 0.6f)});
     drawPlayerArrow(p, ang, 12, c);
-    // the label sits on the screen side of the arrow
+    // the label: on the screen side of the arrow, else above or below it, else left out (never over a panel)
     int fs = 18, w = MeasureText(label, fs);
-    float lx = p.x - d.x * (30 + w * 0.5f * fabsf(d.x)) - w * 0.5f, ly = p.y - d.y * 30 - fs * 0.5f;
-    lx = clampf(lx, 8, sw - 8 - w);
-    ly = clampf(ly, 8, sh - 8 - fs);
-    textShadow(label, (int)lx, (int)ly, fs, c);
+    Vector2 spots[3] = {{p.x - d.x * (30 + w * 0.5f * fabsf(d.x)) - w * 0.5f, p.y - d.y * 30 - fs * 0.5f},
+                        {p.x - w * 0.5f, p.y - 22 - fs}, {p.x - w * 0.5f, p.y + 22}};
+    for (Vector2 l : spots) {
+        l.x = clampf(l.x, 8, sw - 8 - w);
+        l.y = clampf(l.y, 8, sh - 8 - fs);
+        Rectangle box = {l.x - 2, l.y - 2, w + 4.f, fs + 4.f};
+        bool hit = false;
+        for (const Rectangle& r : avoid) hit = hit || CheckCollisionRecs(box, r);
+        if (hit) continue;
+        textShadow(label, (int)l.x, (int)l.y, fs, c);
+        break;
+    }
+}
+
+// A tag box that lands on a HUD panel moves just below it (or above, if that is nearer); false if it still can't fit.
+static bool clearOfPanels(Rectangle& box, const std::vector<Rectangle>& avoid, int sh) {
+    for (int pass = 0; pass < 3; pass++) {
+        const Rectangle* hit = nullptr;
+        for (const Rectangle& h : avoid) if (CheckCollisionRecs(box, h)) { hit = &h; break; }
+        if (!hit) return true;
+        float below = hit->y + hit->height + 2, above = hit->y - box.height - 2;
+        bool canBelow = below + box.height <= sh, canAbove = above >= 0;
+        if (!canBelow && !canAbove) return false;
+        box.y = canBelow && (!canAbove || below - box.y <= box.y - above) ? below : above;
+    }
+    for (const Rectangle& h : avoid) if (CheckCollisionRecs(box, h)) return false;
+    return true;
 }
 
 // Name tags over the other players: fading out with distance (gone past 150 m), and an edge arrow with the name
@@ -310,21 +345,18 @@ static void drawNameTags(const Camera3D& cam, Vector3 camFwd, Vector3 me, int sw
             float a = fade * (1.f - smooth01(100.f, 150.f, d));
             int fs = d < 40 ? 22 : 18, w = MeasureText(r.name.c_str(), fs);
             Rectangle box = {sp.x - w / 2.f - 4, sp.y - fs - 4.f, w + 8.f, fs + 8.f};
-            bool hidden = false;
-            for (const Rectangle& h : avoid) hidden = hidden || CheckCollisionRecs(box, h);
-            if (hidden || a < 0.02f) continue;
+            if (a < 0.02f || !clearOfPanels(box, avoid, sh)) continue;
             c.a = (unsigned char)(255 * a);
-            textCenter(r.name.c_str(), (int)sp.x, (int)sp.y - fs, fs, c);
+            textCenter(r.name.c_str(), (int)sp.x, (int)box.y + 4, fs, c);
         } else {
             const char* label = TextFormat("%s  %d m", r.name.c_str(), dist);
             int fs = 16, w = MeasureText(label, fs);
             Rectangle box = {sp.x - w / 2.f - 4, sp.y - fs - 14.f, w + 8.f, fs + 18.f};
-            bool hidden = false;
-            for (const Rectangle& h : avoid) hidden = hidden || CheckCollisionRecs(box, h);
-            if (hidden) continue;
+            float y0 = box.y;
+            if (!clearOfPanels(box, avoid, sh)) continue;
             c.a = (unsigned char)(220 * fade);
-            drawPlayerArrow({sp.x, sp.y - 6}, PI / 2, 7, c);   // pointing down at them
-            textCenter(label, (int)sp.x, (int)sp.y - fs - 14, fs, c);
+            if (box.y == y0) drawPlayerArrow({sp.x, sp.y - 6}, PI / 2, 7, c);   // pointing down at them (unless nudged away)
+            textCenter(label, (int)sp.x, (int)box.y, fs, c);
         }
     }
 }
@@ -573,7 +605,14 @@ static void drawBigMap() {
         if (!other && p.x > x0 + 4 && p.x < x0 + w - 4 && p.y > y0 + 4 && p.y < y0 + h - 4) {
             drawPlayerArrow(p, r.cur.yaw, 13, {0, 0, 0, (unsigned char)(col.a * 0.7f)});
             drawPlayerArrow(p, r.cur.yaw, 10, col);
-            textCenter(r.name.c_str(), (int)p.x, (int)p.y - 30, 18, col);
+            // beside the arrow, on the side away from your own when they're close to you
+            Vector2 me = S2(P.pos.x, P.pos.z);
+            bool nearMe = Vector2Distance(p, me) < 40;
+            int lw = MeasureText(r.name.c_str(), 16);
+            int lx = nearMe ? (p.x >= me.x ? (int)p.x + 16 : (int)p.x - 16 - lw) : (int)p.x - lw / 2;
+            int ly = nearMe ? (int)p.y - 8 : (int)p.y - 30;
+            DrawRectangle(lx - 3, ly - 2, lw + 6, 20, {0, 0, 0, (unsigned char)(col.a * 0.55f)});
+            DrawText(r.name.c_str(), lx, ly, 16, col);
             continue;
         }
         Vector2 q = {clampf(p.x, x0 + 22, x0 + w - 22), clampf(p.y, y0 + 22, y0 + h - 22)};
@@ -635,7 +674,9 @@ int main(int argc, char** argv) {
     if (!netErr.empty()) { fprintf(stderr, "sfskate: %s\n", netErr.c_str()); return 2; }
     // no MSAA on the window itself: the 3D scene is drawn multisampled into its own target (see render.cpp)
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
-    InitWindow(1600, 900, "SF Skate");
+    int winW = 1600, winH = 900;
+    if (getenv("SFSKATE_WINDOW")) sscanf(getenv("SFSKATE_WINDOW"), "%dx%d", &winW, &winH);   // test hook: window size "WxH"
+    InitWindow(winW, winH, "SF Skate");
     SetWindowFocused();   // take the keyboard from the terminal that launched us (see the first-frame note below)
     SetTargetFPS(0);   // no raylib frame limiter: see "frame pacing" above
     updateFramePeriod();
@@ -1891,7 +1932,7 @@ int main(int argc, char** argv) {
                 const char* planeLines[] = {"SEAPLANE", "W / S|throttle", "A D|steer", "Space|climb (lift off past 55 mph)",
                                             "Shift|dive", "E|climb out at the shore", "Right mouse|look around", "H|hide controls"};
                 const char** lines = JS.riding ? skiLines : SP.riding ? planeLines : skateLines;
-                const int n = JS.riding ? (int)(sizeof(skiLines) / sizeof(*skiLines))
+                int n = JS.riding ? (int)(sizeof(skiLines) / sizeof(*skiLines))
                             : SP.riding ? (int)(sizeof(planeLines) / sizeof(*planeLines)) : (int)(sizeof(skateLines) / sizeof(*skateLines));
                 Color head = JS.riding ? Color{120, 220, 255, 255} : SP.riding ? Color{255, 225, 140, 255} : Color{255, 210, 60, 255};
                 // size the panel from the measured text so no line is cut off; in small windows shrink the font
@@ -1918,8 +1959,16 @@ int main(int argc, char** argv) {
                 int fs = 18;
                 while (fs > 12 && (panelH(fs) > sh2 - 40 - helpTop || panelW(fs) > sw - 32)) fs--;
                 while (fs > 10 && panelH(fs) > sh2 - 32) fs--;   // tiny windows: last resort, smallest legible size
+                std::vector<const char*> rows;
+                if (listH) {   // a session's player list is above: never slide up over it; smallest font, then fewer rows
+                    while (fs > 10 && panelH(fs) > sh2 - 40 - helpTop) fs--;
+                    rows.assign(lines, lines + n);
+                    while (rows.size() > 2 && 10 + (int)rows.size() * (fs + 4) + 8 > sh2 - 40 - helpTop) rows.erase(rows.end() - 2);   // keep "H  hide"
+                    lines = rows.data();
+                    n = (int)rows.size();
+                }
                 int hw = panelW(fs), hh = panelH(fs);
-                int hx = std::max(16, sw - hw - 16), hy = std::max(16, std::min(helpTop, sh2 - 40 - hh));
+                int hx = std::max(16, sw - hw - 16), hy = std::max(listH ? helpTop : 16, std::min(helpTop, sh2 - 40 - hh));
                 DrawRectangle(hx, hy, hw, hh, {0, 0, 0, 140});
                 hud.push_back({(float)hx, (float)hy, (float)hw, (float)hh});
                 int kc = keyCol(fs); std::string k;

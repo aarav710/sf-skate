@@ -60,7 +60,18 @@ Land on rails, ledges, ramp coping, or the bridge railings to grind; tap A/D to 
 
 **Jet skis:** nine of them are moored along the shore of the bay and the ocean, spread far apart, and nothing marks them, so you have to go looking. Walk up to one and press E. W throttles, S brakes, A / D steer, Shift boosts (about 65 mph). You stay on the water: shores, piers and bridge piers stop you. Press E near the shore to hop off; the ski stays where you left it.
 
-**Seaplanes:** only three in the whole map, moored in particular spots: off the north waterfront near the Wharf, on the Marin shore across the Golden Gate, and on the bay by SFO. Walk up and press E to climb in. W / S set the throttle (it stays where you leave it), A / D steer on the water and bank in the air, Space pulls the nose up (lift off past about 55 mph), Shift pushes it down. Below about 42 mph in the air it stalls and the nose drops. Land on the water gently (wings level, not diving steeply, under about 105 mph), then taxi to the shore and press E to climb out. Hit the ground, a building or the water too hard and you crash: the plane is towed back to its mooring and you're put back where you climbed in. Two more planes circle the bay overhead with a pilot and passengers aboard.
+**Seaplanes:** only three in the whole map, moored in particular spots: off the north waterfront near the Wharf, on the Marin shore across the Golden Gate, and on the bay by SFO. Walk up and press E to climb in. W / S set the throttle (it stays where you leave it), A / D steer on the water, and Space pulls the nose up to lift off (past about 55 mph). Land on the water gently (wings level, not diving steeply, under about 105 mph), then taxi to the shore and press E to climb out. Hit the ground, a building, a cable or the water too hard and you crash: the plane is towed back to its mooring and you're put back where you climbed in. Any part of the plane counts, so a wingtip, the roof or the tail clipping the ground or a wall crashes it too. Two more planes circle the bay overhead with a pilot and passengers aboard.
+
+**Stunts:** in the air there are no limits on the attitude, so the plane can go through any angle, upside down included. Space pitches the nose up and Shift down, relative to the plane, so *holding* either keeps going round: a **loop**. A and D roll about the plane's own axis, so holding one is a **barrel roll**, and you can stop upside down and fly **inverted**. Bank (a short tap of A or D) to turn, as a real plane does: the lift tilts with the wings, so upside down "up" pulls you toward the ground. It levels itself off only gently, after you've let go of the stick for a second, so it never fights a stunt. You need speed to do it: below about 42 mph the controls go soft and the plane stalls, the nose falling toward the ground whichever way up it is, and a loop wants the throttle well open. Stunts score as combos like the skater's:
+
+| Stunt | How | Points |
+| --- | --- | --- |
+| Loop | pitch through 360 degrees, going over the top | 600 |
+| Barrel Roll | roll through 360 degrees | 500 |
+| Inverted | stay upside down for 2 seconds (then it keeps adding) | 300 |
+| Low bonus | any of them under 30 m above the ground or water | x1.5 |
+
+They chain into one combo (the score is the points times the number of stunts), which banks when you touch down, or by itself once nothing new has happened for 5 seconds. A crash loses it. The chase camera follows through loops and inverted flight.
 
 ## Look and atmosphere
 

@@ -72,6 +72,8 @@ struct Player {
     float hspeed() const { return state == AIR ? sqrtf(vel.x * vel.x + vel.z * vel.z) : fabsf(speed); }
     void draw() const;
     void say(const std::string& s, Color c, const std::string& sub = "") { popup = s; subPopup = sub; popupT = 2.2f; popupCol = c; }
+    void addTrick(const std::string& n, float pts);   // chain a trick into the combo (the seaplane's stunts use these too)
+    void bankCombo();                                  // score the combo (x the number of tricks) and show it
 
     // events for sound effects, read and cleared by main each frame
     bool evPop = false, evLand = false, evBail = false, evSplash = false, evGrindStart = false;
@@ -83,6 +85,4 @@ private:
     void bailUpdate(float dt, World& w);
     void ollie(float strength);
     void land(World& w, float g, bool brake, bool hop);   // brake: absorb, no bounce; hop: touching down from a landing bounce
-    void addTrick(const std::string& n, float pts);
-    void bankCombo();
 };

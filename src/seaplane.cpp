@@ -3,6 +3,9 @@
 
 namespace {
 constexpr float TAKEOFF_SPEED = 24.f, STALL_SPEED = 19.f, CEILING = 700.f;
+// controls (full authority above ~50 mph; less when slow), lag of the flight path behind the nose, and the stunts
+constexpr float PITCH_RATE = 1.0f, ROLL_RATE = 2.2f, ALIGN = 3.0f, LEVEL_DELAY = 1.0f, LEVEL_RATE = 0.8f;
+constexpr float INVERT_SECS = 2.0f, STUNT_IDLE = 1.0f, BANK_AFTER = 5.0f;
 
 bool openWater(const World& w, float x, float z) {
     return x > WX0 + 100 && x < WX1 - 100 && z > WZ0 + 100 && z < WZ1 - 100 && w.terrain(x, z) < 0.05f && !w.solidAt({x, 0.8f, z});
@@ -13,6 +16,20 @@ Vector3 fwd3(float yaw, float pitch) { return {cosf(pitch) * cosf(yaw), sinf(pit
 // Two planes on sightseeing loops over the bay: center, radius, height, angular speed (negative = clockwise).
 struct Loop { float cx, cz, r, h, w; Color body; };
 const Loop LOOPS[] = {{700, -1700, 650, 190, 0.065f, {200, 40, 44, 255}}, {1700, 600, 850, 260, -0.05f, {240, 240, 236, 255}}};
+}
+
+Quaternion Seaplanes::poseQuat(float yaw, float pitch, float roll) {
+    Quaternion qy = QuaternionFromAxisAngle({0, 1, 0}, -yaw), qz = QuaternionFromAxisAngle({0, 0, 1}, pitch), qx = QuaternionFromAxisAngle({1, 0, 0}, roll);
+    return QuaternionMultiply(qy, QuaternionMultiply(qz, qx));
+}
+
+Vector3 Seaplanes::toWorld(Vector3 pos, Quaternion q, Vector3 l) { return Vector3Add(pos, Vector3RotateByQuaternion(l, q)); }
+
+void Seaplanes::setPose(float y, float p, float r) {
+    yaw = eY = y; pitch = eP = p; roll = eR = r;
+    q = poseQuat(y, p, r);
+    dir = Vector3RotateByQuaternion({1, 0, 0}, q);
+    sagY = 0;
 }
 
 void Seaplanes::place(const World& w) {
@@ -64,9 +81,13 @@ int Seaplanes::nearest(const Vector3& p, float maxD) const {
 void Seaplanes::mount(int i, Player& p) {
     cur = i; riding = true;
     boardedAt = p.pos;
-    pos = moored[i].pos; yaw = moored[i].yaw;
-    pitch = roll = speed = throttle = 0;
+    pos = moored[i].pos;
+    setPose(moored[i].yaw, 0, 0);
+    speed = throttle = 0;
     onWater = true;
+    stickIdle = pitchAcc = rollAcc = pitchIdle = rollIdle = invT = sinceStunt = 0;
+    seenInvP = seenInvR = invScored = false;
+    loops = rolls = inverts = 0;
     spray.clear();
     p.state = Player::RIDE; p.pos = pos; p.yaw = yaw; p.speed = 0;
     p.combo.clear(); p.comboPts = 0;
@@ -125,34 +146,62 @@ static const std::vector<Vector3>& planePoints() {
     return P;
 }
 static constexpr float PLANE_BALL = 0.4f;
+enum { HIT_AERIAL = 1, HIT_LAND = 2, HIT_SOLID = 4, HIT_WATER = 8 };
 
-static Vector3 planePoint(Vector3 pos, float yaw, float pitch, float roll, Vector3 l) {
-    float cr = cosf(roll), sr = sinf(roll), cp = cosf(pitch), sp = sinf(pitch);
-    float y1 = l.y * cr - l.z * sr, z1 = l.y * sr + l.z * cr;    // roll about x
-    float x2 = l.x * cp - y1 * sp, y2 = l.x * sp + y1 * cp;      // pitch about z
-    float cy = cosf(yaw), sy = sinf(yaw);
-    return {pos.x + x2 * cy - z1 * sy, pos.y + y2, pos.z + x2 * sy + z1 * cy};    // yaw: forward is (cos, sin)
+// What did the plane touch moving from one pose to another? Every sample point is swept, so a fast plane can't skip
+// through a 0.9 m cable between frames, and a fast rotation is cut into short steps (about 0.2 rad each) so a wingtip
+// swinging round can't tunnel into the ground or a wall. Cables, masts and towers (aerials) are tested along each
+// point's path; terrain, the sea and buildings at each step's end. Water counts as touched when a point is within
+// 0.7 m of the surface (the floats of a level plane at 0.3 m up), land when it's within a ball's radius of the ground.
+static int sweepPlane(const World& w, Vector3 p0, Quaternion q0, Vector3 p1, Quaternion q1) {
+    float d = q0.x * q1.x + q0.y * q1.y + q0.z * q1.z + q0.w * q1.w;
+    if (d < 0) q1 = QuaternionScale(q1, -1.f);
+    float ang = 2 * acosf(std::min(1.f, fabsf(d)));
+    int n = std::clamp((int)ceilf(std::max(ang / 0.2f, Vector3Distance(p0, p1) / 3.f)), 1, 24);
+    int hit = 0;
+    Vector3 pa = p0;
+    Quaternion qa = q0;
+    for (int i = 1; i <= n; i++) {
+        float t = (float)i / n;
+        Vector3 pb = Vector3Lerp(p0, p1, t);
+        Quaternion qb = i == n ? q1 : QuaternionNlerp(q0, q1, t);
+        for (const Vector3& l : planePoints()) {
+            Vector3 A = Seaplanes::toWorld(pa, qa, l), B = Seaplanes::toWorld(pb, qb, l);
+            if (w.aerialHit(A, B, PLANE_BALL)) hit |= HIT_AERIAL;
+            float gp = w.terrain(B.x, B.z);
+            if (gp < 0.15f) { if (B.y <= 0.7f) hit |= HIT_WATER; }
+            else if (B.y < gp + PLANE_BALL) hit |= HIT_LAND;
+            if (w.solidAt(B)) hit |= HIT_SOLID;
+        }
+        pa = pb; qa = qb;
+    }
+    return hit;
 }
 
-// Did any part of the plane touch an aerial obstacle (a cable, a mast, a tower) between two poses? Each point is swept,
-// so a fast plane can't skip through a 0.9 m cable between frames.
-static bool planeHitsAerial(const World& w, Vector3 p0, float yaw0, float pitch0, float roll0, Vector3 p1, float yaw1, float pitch1, float roll1) {
+// Did any part of the plane touch an aerial obstacle between two poses?
+static bool planeHitsAerial(const World& w, Vector3 p0, Quaternion q0, Vector3 p1, Quaternion q1) {
     for (const Vector3& l : planePoints())
-        if (w.aerialHit(planePoint(p0, yaw0, pitch0, roll0, l), planePoint(p1, yaw1, pitch1, roll1, l), PLANE_BALL)) return true;
+        if (w.aerialHit(Seaplanes::toWorld(p0, q0, l), Seaplanes::toWorld(p1, q1, l), PLANE_BALL)) return true;
     return false;
 }
 
 float Seaplanes::altitude(const World& w) const { return pos.y - std::max(w.terrain(pos.x, pos.z), 0.f); }
 
 void Seaplanes::update(float dt, const Input& in, bool climb, bool dive, Player& p, World& w) {
-    Vector3 pos0 = pos; float yaw0 = yaw, pitch0 = pitch, roll0 = roll;   // last frame's pose, for the sweep
+    evBanked = false;
+    if (!onWater && (yaw != eY || pitch != eP || roll != eR)) setPose(yaw, pitch, roll);   // someone set the pose by hand
+    Vector3 pos0 = pos; Quaternion q0 = onWater ? poseQuat(yaw, pitch, roll) : q;   // last frame's pose, for the sweep
     // throttle stays where you leave it: W opens it up, S closes it
     if (in.push) throttle = std::min(1.f, throttle + 0.7f * dt);
     if (in.brake) throttle = std::max(0.f, throttle - 0.9f * dt);
     prop += (8.f + 60.f * throttle) * dt;
     float thrust = throttle * 15.f;
     float drag = 0.0036f * speed * speed + (onWater ? 0.22f * speed + 0.6f : 0.f);
-    speed += (thrust - drag - 9.8f * sinf(pitch)) * dt;
+    if (!onWater) {   // pulling the nose away from the flight path costs speed
+        float aoa = acosf(clampf(Vector3DotProduct(dir, nose()), -1.f, 1.f));
+        drag += 1.5f * aoa * aoa * speed;
+    }
+    speed += (thrust - drag - 9.8f * (onWater ? sinf(pitch) : dir.y)) * dt;
     speed = std::max(speed, 0.f);
 
     if (onWater) {
@@ -167,13 +216,13 @@ void Seaplanes::update(float dt, const Input& in, bool climb, bool dive, Player&
         np.y = std::max(np.y, 0.f);
         if (np.y < 0.4f && pitch < 0.08f) np.y = 0;   // still on the floats until it's rotated for takeoff
         if ((!openWater(w, np.x, np.z) && np.y < 0.4f) ||
-            planeHitsAerial(w, pos0, yaw0, pitch0, roll0, np, yaw, pitch, roll)) {      // ran into the shore, a pier or a piling
+            planeHitsAerial(w, pos0, q0, np, poseQuat(yaw, pitch, roll))) {      // ran into the shore, a pier or a piling
             if (speed > 8) evCrash = true;
             speed = 0;
             np = pos;
         }
         pos = np;
-        if (pos.y >= 0.4f) onWater = false;
+        if (pos.y >= 0.4f) { onWater = false; setPose(yaw, pitch, roll); stickIdle = 0; sinceStunt = 0; }   // airborne: from here the attitude is q
         // spray off the floats
         static RNG sr(52);
         if (speed > 5)
@@ -183,33 +232,77 @@ void Seaplanes::update(float dt, const Input& in, bool climb, bool dive, Player&
                 spray.push_back({b, {-cosf(yaw) * speed * 0.2f + sr.range(-1, 1), sr.range(1.5f, 3.f) + speed * 0.05f, -sinf(yaw) * speed * 0.2f + sr.range(-1, 1)}, sr.range(0.5f, 0.9f)});
             }
     } else {
-        // flying: bank to turn, Space to climb, Shift to dive, and it levels itself off when you let go
-        roll = lerpf(roll, in.steer * 0.75f, 1 - expf(-dt * 2.5f));
-        if (climb) pitch += 0.6f * dt;
-        else if (dive) pitch -= 0.6f * dt;
-        else pitch = lerpf(pitch, 0.f, 1 - expf(-dt * 0.6f));
-        if (speed < STALL_SPEED) pitch -= (STALL_SPEED - speed) * 0.08f * dt;   // too slow: the nose drops
-        pitch = clampf(pitch, -0.7f, 0.55f);
-        if (pos.y > CEILING) pitch = std::min(pitch, 0.f);
-        yaw = wrapPi(yaw + sinf(roll) * 9.8f / std::max(speed, 15.f) * 1.3f * dt);
-        Vector3 f = fwd3(yaw, pitch);
-        pos = Vector3Add(pos, Vector3Scale(f, speed * dt));
-        if (speed < STALL_SPEED) pos.y -= (STALL_SPEED - speed) * 0.4f * dt;
+        // flying, in any attitude. Space pitches the nose up and Shift down, A D roll, all about the plane's own axes, so
+        // holding one keeps going round: a loop, a barrel roll. Banking turns it (the lift tilts with the wings), and
+        // it only levels itself off gently, after the stick has been let go for a second.
+        const Vector3 UP = {0, 1, 0};
+        float pin = (climb ? 1.f : 0.f) - (dive ? 1.f : 0.f), rin = fabsf(in.steer) > 0.05f ? in.steer : 0.f;
+        stickIdle = (pin != 0 || rin != 0) ? 0.f : stickIdle + dt;
+        float auth = clampf(speed / 22.f, 0.3f, 1.f);                       // slow: the controls go soft
+        float dPitch = pin * PITCH_RATE * auth * dt, dRoll = rin * ROLL_RATE * auth * dt;
+        q = QuaternionMultiply(q, QuaternionMultiply(QuaternionFromAxisAngle({1, 0, 0}, dRoll), QuaternionFromAxisAngle({0, 0, 1}, dPitch)));
+        auto turnWorld = [&](Quaternion r) { q = QuaternionMultiply(r, q); dir = Vector3RotateByQuaternion(dir, r); };
+        // banking: the lift's sideways part swings the heading round (upside down, "up" pulls toward the ground)
+        Vector3 f = nose(), u = up();
+        float hl = sqrtf(f.x * f.x + f.z * f.z), hdg = hl > 0.25f ? atan2f(f.z, f.x) : yaw;
+        float side = clampf(u.x * -sinf(hdg) + u.z * cosf(hdg), -1.f, 1.f);
+        turnWorld(QuaternionFromAxisAngle(UP, -side * 9.8f / std::max(speed, 15.f) * 1.3f * dt));
+        // the gentle return to wings-level and upright: proportional to how far the plane's up is from the sky's, so it
+        // fades toward upside down (no tug-of-war with a held inverted flight) and only starts once the stick is idle
+        if (stickIdle > LEVEL_DELAY) {
+            Vector3 ax = Vector3CrossProduct(up(), UP);
+            float m = Vector3Length(ax);
+            if (m > 1e-4f) q = QuaternionMultiply(QuaternionFromAxisAngle(Vector3Scale(ax, 1.f / m), m * LEVEL_RATE * smooth01(LEVEL_DELAY, LEVEL_DELAY + 0.8f, stickIdle) * dt), q);
+        }
+        // nose falls toward the ground: a stall at any attitude, and the ceiling
+        auto noseDown = [&](float rate) {
+            Vector3 fw = nose(), ax = Vector3CrossProduct(fw, {0, -1, 0});
+            float m = Vector3Length(ax);
+            if (m > 0.05f) q = QuaternionMultiply(QuaternionFromAxisAngle(Vector3Scale(ax, 1.f / m), rate * std::max(m, 0.35f) * dt), q);
+            else if (fw.y > 0) q = QuaternionMultiply(q, QuaternionFromAxisAngle({0, 0, 1}, -rate * 0.35f * dt));   // straight up: tip over
+        };
+        if (speed < STALL_SPEED) noseDown((STALL_SPEED - speed) * 0.09f);
+        if (pos.y > CEILING) noseDown(1.0f);
+        q = QuaternionNormalize(q);
+        // the flight path follows the nose with some lag
+        f = nose();
+        dir = Vector3Normalize(Vector3Add(dir, Vector3Scale(Vector3Subtract(f, dir), 1 - expf(-dt * ALIGN * clampf(speed / STALL_SPEED, 0.4f, 1.f)))));
+        if (pos.y > CEILING && dir.y > 0) dir = Vector3Normalize({dir.x, 0, dir.z});
+        // the wings carry the weight: fully upright above stall speed, 70% upside down, little when slow
+        float sup = std::min(1.f, sq(speed / STALL_SPEED)) * (0.85f + 0.15f * upY());
+        sagY += (-(1.f - sup) * 9.8f - sagY * 0.8f) * dt;
+        pos = Vector3Add(pos, Vector3Scale(Vector3Add(Vector3Scale(dir, speed), {0, sagY, 0}), dt));
         // the edge of the map turns you round
         if (pos.x < WX0 + 150 || pos.x > WX1 - 150 || pos.z < WZ0 + 150 || pos.z > WZ1 - 150) {
             float toC = atan2f((WZ0 + WZ1) * 0.5f - pos.z, (WX0 + WX1) * 0.5f - pos.x);
-            yaw = lerpAngle(yaw, toC, 1 - expf(-dt * 0.8f));
+            Vector3 fw = nose();
+            if (fw.x * fw.x + fw.z * fw.z > 0.06f)
+                turnWorld(QuaternionFromAxisAngle(UP, -wrapPi(toC - atan2f(fw.z, fw.x)) * (1 - expf(-dt * 0.8f))));
             pos.x = clampf(pos.x, WX0 + 100, WX1 - 100);
             pos.z = clampf(pos.z, WZ0 + 100, WZ1 - 100);
         }
+        q = QuaternionNormalize(q);
+        // heading, elevation and bank, for the camera, HUD and landing rules
+        {
+            Vector3 fw = nose(), rt = Vector3RotateByQuaternion({0, 0, 1}, q), uu = up();
+            if (fw.x * fw.x + fw.z * fw.z > 4e-4f) yaw = atan2f(fw.z, fw.x);
+            pitch = asinf(clampf(fw.y, -1.f, 1.f));
+            roll = atan2f(-rt.y, uu.y);
+            eY = yaw; eP = pitch; eR = roll;
+        }
         float g = w.terrain(pos.x, pos.z);
         bool water = g < 0.15f;
-        if (water && pos.y <= 0.3f) {
-            if (pitch > -0.3f && fabsf(roll) < 0.5f && speed < 48.f) {   // a landing
+        int hit = sweepPlane(w, pos0, q0, pos, q);
+        if (hit & (HIT_AERIAL | HIT_LAND | HIT_SOLID)) evCrash = true;                     // cables, towers, the ground, buildings: any part of the plane
+        else if ((!water && pos.y < g + 0.8) || w.solidAt({pos.x, pos.y + 1.6f, pos.z})) evCrash = true;
+        else if (hit & HIT_WATER) {
+            float vy = dir.y * speed + sagY;
+            if (water && pitch > -0.3f && fabsf(roll) < 0.5f && speed < 48.f && vy > -14.f) {   // a landing: upright, level, gentle
                 onWater = true; pos.y = 0; pitch = 0; roll = 0; speed *= 0.75f; evSplash = true;
-            } else evCrash = true;
-        } else if ((!water && pos.y < g + 0.8f) || w.solidAt({pos.x, pos.y + 1.6f, pos.z}) ||
-                   planeHitsAerial(w, pos0, yaw0, pitch0, roll0, pos, yaw, pitch, roll)) evCrash = true;   // cables, masts, towers: the whole plane
+                if (!p.combo.empty()) { p.landNote = ""; p.bankCombo(); evBanked = true; }
+            } else evCrash = true;     // upside down, steeply banked or diving, or a wing in the sea
+        }
+        if (!onWater && !evCrash) stunts(dt, pin, rin, dPitch, dRoll, p, w);
     }
     for (auto& s : spray) { s.life -= dt; s.vel.y -= 9.f * dt; s.pos = Vector3Add(s.pos, Vector3Scale(s.vel, dt)); }
     spray.erase(std::remove_if(spray.begin(), spray.end(), [](const Spray& s) { return s.life <= 0 || s.pos.y < 0; }), spray.end());
@@ -228,14 +321,55 @@ void Seaplanes::update(float dt, const Input& in, bool climb, bool dive, Player&
     p.safeT = 0;
 }
 
+// Progress of the stunts while airborne, scored like the skater's tricks (chained into the combo, banked on touchdown or
+// once nothing new has happened for a while; a crash loses them). A loop is the nose pitched through 360 degrees with the
+// plane going upside down on the way, a barrel roll the same about the roll axis, inverted flight is held upside down
+// for INVERT_SECS (then it keeps earning). Low passes (under 30 m) score half again.
+void Seaplanes::stunts(float dt, float pin, float rin, float dPitch, float dRoll, Player& p, const World& w) {
+    float uy = upY();
+    bool low = altitude(w) < 30.f;
+    auto track = [&](float& acc, float& idle, bool& seen, float d, float input, const char* name, float pts, int& count) {
+        if (input != 0) {
+            idle = 0;
+            if (acc * d < 0) { acc = 0; seen = false; }     // reversed: start over
+            acc += d;
+        } else if ((idle += dt) > STUNT_IDLE) { acc = 0; seen = false; }
+        if (uy < -0.3f) seen = true;
+        if (fabsf(acc) >= TAU_F && seen) {
+            acc -= copysignf(TAU_F, acc);
+            seen = false;
+            count++;
+            sinceStunt = 0;
+            std::string n = low ? std::string("Low ") + name : name;
+            p.addTrick(n, low ? pts * 1.5f : pts);
+            p.say(n + "!", {255, 205, 60, 255}, "x" + std::to_string(p.combo.size()) + " combo - land it to bank");
+        }
+    };
+    track(pitchAcc, pitchIdle, seenInvP, dPitch, pin, "Loop", 600, loops);
+    track(rollAcc, rollIdle, seenInvR, dRoll, rin, "Barrel Roll", 500, rolls);
+    if (uy < -0.4f) {
+        invT += dt;
+        if (invT >= INVERT_SECS) {
+            if (!invScored) {
+                invScored = true; inverts++; sinceStunt = 0;
+                p.addTrick(low ? "Low Inverted" : "Inverted", low ? 450.f : 300.f);
+                p.say("Inverted!", {255, 205, 60, 255}, "x" + std::to_string(p.combo.size()) + " combo - keep it up");
+            } else p.comboPts += (low ? 180.f : 120.f) * dt;
+        }
+    } else if (uy > 0.2f) { invT = 0; invScored = false; }
+    bool busy = fabsf(pitchAcc) > 0.5f || fabsf(rollAcc) > 0.5f || invT > 0;
+    if (p.combo.empty() || busy) sinceStunt = 0;
+    else if ((sinceStunt += dt) > BANK_AFTER) { p.landNote = "stunts banked"; p.bankCombo(); evBanked = true; sinceStunt = 0; }
+}
+
 // A floatplane: high wing on struts, two floats, a radial nose and a spinning prop. pos is the water line.
-static void drawPlane(Vector3 pos, float yaw, float pitch, float roll, float prop, Color body, bool people, int seed) {
+static void drawPlane(Vector3 pos, Quaternion att, float prop, Color body, bool people, int seed) {
     Color wht = {238, 238, 234, 255}, dark = {40, 42, 48, 255}, glass = {120, 160, 190, 255}, strut = {150, 152, 158, 255};
     rlPushMatrix();
     rlTranslatef(pos.x, pos.y, pos.z);
-    rlRotatef(-yaw * RAD2DEG, 0, 1, 0);
-    rlRotatef(pitch * RAD2DEG, 0, 0, 1);
-    rlRotatef(roll * RAD2DEG, 1, 0, 0);    // positive roll: right wing down, for a right turn
+    Vector3 ax; float an;
+    QuaternionToAxisAngle(att, &ax, &an);
+    rlRotatef(an * RAD2DEG, ax.x, ax.y, ax.z);    // yaw about Y, then pitch about z, then roll about x (positive: right wing down), or any attitude
     for (int s = -1; s <= 1; s += 2) {
         DrawCube({0, 0.35f, s * 1.4f}, 5.4f, 0.5f, 0.55f, wht);                     // float
         rlPushMatrix();
@@ -278,10 +412,10 @@ static void drawPlane(Vector3 pos, float yaw, float pitch, float roll, float pro
 void Seaplanes::draw(float now, const Vector3& cam) const {
     for (size_t i = 0; i < moored.size(); i++) {
         bool me = riding && (int)i == cur;
-        if (me) { drawPlane(pos, yaw, pitch, roll, prop, moored[i].body, true, (int)i); continue; }
+        if (me) { drawPlane(pos, onWater ? poseQuat(yaw, pitch, roll) : q, prop, moored[i].body, true, (int)i); continue; }
         if (Vector3Distance(moored[i].pos, cam) > 900) continue;
         float bob = 0.05f * sinf(now * 1.7f + i);
-        drawPlane({moored[i].pos.x, bob, moored[i].pos.z}, moored[i].yaw, 0, 0.015f * sinf(now * 1.3f + i), 0.3f, moored[i].body, false, (int)i);
+        drawPlane({moored[i].pos.x, bob, moored[i].pos.z}, poseQuat(moored[i].yaw, 0, 0.015f * sinf(now * 1.3f + i)), 0.3f, moored[i].body, false, (int)i);
     }
     for (int k = 0; k < 2; k++) {   // sightseeing flights going round and round
         const Loop& L = LOOPS[k];
@@ -289,7 +423,7 @@ void Seaplanes::draw(float now, const Vector3& cam) const {
         Vector3 p = {L.cx + cosf(a) * L.r, L.h + 12 * sinf(now * 0.3f + k), L.cz + sinf(a) * L.r};
         float yaw = a + (L.w > 0 ? PI / 2 : -PI / 2);
         float bank = (L.w > 0 ? 1.f : -1.f) * 0.32f;
-        drawPlane(p, yaw, 0.02f, bank, now * 50.f, L.body, true, 7 + k);
+        drawPlane(p, poseQuat(yaw, 0.02f, bank), now * 50.f, L.body, true, 7 + k);
     }
 }
 

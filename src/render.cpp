@@ -105,6 +105,9 @@ float vnoise(vec2 p) {
     float a = h21(i), b = h21(i + vec2(1, 0)), c = h21(i + vec2(0, 1)), d = h21(i + vec2(1, 1));
     return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
 }
+// How far up or down the beach the water's edge has run, as a height: -0.32 (drawn back) to +0.08. The sea mesh uses it to
+// let the water thin out to nothing at that height, and the ground uses it to lay the foam along the same line
+float washLevel(vec2 p) { return -0.12 + 0.2 * sin(time * 0.8 + vnoise(p * 0.04) * 9.0); }
 
 // ---- the far cascade (Medium and High): 2.9 km wide, one hardware-filtered tap. The far pass has only face normals
 // from derivatives, so it leans on a big normal offset rather than a depth bias.
@@ -343,7 +346,7 @@ void main() {
                 specK *= detail;
             }
         }
-    } else if (m == 3) {                 // water: see-through in the shallows, a mirror for the sky at a low angle
+    } else if (m == 3 || m == 11) {      // water (11: the bay, with the seabed depth in vCol.r): see-through in the shallows, a mirror for the sky at a low angle
         vec2 p = wPos.xz;
         float t = time;
         float fw = length(fwidth(p));   // metres per pixel: drop the waves too small to show, instead of letting them sparkle
@@ -375,6 +378,7 @@ void main() {
         vec3 R = reflect(-V, N);
         R.y = abs(R.y);
         vec3 env = mix(fogColor(V), skyCol, smoothstep(0.02, 0.45, R.y));   // the sky, hazy at the horizon
+        if (m == 11) base = vec3(30.0, 78.0, 98.0) / 255.0;
         vec3 deep = base * 0.62 * (ambCol * 1.2 + sunCol * 0.35);
         vec3 col = mix(deep, env, clamp(fres, 0.0, 0.9));
 #if FAR
@@ -407,6 +411,10 @@ void main() {
         // how much you see through: most looking straight down in the shallows, a mirror at a low angle, opaque far off
         float a = mix(0.42 + 0.58 * fres, 1.0, smoothstep(220.0, 650.0, dist));
         a = max(a, cap * 0.9);
+        if (m == 11) {   // thins out to nothing where the water meets the sand, along the line the wash has reached
+            float depth = vCol.r * 10.0 - 4.0;   // the seabed's depth: the range World::buildTerrainMesh packs (SEA_D0..SEA_D1)
+            a *= smoothstep(0.0, 0.7, depth + washLevel(p));
+        }
         finalColor = vec4(mix(col, fogColor(V), f) * outScale, a);
         return;
     } else if (m == 4) {                 // lights
@@ -496,9 +504,11 @@ void main() {
         float c1 = vnoise(p * 0.7 + vec2(time * 0.35, time * 0.2)), c2 = vnoise(p * 0.9 - vec2(time * 0.25, -time * 0.3) + 7.0);
         float caustic = pow(1.0 - abs(c1 - c2), 10.0);
         col += sunCol * caustic * 0.45 * smoothstep(0.05, 0.4, depth) * exp(-depth * 0.55) * sh * fade;
-        float surge = -0.12 + 0.2 * sin(time * 0.8 + vnoise(p * 0.04) * 9.0);   // the edge of the water running up and back
+        float surge = washLevel(p);   // the edge of the water running up and back
         float lace = smoothstep(0.35, 0.65, vnoise(p * 1.3 + vec2(time * 0.3, 0.0)));
-        float foam = (1.0 - smoothstep(0.0, 0.08 + 0.12 * lace, abs(wPos.y - surge))) * (0.55 + 0.45 * lace) * clamp(1.0 - dist / 900.0, 0.0, 1.0);
+        // foam along the leading edge and trailing back into the water, thinning out with depth; none on the dry sand
+        float e = wPos.y - surge;
+        float foam = (1.0 - smoothstep(0.0, 0.1, e)) * smoothstep(-0.55 - 0.15 * lace, -0.03, e) * (0.5 + 0.5 * lace) * clamp(1.0 - dist / 900.0, 0.0, 1.0);
         if (wPos.y > surge && wPos.y < surge + 0.35) col *= 0.82;             // wet sand the wash just left
         col = mix(col, vec3(0.92, 0.95, 0.95) * light, foam * 0.8);
         vec3 deepLit = vec3(0.075, 0.2, 0.21) * (ambCol * 1.2 + sunCol * 0.35);

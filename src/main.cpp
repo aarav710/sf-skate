@@ -2,6 +2,7 @@
 #include "common.h"
 #include "world.h"
 #include "player.h"
+#include "skybasis.h"
 #include "traffic.h"
 #include "audio.h"
 #include "models.h"
@@ -1032,7 +1033,8 @@ int main() {
             if (lampK > 0.01f && !title) {
                 // the frustum's side planes, in camera space (x right, y up, z forward): a sphere is outside when
                 // its center lies further than its radius beyond one of them
-                Vector3 rt = Vector3Normalize(Vector3CrossProduct(camFwd, cam.up)), up = Vector3CrossProduct(rt, camFwd);
+                Vector3 rt, up;
+                skyBasis(camFwd, cam.up, rt, up);
                 float th = tanf(cam.fovy * 0.5f * DEG2RAD), tw = th * (float)GetScreenWidth() / std::max(GetScreenHeight(), 1);
                 float cy = 1.f / sqrtf(1.f + th * th), sy = th * cy, cx = 1.f / sqrtf(1.f + tw * tw), sx = tw * cx;
                 for (int i = 0; i < (int)W.lamps.size(); i++) {
@@ -1143,8 +1145,7 @@ int main() {
             float fogK = clampf((fogDen - 0.00011f) / (0.0022f - 0.00011f), 0, 1);
             SkyLook sl;
             sl.fwd = camFwd;
-            sl.right = Vector3Normalize(Vector3CrossProduct(camFwd, {0, 1, 0}));
-            sl.up = Vector3CrossProduct(sl.right, camFwd);
+            skyBasis(camFwd, cam.up, sl.right, sl.up);   // from the rolled cam.up, so the sky turns with the world
             sl.tanHalf = tanf(cam.fovy * 0.5f * DEG2RAD);
             sl.aspect = (float)sw / sh2;
             sl.sunDir = sky.sunDir;
